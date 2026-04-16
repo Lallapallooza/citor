@@ -1,0 +1,38 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: mixed-line-ending
+      - id: check-merge-conflict
+
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v22.1.3
+    hooks:
+      - id: clang-format
+        types_or: [c++, c]
+        exclude: ^single_include/
+
+  - repo: https://github.com/BlankSpruce/gersemi
+    rev: 0.27.0
+    hooks:
+      - id: gersemi
+
+  - repo: https://github.com/commitizen-tools/commitizen
+    rev: v4.13.10
+    hooks:
+      - id: commitizen
+        stages: [commit-msg]
+
+  - repo: local
+    hooks:
+      - id: amalgamate-check
+        name: amalgamate-check
+        entry: python3 tools/amalgamate.py --check
+        language: system
+        files: ^(include/citor/.*\.h|tools/amalgamate\.py|single_include/citor\.hpp)$
+        pass_filenames: false
