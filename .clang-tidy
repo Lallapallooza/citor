@@ -1,0 +1,34 @@
+---
+# Only lint our own headers (not CPM-fetched deps).
+HeaderFilterRegex: 'include/citor/.*\.h$'
+
+Checks: >
+  bugprone-*,
+  performance-*,
+  modernize-*,
+  readability-*,
+  portability-*,
+  misc-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-reserved-identifier,
+  -bugprone-unchecked-optional-access,
+  -modernize-use-trailing-return-type,
+  -modernize-use-nodiscard,
+  -modernize-use-ranges,
+  -modernize-loop-convert,
+  -readability-use-anyofallof,
+  -readability-identifier-naming,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -readability-function-cognitive-complexity,
+  -readability-named-parameter,
+  -readability-uppercase-literal-suffix,
+  -portability-avoid-pragma-once,
+  -portability-simd-intrinsics,
+  -misc-non-private-member-variables-in-classes,
+  -misc-no-recursion,
+  -misc-include-cleaner
+
+WarningsAsErrors: '*'
+
+FormatStyle: file
