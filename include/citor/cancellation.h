@@ -1,0 +1,148 @@
+#pragma once
+
+#include <atomic>
+#include <cstdint>
+#include <exception>
+#include <memory>
+#include <utility>
+
+#if defined(__x86_64__) || defined(_M_X64)
+#include <x86intrin.h>
+#endif
+
+namespace citor {
+
+/// Cooperative cancellation handle shared by the producer and pool workers.
+///
+/// `CancellationToken` wraps a heap-allocated atomic state word managed by `std::shared_ptr`, so
+/// copies share the same cancellation signal. Workers poll `stop_requested()` at chunk
+/// boundaries; the producer or any other party may call `request_stop()` to signal cooperative
+/// cancellation. The state word is published via release / observed via acquire so any writes the
+/// stopper performed before signalling are visible to a worker that observes the stop flag.
+///
+/// The default-constructed token shares a single allocated state word (created lazily in the
+/// default constructor) so `stop_requested()` is well-defined on every code path. Constructing a
+/// token is a one-time heap allocation; copy / move / dtor are pointer-arithmetic only and do not
+/// allocate. `stop_requested()` and `request_stop()` are `noexcept` and allocation-free.
+class CancellationToken {
+public:
+  /// Construct a fresh, non-stopped token.
+  ///
+  /// Allocates a single 32-bit atomic on the heap to back the shared state. The allocation
+  /// happens here, not in `stop_requested` / `request_stop`, so the polling primitives are
+  /// allocation-free.
+  CancellationToken() : m_state(std::make_shared<std::atomic<std::uint32_t>>(0U)) {}
+
+  /// Test whether `request_stop()` has been called on any copy of this token.
+  ///
+  /// `true` if any holder has signalled cancellation; `false` otherwise.
+  [[nodiscard]] bool stop_requested() const noexcept {
+    return m_state->load(std::memory_order_acquire) != 0U;
+  }
+
+  /// Signal cancellation to every holder of this token.
+  ///
+  /// The release-store synchronizes with `stop_requested`'s acquire-load: any data the caller
+  /// wrote before invoking `request_stop` is visible to a worker that observes the stop flag.
+  ///
+  /// `true` if this call transitioned the token from non-stopped to stopped; `false` if
+  ///         the token was already stopped (a previous `request_stop` won the race).
+  bool request_stop() noexcept {
+    std::uint32_t expected = 0U;
+    return m_state->compare_exchange_strong(expected, 1U, std::memory_order_release,
+                                            std::memory_order_relaxed);
+  }
+
+private:
+  /// Shared atomic state; bit 0 is the stop flag. Higher bits reserved for future use.
+  std::shared_ptr<std::atomic<std::uint32_t>> m_state;
+};
+
+/// Wall-clock deadline expressed as a TSC-cycle threshold.
+///
+/// `Deadline` stores an absolute `__rdtsc` reading at which the deadline expires. `expired()`
+/// compares the current TSC against the threshold. The reading is taken once at construction and
+/// never refreshed; the only call sites are inside hot worker bodies where a syscall-based
+/// `clock_gettime` would dominate the budget.
+///
+/// A default-constructed deadline never expires (threshold is `UINT64_MAX`). `Deadline::expired`
+/// is `noexcept` and allocation-free.
+class Deadline {
+public:
+  /// Construct a deadline that never expires.
+  ///
+  /// Used by call sites that do not propagate a deadline. The threshold is set to the maximum
+  /// representable cycle count so `expired()` always returns `false`.
+  constexpr Deadline() noexcept = default;
+
+  /// Construct a deadline at an absolute TSC threshold.
+  ///
+  /// The caller provides a precomputed `__rdtsc()` value; the deadline expires when the live TSC
+  /// reaches or passes the threshold. The interface is low-level so callers can reuse a single
+  /// `__rdtsc` reading taken at job-publish time across many primitives.
+  ///
+  /// tscThreshold Absolute TSC cycle count at which the deadline expires.
+  constexpr explicit Deadline(std::uint64_t tscThreshold) noexcept : m_tscThreshold(tscThreshold) {}
+
+  /// Check whether the live TSC has reached the deadline's threshold.
+  ///
+  /// `true` if the deadline is in the past; `false` otherwise. Returns `false` for the
+  ///         default-constructed never-expires sentinel.
+  [[nodiscard]] bool expired() const noexcept {
+#if defined(__x86_64__) || defined(_M_X64)
+    return __rdtsc() >= m_tscThreshold;
+#else
+    return false;
+#endif
+  }
+
+  /// Access the absolute TSC threshold this deadline was constructed with.
+  /// The threshold value passed to the constructor.
+  [[nodiscard]] constexpr std::uint64_t threshold() const noexcept { return m_tscThreshold; }
+
+private:
+  /// Absolute TSC cycle count at which the deadline expires; never-expires sentinel by default.
+  std::uint64_t m_tscThreshold = UINT64_MAX;
+};
+
+/// Thrown from a void-returning primitive whose token / deadline cancelled mid-flight.
+///
+/// The producer rethrows this on the join path so callers can distinguish cancellation from a
+/// worker exception. Inherits `std::exception` rather than `std::runtime_error` to keep the type
+/// lightweight and free of heap allocation in the constructor.
+class cancelled_exception : public std::exception {
+public:
+  /// Return the diagnostic string identifying the exception kind.
+  /// A non-null, statically-stored C-string.
+  [[nodiscard]] const char *what() const noexcept override {
+    return "citor: cancelled";
+  }
+};
+
+/// Thrown from a value-producing primitive whose join was cancelled mid-flight.
+///
+/// Carries a `partial_value` field that holds the deterministic combine of all completed chunks
+/// up to the cancellation. For `Determinism::FixedBlockOrder`, the partial result is well-defined
+/// (combine of completed chunks `[0, completed)` in chunk-id order). For `OrderTolerant`, the
+/// partial value is order-tolerant and reflects whatever workers happened to commit.
+///
+/// T The value type the cancelled primitive was producing.
+template <class T> class cancelled_value_exception : public std::exception {
+public:
+  /// Construct with a deterministic-combine partial result.
+  ///
+  /// partial The combine-of-completed-chunks partial value at the moment of cancellation.
+  explicit cancelled_value_exception(T partial) noexcept(std::is_nothrow_move_constructible_v<T>)
+      : partial_value(std::move(partial)) {}
+
+  /// Return the diagnostic string identifying the exception kind.
+  /// A non-null, statically-stored C-string.
+  [[nodiscard]] const char *what() const noexcept override {
+    return "citor: cancelled with partial value";
+  }
+
+  /// Combined partial result of all chunks that completed before cancellation observed.
+  T partial_value;
+};
+
+} // namespace citor
