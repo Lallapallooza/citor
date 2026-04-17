@@ -1,0 +1,76 @@
+#pragma once
+
+#include <atomic>
+#include <cstdint>
+
+#include "citor/hints.h"
+
+namespace citor::detail {
+
+/// Process-internal control word shared between producer and workers.
+///
+/// Three contended atomics (`generation`, `futexWord`, `activeJob`) plus a const `participants`
+/// count form the source of truth for pool state. Each contended atomic is on its own
+/// `kCacheLine`-sized line so MESI traffic on one never invalidates another. The layout places
+/// `generation` (release publish), `futexWord` (parking token), `activeJob` (descriptor pointer),
+/// and `participants` on four dedicated 128-byte lines.
+///
+/// The 64-bit `generation` carries both flags and a monotonic phase counter. Bits 0 (shutdown) and
+/// 1 (cancel) are reserved; the producer increments by 4 per published job so the high 62 bits act
+/// as the ABA-free phase counter. A 32-bit phase would be at risk of wrapping under sustained
+/// dispatch; 64 bits is overkill but free given the cache-line padding.
+///
+/// The `futexWord` is parking-only: workers re-check `generation` after every wait return, so
+/// spurious or duplicated wakes are correctness-neutral. Updates use `relaxed` atomics; the
+/// happens-before chain runs through `generation` (release) instead.
+///
+/// `activeJob` is published with `release`; observed with `acquire`. The slot is `nullptr` until
+/// a primitive publishes a `JobDescriptor`; the engine itself never writes here.
+struct PoolControl {
+  /// Bit flag in `generation` indicating the pool has been told to shut down.
+  ///
+  /// Set once by the destructor's `fetch_or`; never cleared. Workers observing this exit the loop.
+  static constexpr std::uint64_t kShutdownBit = 1ULL << 0;
+
+  /// Bit flag in `generation` reserved for global cancellation broadcasts.
+  ///
+  /// Reserved for pool-wide cancellation; the bit lives here so the `generation` layout is stable
+  /// once the cancellation path lands without needing to shuffle the flag-bit assignments.
+  static constexpr std::uint64_t kCancelBit = 1ULL << 1;
+
+  /// Number of low bits reserved for flags; producer increments `generation` by `1 << kPhaseShift`.
+  static constexpr std::uint64_t kPhaseShift = 2;
+
+  /// Increment applied per published phase so flags survive the bump.
+  static constexpr std::uint64_t kPhaseStep = 1ULL << kPhaseShift;
+
+  /// Source-of-truth phase counter.
+  ///
+  /// Bit 0 = shutdown, bit 1 = cancel-broadcast, bits 2..63 = monotonic phase. Producer publishes
+  /// a new phase via `release`; workers read with `acquire`. Together with `activeJob` this is the
+  /// acquire/release pair that orders descriptor visibility.
+  alignas(kCacheLine) std::atomic<std::uint64_t> generation{0};
+
+  /// 32-bit parking token used as the futex address.
+  ///
+  /// Updates are relaxed: the futex word identifies the wait queue and gates re-entry into the
+  /// kernel; happens-before runs through `generation`'s release/acquire pair instead. ABA-safe by
+  /// construction because callers re-read `generation` after a wake before assuming a new job
+  /// landed.
+  alignas(kCacheLine) std::atomic<std::uint32_t> futexWord{0};
+
+  /// Descriptor pointer published alongside each new generation.
+  ///
+  /// The slot is `nullptr` until a primitive publishes a `JobDescriptor` via `release`; workers
+  /// consume the descriptor via `acquire`. While the slot is `nullptr` the worker loop treats
+  /// every observed generation change as a no-op.
+  alignas(kCacheLine) std::atomic<void *> activeJob{nullptr};
+
+  /// Number of participants the pool was constructed with (producer + background workers).
+  ///
+  /// Read by every worker but never modified after construction; placed on its own line so reads
+  /// never share a cache line with the contended atomics above.
+  alignas(kCacheLine) std::uint32_t participants = 0;
+};
+
+} // namespace citor::detail
