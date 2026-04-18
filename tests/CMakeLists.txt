@@ -2,6 +2,7 @@ include(${PROJECT_SOURCE_DIR}/cmake/GTestDep.cmake)
 include(GoogleTest)
 
 set(_citor_tests
+    parallel_for_test
     thread_pool_lifecycle_test
     value_types_test
 )
