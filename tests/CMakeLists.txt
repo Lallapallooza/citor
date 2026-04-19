@@ -3,6 +3,7 @@ include(GoogleTest)
 
 set(_citor_tests
     parallel_for_test
+    parallel_for_tsan_test
     thread_pool_lifecycle_test
     value_types_test
 )
