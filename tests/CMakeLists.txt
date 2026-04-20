@@ -2,6 +2,7 @@ include(${PROJECT_SOURCE_DIR}/cmake/GTestDep.cmake)
 include(GoogleTest)
 
 set(_citor_tests
+    bulk_for_queries_test
     parallel_for_test
     parallel_for_tsan_test
     parallel_reduce_determinism_test
