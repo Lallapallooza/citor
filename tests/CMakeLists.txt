@@ -4,6 +4,7 @@ include(GoogleTest)
 set(_citor_tests
     parallel_for_test
     parallel_for_tsan_test
+    parallel_reduce_determinism_test
     parallel_reduce_test
     thread_pool_lifecycle_test
     value_types_test
