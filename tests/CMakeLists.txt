@@ -12,6 +12,7 @@ set(_citor_tests
     parallel_reduce_test
     parallel_scan_test
     run_plex_test
+    submit_detached_test
     thread_pool_lifecycle_test
     value_types_test
 )
