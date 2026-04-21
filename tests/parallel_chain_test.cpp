@@ -285,3 +285,221 @@ TEST(ParallelChain, ProducerSerialNonProducersSpinUntilSerialCompletes) {
 // Verify that ProducerSerial only gates the stage immediately following it; with a non-serial
 // barrier following, the next stage runs on every slot.
 TEST(ParallelChain, ProducerSerialOnlyAffectsNextStage) {
+  ThreadPool pool(4);
+  constexpr std::size_t kN = 32;
+  const std::size_t participants = pool.participants();
+
+  std::atomic<std::uint32_t> stage1Calls{0};
+  std::atomic<std::uint32_t> stage2Calls{0};
+
+  pool.parallelChain<ChainTestHints>(
+      kN,
+      // Stage 0: ProducerSerial -> stage 1 runs only on slot 0.
+      makeStage<BarrierKind::ProducerSerial>([&](std::size_t /*stageIdx*/, std::uint32_t /*slot*/,
+                                                 std::size_t /*lo*/,
+                                                 std::size_t /*hi*/) noexcept {}),
+      // Stage 1: serial body -- uses Global as its post-stage barrier so stage 2 fans back out.
+      makeStage<BarrierKind::Global>(
+          [&](std::size_t /*stageIdx*/, std::uint32_t /*slot*/, std::size_t /*lo*/,
+              std::size_t /*hi*/) { stage1Calls.fetch_add(1, std::memory_order_acq_rel); }),
+      // Stage 2: every slot.
+      staticStage("after-global", [&](std::size_t /*stageIdx*/, std::uint32_t /*slot*/,
+                                      std::size_t /*lo*/, std::size_t /*hi*/) {
+        stage2Calls.fetch_add(1, std::memory_order_acq_rel);
+      }));
+
+  EXPECT_EQ(stage1Calls.load(std::memory_order_acquire), 1U);
+  EXPECT_EQ(stage2Calls.load(std::memory_order_acquire), participants);
+}
+
+// Member-call and CPO-call must produce equivalent observable output.
+TEST(ParallelChain, MemberCpoEquivalence) {
+  ThreadPool pool(4);
+  constexpr std::size_t kN = 64;
+  const std::size_t participants = pool.participants();
+
+  std::vector<std::atomic<std::int64_t>> memberSums(participants);
+  std::vector<std::atomic<std::int64_t>> cpoSums(participants);
+  for (std::size_t i = 0; i < participants; ++i) {
+    memberSums[i].store(0, std::memory_order_relaxed);
+    cpoSums[i].store(0, std::memory_order_relaxed);
+  }
+
+  auto stage0Body = [](std::vector<std::atomic<std::int64_t>> &sums) {
+    return [&sums](std::size_t /*stageIdx*/, std::uint32_t slot, std::size_t lo, std::size_t hi) {
+      sums[slot].fetch_add(static_cast<std::int64_t>(hi - lo), std::memory_order_acq_rel);
+    };
+  };
+  auto stage1Body = [](std::vector<std::atomic<std::int64_t>> &sums) {
+    return [&sums](std::size_t /*stageIdx*/, std::uint32_t slot, std::size_t /*lo*/,
+                   std::size_t /*hi*/) {
+      sums[slot].fetch_add(static_cast<std::int64_t>(slot) + 1, std::memory_order_acq_rel);
+    };
+  };
+
+  // Member call.
+  pool.parallelChain<ChainTestHints>(kN, globalStage("m0", stage0Body(memberSums)),
+                                     staticStage("m1", stage1Body(memberSums)));
+
+  // CPO call.
+  citor::parallelChain.template operator()<ChainTestHints>(
+      pool, kN, globalStage("c0", stage0Body(cpoSums)), staticStage("c1", stage1Body(cpoSums)));
+
+  for (std::size_t s = 0; s < participants; ++s) {
+    EXPECT_EQ(memberSums[s].load(std::memory_order_acquire),
+              cpoSums[s].load(std::memory_order_acquire))
+        << "slot=" << s;
+  }
+}
+
+// Empty stage pack: parallelChain(n) is a no-op; no assertions other than "does not hang or
+// throw". Verified by a clean return.
+TEST(ParallelChain, EmptyStagesNoOp) {
+  ThreadPool pool(4);
+  constexpr std::size_t kN = 32;
+
+  // No stages.
+  pool.parallelChain<ChainTestHints>(kN);
+  // If we got here, the call returned cleanly.
+  SUCCEED();
+}
+
+// Cancellation: a stopped token aborts subsequent stages cleanly. We trigger the stop from inside
+// stage 1 (slot 0) and assert stage 2 never runs.
+TEST(ParallelChain, CancellationStopsChain) {
+  ThreadPool pool(4);
+  constexpr std::size_t kN = 32;
+
+  CancellationToken tok;
+  std::atomic<std::uint32_t> stage1Calls{0};
+  std::atomic<std::uint32_t> stage2Calls{0};
+
+  pool.parallelChainWithToken<ChainTestHints>(
+      kN, tok,
+      globalStage("stage0", [&](std::size_t /*stageIdx*/, std::uint32_t /*slot*/,
+                                std::size_t /*lo*/, std::size_t /*hi*/) noexcept {}),
+      // Stage 1 stops the token from slot 0.
+      globalStage("stage1",
+                  [&tok, &stage1Calls](std::size_t /*stageIdx*/, std::uint32_t slot,
+                                       std::size_t /*lo*/, std::size_t /*hi*/) {
+                    stage1Calls.fetch_add(1, std::memory_order_acq_rel);
+                    if (slot == 0U) {
+                      tok.request_stop();
+                    }
+                  }),
+      // Stage 2 should NOT run on any slot once the token was stopped at the prior boundary.
+      globalStage("stage2", [&stage2Calls](std::size_t /*stageIdx*/, std::uint32_t /*slot*/,
+                                           std::size_t /*lo*/, std::size_t /*hi*/) {
+        stage2Calls.fetch_add(1, std::memory_order_acq_rel);
+      }));
+
+  // Stage 1 ran on every slot before stop.
+  EXPECT_GE(stage1Calls.load(std::memory_order_acquire), 1U);
+  // Stage 2 did not run.
+  EXPECT_EQ(stage2Calls.load(std::memory_order_acquire), 0U);
+}
+
+// Exception in a stage propagates to the caller.
+TEST(ParallelChain, ExceptionPropagates) {
+  ThreadPool pool(4);
+  constexpr std::size_t kN = 32;
+
+  EXPECT_THROW(pool.parallelChain<ChainTestHints>(
+                   kN,
+                   globalStage("ok", [&](std::size_t /*stageIdx*/, std::uint32_t /*slot*/,
+                                         std::size_t /*lo*/, std::size_t /*hi*/) noexcept {}),
+                   globalStage("throws",
+                               [&](std::size_t /*stageIdx*/, std::uint32_t slot, std::size_t /*lo*/,
+                                   std::size_t /*hi*/) {
+                                 if (slot == 0U) {
+                                   throw std::runtime_error("chain stage fault");
+                                 }
+                               })),
+               std::runtime_error);
+}
+
+// Single-participant inline path: stages run on slot 0 only with the full range.
+TEST(ParallelChain, InlineFallbackForSingleParticipant) {
+  ThreadPool pool(1);
+  constexpr std::size_t kN = 16;
+
+  std::atomic<std::uint32_t> stageCalls{0};
+  std::atomic<std::size_t> observedHi{0};
+
+  pool.parallelChain<ChainTestHints>(
+      kN, staticStage("inline-only", [&](std::size_t /*stageIdx*/, std::uint32_t slot,
+                                         std::size_t lo, std::size_t hi) {
+        EXPECT_EQ(slot, 0U);
+        EXPECT_EQ(lo, 0U);
+        observedHi.store(hi, std::memory_order_release);
+        stageCalls.fetch_add(1, std::memory_order_acq_rel);
+      }));
+
+  EXPECT_EQ(stageCalls.load(std::memory_order_acquire), 1U);
+  EXPECT_EQ(observedHi.load(std::memory_order_acquire), kN);
+}
+
+// Slot range partition: union of every slot's [lo, hi) covers [0, n) exactly once per stage.
+TEST(ParallelChain, SlotRangesPartitionExactly) {
+  ThreadPool pool(4);
+  constexpr std::size_t kN = 100;
+  std::vector<std::atomic<std::uint32_t>> coverage(kN);
+  for (auto &c : coverage) {
+    c.store(0, std::memory_order_relaxed);
+  }
+
+  pool.parallelChain<ChainTestHints>(
+      kN, staticStage("cov", [&](std::size_t /*stageIdx*/, std::uint32_t /*slot*/, std::size_t lo,
+                                 std::size_t hi) {
+        for (std::size_t i = lo; i < hi; ++i) {
+          coverage[i].fetch_add(1, std::memory_order_acq_rel);
+        }
+      }));
+
+  for (std::size_t i = 0; i < kN; ++i) {
+    EXPECT_EQ(coverage[i].load(std::memory_order_acquire), 1U) << "i=" << i;
+  }
+}
+
+// `reduceStage` carries `BarrierKind::DeterministicReduce`; the chain treats it as a global
+// barrier in v1 (the deterministic reduction is the user's concern inside the stage body). Here
+// we just verify the helper compiles and the chain runs each stage exactly once across slots.
+TEST(ParallelChain, ReduceStageCompilesAndRuns) {
+  ThreadPool pool(4);
+  constexpr std::size_t kN = 32;
+  const std::size_t participants = pool.participants();
+
+  std::atomic<std::int64_t> totalCalls{0};
+
+  pool.parallelChain<ChainTestHints>(
+      kN,
+      reduceStage("reduce-then-global",
+                  [&](std::size_t /*stageIdx*/, std::uint32_t /*slot*/, std::size_t /*lo*/,
+                      std::size_t /*hi*/) { totalCalls.fetch_add(1, std::memory_order_acq_rel); }),
+      staticStage("after",
+                  [&](std::size_t /*stageIdx*/, std::uint32_t /*slot*/, std::size_t /*lo*/,
+                      std::size_t /*hi*/) { totalCalls.fetch_add(1, std::memory_order_acq_rel); }));
+
+  EXPECT_EQ(totalCalls.load(std::memory_order_acquire),
+            static_cast<std::int64_t>(2 * participants));
+}
+
+// Runtime sibling smoke test: parallelChainRuntime with default ChainHints runs the same engine.
+TEST(ParallelChain, RuntimeSiblingMatchesMember) {
+  ThreadPool pool(4);
+  constexpr std::size_t kN = 32;
+  const std::size_t participants = pool.participants();
+
+  std::atomic<std::int64_t> total{0};
+  const ChainHints rh;
+  pool.parallelChainRuntime(kN, rh, CancellationToken{},
+                            staticStage("rt", [&](std::size_t /*stageIdx*/, std::uint32_t /*slot*/,
+                                                  std::size_t lo, std::size_t hi) {
+                              total.fetch_add(static_cast<std::int64_t>(hi - lo),
+                                              std::memory_order_acq_rel);
+                            }));
+  EXPECT_EQ(total.load(std::memory_order_acquire), static_cast<std::int64_t>(kN));
+  (void)participants;
+}
+
+} // namespace
