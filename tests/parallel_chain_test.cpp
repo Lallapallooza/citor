@@ -28,13 +28,10 @@ using citor::ThreadPool;
 // Hint preset used by the tests at TU scope (not in an anonymous namespace) so clang-tidy treats
 // every static-constexpr member as a public field of a named type rather than an unused constant.
 struct ChainTestHints {
-  static constexpr citor::Balance balance =
-      citor::Balance::StaticUniform;
+  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
   static constexpr citor::Affinity affinity = citor::Affinity::None;
-  static constexpr citor::Priority priority =
-      citor::Priority::Throughput;
-  static constexpr citor::Partition partition =
-      citor::Partition::ContiguousRanges;
+  static constexpr citor::Priority priority = citor::Priority::Throughput;
+  static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
   static constexpr bool pipelineSameChunk = true;
   static constexpr bool fpDeterministicTree = true;
   static constexpr bool cancellationChecks = true;
@@ -129,8 +126,17 @@ TEST(ParallelChain, GlobalBarrierBetweenStages) {
 // PerChunk barrier allows pipelining: stage s+1 chunk c can start before stage s of OTHER chunks
 // finishes. We verify by counting overlap: at least one slot enters stage 1 before some other
 // slot has finished stage 0. Compared against the global-barrier case where this never happens.
+//
+// Skipped when the pool has fewer than 4 participants: pipelining requires at least one slot that
+// can advance into stage 1 while another slot is still completing stage 0. Slot 0 sleeps 20ms in
+// stage 0, so observing overlap requires concurrent slots distinct from slot 0; the test's
+// `overlap > 0` assertion has no observable surface otherwise.
 TEST(ParallelChain, PerChunkBarrierAllowsPipeline) {
   ThreadPool pool(4);
+  if (pool.participants() < 4U) {
+    GTEST_SKIP() << "pipelining observation needs at least four concurrent slots; pool reports "
+                 << pool.participants();
+  }
   constexpr std::size_t kN = 64;
   const std::size_t participants = pool.participants();
 

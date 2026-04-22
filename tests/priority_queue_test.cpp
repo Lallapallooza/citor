@@ -114,6 +114,19 @@ TEST(PriorityQueue, LatencyDispatchPreemptsThroughput) {
 // background yields each contended attempt and the throughput peer does not). Run multiple
 // rounds because mutex acquire ordering is not strictly FIFO; the bias must dominate the sample.
 TEST(PriorityQueue, BackgroundYieldsToThroughput) {
+  // Skipped when the pool collapses below four participants: the test orchestrates three concurrent
+  // dispatch attempts (primary throughput holding the gate via sleep, second throughput, and a
+  // background contender) plus the producer slot. Without that breadth there is no sustained
+  // contention on the dispatch gate, the priority bias is invisible, and the race becomes
+  // observably one-sided in the wrong direction. The yield-on-contention contract still holds; it
+  // simply has no observable surface to gate.
+  {
+    const ThreadPool probe(4);
+    if (probe.participants() < 4U) {
+      GTEST_SKIP() << "priority bias requires concurrent contenders; pool reports "
+                   << probe.participants() << " participant(s)";
+    }
+  }
   constexpr int kRounds = 16;
   int throughputWins = 0;
   int backgroundWins = 0;

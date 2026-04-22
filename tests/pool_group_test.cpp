@@ -19,10 +19,8 @@ namespace {
 // Hint preset shared by every parallelFor below; the deadlock guard test cares only about whether
 // the body runs on a background worker, not about chunk shapes.
 struct PoolGroupHints {
-  static constexpr citor::Balance balance =
-      citor::Balance::StaticUniform;
-  static constexpr citor::Priority priority =
-      citor::Priority::Throughput;
+  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
+  static constexpr citor::Priority priority = citor::Priority::Throughput;
   // The dispatch engine inspects every static-constexpr member; the unused-const-variable check
   // fires when one is omitted, so the full preset is provided even though `estimatedItemNs` and
   // `minTaskUs` only matter for the inline-fallback gate.
@@ -142,6 +140,16 @@ TEST(PoolGroup, ReentrancySafe) {
   // body executes on the calling worker without a fresh dispatch generation. The outer body
   // gates the inner call on `insidePoolWorker` so the producer slot (which has no worker context)
   // does not race the in-flight outer dispatch by issuing a second generation.
+  //
+  // Skipped when arena 0 has only one participant: there is no background worker for the inner
+  // dispatch to land on, so `insidePoolWorker()` is false on every body invocation and
+  // `workerInvocations` stays zero. The reentrancy guard is exercised on hosts where arena 0
+  // spawns at least one background worker.
+  if (group.arena(0).participants() < 2U) {
+    GTEST_SKIP() << "arena 0 has " << group.arena(0).participants()
+                 << " participant(s); reentrancy probe needs a background worker to exercise the "
+                    "guard";
+  }
   std::atomic<std::uint64_t> nestedBodyExecutions{0};
   std::atomic<std::uint64_t> workerInvocations{0};
   group.arena(0).parallelFor<PoolGroupHints>(

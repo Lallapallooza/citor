@@ -7,14 +7,14 @@
 #include <vector>
 
 #include "citor/cpos/parallel_for.h"
-#include "citor/hints.h"
 #include "citor/example_hints.h"
+#include "citor/hints.h"
 #include "citor/thread_pool.h"
 
 using citor::Balance;
+using citor::BulkBalancedHints;
 using citor::CancellationToken;
 using citor::Hints;
-using citor::BulkBalancedHints;
 using citor::ThreadPool;
 
 // Hint presets used by the tests. They live at TU scope (not in an anonymous namespace) so
@@ -23,8 +23,7 @@ using citor::ThreadPool;
 // fields the dispatch engine inspects are listed.
 struct StaticUniformTestHints {
   static constexpr Balance balance = Balance::StaticUniform;
-  static constexpr citor::Priority priority =
-      citor::Priority::Throughput;
+  static constexpr citor::Priority priority = citor::Priority::Throughput;
   static constexpr double estimatedItemNs = 0.0;
   static constexpr double minTaskUs = 0.0;
   static constexpr std::size_t chunk = 0;
@@ -32,8 +31,7 @@ struct StaticUniformTestHints {
 
 struct DynamicChunkedTestHints {
   static constexpr Balance balance = Balance::DynamicChunked;
-  static constexpr citor::Priority priority =
-      citor::Priority::Throughput;
+  static constexpr citor::Priority priority = citor::Priority::Throughput;
   static constexpr double estimatedItemNs = 0.0;
   static constexpr double minTaskUs = 0.0;
   static constexpr std::size_t chunk = 16;
@@ -41,8 +39,7 @@ struct DynamicChunkedTestHints {
 
 struct InlineFallbackHints {
   static constexpr Balance balance = Balance::StaticUniform;
-  static constexpr citor::Priority priority =
-      citor::Priority::Throughput;
+  static constexpr citor::Priority priority = citor::Priority::Throughput;
   /// One ns per item; the gate is `n * 1ns < minTaskUs * participants`. With `minTaskUs = 1000`
   /// the producer runs inline for any `n < 1000 * participants`.
   static constexpr double estimatedItemNs = 1.0;
@@ -113,8 +110,15 @@ TEST(ParallelFor, FunctionRefLifetime) {
 }
 
 // Cancellation at chunk boundaries: a token stopped mid-flight aborts subsequent chunks.
+//
+// Skipped on single-participant pools: the inline-fallback path runs the body once over the full
+// range, leaving the chunk-boundary cancellation contract no observable surface to exercise.
 TEST(ParallelFor, CancellationAtChunkBoundary) {
   ThreadPool pool(4);
+  if (pool.participants() < 2U) {
+    GTEST_SKIP() << "single-participant pool collapses to inline path; cancellation at chunk "
+                    "boundary has no observable surface";
+  }
   constexpr std::size_t kN = 4096;
   CancellationToken tok;
   std::atomic<std::size_t> processed{0};

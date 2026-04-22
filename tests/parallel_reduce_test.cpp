@@ -9,16 +9,16 @@
 
 #include "citor/cancellation.h"
 #include "citor/cpos/parallel_reduce.h"
-#include "citor/hints.h"
 #include "citor/example_hints.h"
+#include "citor/hints.h"
 #include "citor/thread_pool.h"
 
-using citor::KahanReduceHints;
 using citor::Balance;
 using citor::CancellationToken;
 using citor::cancelled_value_exception;
 using citor::Determinism;
 using citor::Hints;
+using citor::KahanReduceHints;
 using citor::Priority;
 using citor::ThreadPool;
 
@@ -186,8 +186,16 @@ TEST(ParallelReduce, EmptyRangeReturnsInit) {
 }
 
 // Cancellation produces a partial result via cancelled_value_exception<T>.
+//
+// Skipped on single-participant pools: the inline-fallback path runs the map/combine over the full
+// range in one chunk, so the partial-value contract (some chunks ran, others did not) has no
+// observable surface.
 TEST(ParallelReduce, CancellationProducesPartial) {
   ThreadPool pool(4);
+  if (pool.participants() < 2U) {
+    GTEST_SKIP() << "single-participant pool collapses to inline path; partial-value cancellation "
+                    "contract has no observable surface";
+  }
   constexpr std::size_t kN = 100000;
   std::vector<double> data(kN, 1.0);
   CancellationToken tok;
@@ -229,11 +237,9 @@ TEST(ParallelReduce, MemberCpoEquivalence) {
   const double resultMember = pool.parallelReduce<FixedBlockTestHints>(
       0, kN, 0.0, [&](std::size_t lo, std::size_t hi) { return mapPlainSum(data, lo, hi); },
       [](double a, double b) { return a + b; });
-  const double resultCpo =
-      citor::parallelReduce.template operator()<FixedBlockTestHints>(
-          pool, 0, kN, 0.0,
-          [&](std::size_t lo, std::size_t hi) { return mapPlainSum(data, lo, hi); },
-          [](double a, double b) { return a + b; });
+  const double resultCpo = citor::parallelReduce.template operator()<FixedBlockTestHints>(
+      pool, 0, kN, 0.0, [&](std::size_t lo, std::size_t hi) { return mapPlainSum(data, lo, hi); },
+      [](double a, double b) { return a + b; });
   EXPECT_EQ(std::bit_cast<std::uint64_t>(resultMember), std::bit_cast<std::uint64_t>(resultCpo));
 }
 
