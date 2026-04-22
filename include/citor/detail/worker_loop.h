@@ -26,8 +26,8 @@ namespace citor::detail {
 ///
 /// The Karlin 1991 SOSP optimum sets `maxCycles` to roughly twice the wakeup latency; on Linux 6.x
 /// the futex round-trip is 2-3 microseconds, which at 5 GHz is 10-15k cycles. The default budget
-/// errs on the side of parking earlier and is tuned at startup once the empty-fan-out benchmark
-/// exists.
+/// is conservative -- it errs on the side of parking earlier -- and is tuned at
+/// startup once the empty-fan-out benchmark exists.
 struct SpinPolicy {
   /// Maximum PAUSE iterations before checking the TSC bound.
   std::uint32_t maxIters = 0;
@@ -48,7 +48,14 @@ struct SpinPolicy {
 /// fan-out so workers do not park between hot dispatches; parking each round costs a
 /// `FUTEX_WAIT` / `FUTEX_WAKE` round-trip that dominates the empty-fan-out floor. A worker that
 /// idles past the budget still parks promptly so an idle pool does not burn CPU indefinitely.
-inline constexpr SpinPolicy kSpinAfterBulkJob{.maxIters = 8192U, .maxCycles = 1000000ULL};
+#ifndef CITOR_SPIN_AFTER_BULK_JOB_MAX_ITERS
+#define CITOR_SPIN_AFTER_BULK_JOB_MAX_ITERS 8192U
+#endif
+#ifndef CITOR_SPIN_AFTER_BULK_JOB_MAX_CYCLES
+#define CITOR_SPIN_AFTER_BULK_JOB_MAX_CYCLES 1000000ULL
+#endif
+inline constexpr SpinPolicy kSpinAfterBulkJob{.maxIters = CITOR_SPIN_AFTER_BULK_JOB_MAX_ITERS,
+                                              .maxCycles = CITOR_SPIN_AFTER_BULK_JOB_MAX_CYCLES};
 
 /// Insert a single PAUSE / YIELD hint to back off without de-scheduling.
 ///
