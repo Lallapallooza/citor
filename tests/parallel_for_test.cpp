@@ -319,3 +319,38 @@ TEST(ParallelFor, RuntimeHintsMatchCompileTimeHints) {
 
   EXPECT_EQ(dataCompile, dataRuntime);
 }
+
+// A nested `parallelFor` on the same standalone pool from inside an outer body must not
+// deadlock on the dispatch mutex. The inner call falls through to inline execution on the
+// caller thread.
+TEST(ParallelFor, NestedSamePoolCallDoesNotDeadlock) {
+  ThreadPool pool(4);
+  constexpr std::size_t kOuter = 4;
+  constexpr std::size_t kInner = 8;
+  std::atomic<int> innerWork{0};
+
+  pool.parallelFor<StaticUniformTestHints>(0, kOuter, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
+    pool.parallelFor<StaticUniformTestHints>(0, kInner, [&](std::size_t a, std::size_t b) {
+      innerWork.fetch_add(static_cast<int>(b - a), std::memory_order_relaxed);
+    });
+  });
+
+  EXPECT_EQ(innerWork.load(), static_cast<int>(kOuter * kInner));
+}
+
+// A pre-cancelled token on the inline-fallback path must short-circuit before the body runs.
+TEST(ParallelFor, InlinePathHonorsPreCancelledToken) {
+  ThreadPool pool(1);
+  CancellationToken tok;
+  tok.request_stop();
+
+  std::atomic<int> calls{0};
+  pool.parallelFor<StaticUniformTestHints>(
+      0, 100,
+      [&](std::size_t /*lo*/, std::size_t /*hi*/) {
+        calls.fetch_add(1, std::memory_order_relaxed);
+      },
+      tok);
+
+  EXPECT_EQ(calls.load(), 0);
+}

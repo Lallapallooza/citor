@@ -8,8 +8,8 @@
 
 #include "citor/cancellation.h"
 #include "citor/cpos/run_plex.h"
-#include "citor/hints.h"
 #include "citor/example_hints.h"
+#include "citor/hints.h"
 #include "citor/thread_pool.h"
 
 using citor::Balance;
@@ -201,6 +201,39 @@ TEST(RunPlex, PrePhaseStateVisibleToWorkers) {
           << "phase=" << p << " slot=" << s;
     }
   }
+}
+
+// Worker exception during phase 0 must short-circuit the producer's phase loop: no later
+// `prePhaseFn` and no later slot-0 `phaseFn` should run, even though the captured exception is
+// rethrown only after every worker has rendezvoused.
+TEST(RunPlex, WorkerExceptionStopsLaterPhases) {
+  ThreadPool pool(4);
+  const std::size_t participants = pool.participants();
+  if (participants <= 1U) {
+    GTEST_SKIP() << "single-participant pool runs inline; this test exercises the parallel path";
+  }
+
+  std::atomic<int> prePhaseCalls{0};
+  std::atomic<int> slot0LatePhaseCalls{0};
+
+  EXPECT_THROW(
+      pool.runPlex<PlexTestHints>(
+          /*nPhases=*/3, /*n=*/64,
+          [&](std::size_t phase, std::uint32_t slot, std::size_t /*lo*/, std::size_t /*hi*/,
+              void * /*tls*/) {
+            if (slot == 1U && phase == 0U) {
+              throw std::runtime_error("worker-throw");
+            }
+            if (slot == 0U && phase > 0U) {
+              slot0LatePhaseCalls.fetch_add(1, std::memory_order_relaxed);
+            }
+          },
+          [&](std::size_t /*phaseIdx*/) { prePhaseCalls.fetch_add(1, std::memory_order_relaxed); }),
+      std::runtime_error);
+
+  EXPECT_LE(prePhaseCalls.load(), 1) << "prePhaseFn ran for phases beyond the throwing one";
+  EXPECT_EQ(slot0LatePhaseCalls.load(), 0)
+      << "slot-0 phaseFn ran for phases > 0 after a worker threw";
 }
 
 // Single-participant inline path: nPhases iterations all run on the producer thread, slot 0 only.

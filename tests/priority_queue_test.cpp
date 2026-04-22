@@ -59,7 +59,7 @@ TEST(PriorityQueue, LatencyDispatchPreemptsThroughput) {
   // the sleep the contended-dispatch window is too narrow to observe the ordering
   // deterministically.
   std::thread firstThroughput([&]() {
-    pool.parallelFor<GateThroughputHints>(0, 1, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
+    pool.parallelFor<GateThroughputHints>(0, 8, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
       firstThroughputInBody.store(true, std::memory_order_release);
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
     });
@@ -74,7 +74,7 @@ TEST(PriorityQueue, LatencyDispatchPreemptsThroughput) {
   // Launch the latency caller; it registers itself in `m_latencyWaiting` before contending on the
   // mutex. Any throughput caller observing a non-zero latency-waiting count yields back.
   std::thread latencyProducer([&]() {
-    pool.parallelFor<GateLatencyHints>(0, 1, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
+    pool.parallelFor<GateLatencyHints>(0, 8, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
       latencyOrder.store(orderCounter.fetch_add(1, std::memory_order_acq_rel),
                          std::memory_order_release);
     });
@@ -87,7 +87,7 @@ TEST(PriorityQueue, LatencyDispatchPreemptsThroughput) {
   // back off until the latency call completes. After the latency call clears the count, the late
   // throughput call may run.
   std::thread lateThroughput([&]() {
-    pool.parallelFor<GateThroughputHints>(0, 1, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
+    pool.parallelFor<GateThroughputHints>(0, 8, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
       lateThroughputOrder.store(orderCounter.fetch_add(1, std::memory_order_acq_rel),
                                 std::memory_order_release);
     });
@@ -141,7 +141,7 @@ TEST(PriorityQueue, BackgroundYieldsToThroughput) {
     // Primary throughput producer occupies the gate by sleeping inside its body so the two
     // contenders below have time to register and start spinning on the lock.
     std::thread primaryThroughput([&]() {
-      pool.parallelFor<GateThroughputHints>(0, 1, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
+      pool.parallelFor<GateThroughputHints>(0, 8, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
         primaryInBody.store(true, std::memory_order_release);
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
       });
@@ -153,7 +153,7 @@ TEST(PriorityQueue, BackgroundYieldsToThroughput) {
 
     // Background contender. Yields to the second throughput contender on every attempt.
     std::thread backgroundProducer([&]() {
-      pool.parallelFor<GateBackgroundHints>(0, 1, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
+      pool.parallelFor<GateBackgroundHints>(0, 8, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
         backgroundOrder.store(orderCounter.fetch_add(1, std::memory_order_acq_rel),
                               std::memory_order_release);
       });
@@ -161,7 +161,7 @@ TEST(PriorityQueue, BackgroundYieldsToThroughput) {
 
     // Second throughput contender. Spins on the lock without yielding to background.
     std::thread secondThroughput([&]() {
-      pool.parallelFor<GateThroughputHints>(0, 1, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
+      pool.parallelFor<GateThroughputHints>(0, 8, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
         secondThroughputOrder.store(orderCounter.fetch_add(1, std::memory_order_acq_rel),
                                     std::memory_order_release);
       });

@@ -225,6 +225,59 @@ TEST(ParallelReduce, CancellationProducesPartial) {
   EXPECT_TRUE(sawCancellation) << "expected cancelled_value_exception<double>";
 }
 
+// Pre-cancelled token on the inline-fallback path: the body must not run, and the producer
+// must observe the partial-value cancellation contract with `partial_value == init`.
+TEST(ParallelReduce, InlinePathHonorsPreCancelledToken) {
+  ThreadPool pool(1);
+  CancellationToken tok;
+  tok.request_stop();
+
+  std::atomic<int> mapCalls{0};
+  bool sawCancellation = false;
+  try {
+    (void)pool.parallelReduce<FixedBlockTestHints>(
+        0, 100, 7.0,
+        [&](std::size_t /*lo*/, std::size_t /*hi*/) {
+          mapCalls.fetch_add(1, std::memory_order_relaxed);
+          return 1.0;
+        },
+        [](double a, double b) { return a + b; }, tok);
+  } catch (const cancelled_value_exception<double> &e) {
+    sawCancellation = true;
+    EXPECT_EQ(e.partial_value, 7.0) << "partial value must be init unchanged when no chunk ran";
+  }
+  EXPECT_TRUE(sawCancellation);
+  EXPECT_EQ(mapCalls.load(), 0);
+}
+
+// When every chunk gets cancelled before completing, the partial value returned via the
+// cancellation exception must be `init` unchanged: the user `combine` is not assumed to be
+// `combine(x, T{}) == x` so we must not combine against a default-constructed `T{}`.
+TEST(ParallelReduce, AllChunksCancelledReturnsInitUnchanged) {
+  ThreadPool pool(4);
+  if (pool.participants() < 2U) {
+    GTEST_SKIP() << "single-participant pool tested in InlinePathHonorsPreCancelledToken";
+  }
+
+  CancellationToken tok;
+  tok.request_stop();
+
+  bool sawCancellation = false;
+  try {
+    (void)pool.parallelReduce<FixedBlockTestHints>(
+        0, 1024, 42.0,
+        [&](std::size_t /*lo*/, std::size_t /*hi*/) {
+          ADD_FAILURE() << "no chunk should run when token is pre-cancelled";
+          return 1.0;
+        },
+        [](double a, double b) { return a + b; }, tok);
+  } catch (const cancelled_value_exception<double> &e) {
+    sawCancellation = true;
+    EXPECT_EQ(e.partial_value, 42.0);
+  }
+  EXPECT_TRUE(sawCancellation);
+}
+
 // Member-call and CPO-call equivalence on the same inputs.
 TEST(ParallelReduce, MemberCpoEquivalence) {
   ThreadPool pool(4);

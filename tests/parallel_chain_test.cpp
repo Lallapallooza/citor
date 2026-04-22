@@ -288,6 +288,59 @@ TEST(ParallelChain, ProducerSerialNonProducersSpinUntilSerialCompletes) {
   }
 }
 
+// ProducerSerial must wait for slot 0 to finish the *serial* stage itself, not just the prior
+// stage. Tests the case where the serial stage's own post-barrier is `None`: with the off-by-one
+// pre-barrier, non-producers would race past slot 0's still-running serial body and enter the
+// fan-out stage early.
+TEST(ParallelChain, ProducerSerialBlocksLaterStageWithoutFollowingBarrier) {
+  ThreadPool pool(4);
+  const std::size_t participants = pool.participants();
+  if (participants <= 1U) {
+    GTEST_SKIP() << "single-participant pool collapses to inline path";
+  }
+
+  std::atomic<std::uint64_t> serialPublishTick{0};
+  std::vector<std::atomic<std::uint64_t>> fanoutEntryTick(participants);
+  for (auto &t : fanoutEntryTick) {
+    t.store(0, std::memory_order_relaxed);
+  }
+  std::atomic<std::uint64_t> tickClock{0};
+
+  pool.parallelChain<ChainTestHints>(
+      32U,
+      // Stage 0: ProducerSerial post-stage barrier turns stage 1 into a slot-0-only stage.
+      makeStage<BarrierKind::ProducerSerial>([&](std::size_t /*stageIdx*/, std::uint32_t /*slot*/,
+                                                 std::size_t /*lo*/,
+                                                 std::size_t /*hi*/) noexcept {}),
+      // Stage 1: slot 0 sleeps then publishes a tick. Crucially, the post-stage barrier is None
+      // so the fan-out stage 2 has no rendezvous to fall back on.
+      makeStage<BarrierKind::None>([&](std::size_t /*stageIdx*/, std::uint32_t slot,
+                                       std::size_t /*lo*/, std::size_t /*hi*/) {
+        if (slot == 0U) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+          serialPublishTick.store(tickClock.fetch_add(1, std::memory_order_acq_rel) + 1,
+                                  std::memory_order_release);
+        }
+      }),
+      // Stage 2: every slot stamps its entry tick. Non-producer ticks must be > slot 0's serial
+      // publish tick if the ProducerSerial pre-barrier truly waits for the serial stage to retire.
+      staticStage("post-serial", [&](std::size_t /*stageIdx*/, std::uint32_t slot,
+                                     std::size_t /*lo*/, std::size_t /*hi*/) {
+        const std::uint64_t entry = tickClock.fetch_add(1, std::memory_order_acq_rel) + 1;
+        fanoutEntryTick[slot].store(entry, std::memory_order_release);
+      }));
+
+  const std::uint64_t publishTick = serialPublishTick.load(std::memory_order_acquire);
+  ASSERT_GT(publishTick, 0U) << "serial body did not run on slot 0";
+  for (std::size_t s = 1; s < participants; ++s) {
+    const std::uint64_t entry = fanoutEntryTick[s].load(std::memory_order_acquire);
+    EXPECT_GT(entry, 0U) << "slot " << s << " never entered stage 2";
+    EXPECT_GT(entry, publishTick) << "slot " << s << " entered stage 2 (tick=" << entry
+                                  << ") before slot 0 published the serial result (tick="
+                                  << publishTick << ")";
+  }
+}
+
 // Verify that ProducerSerial only gates the stage immediately following it; with a non-serial
 // barrier following, the next stage runs on every slot.
 TEST(ParallelChain, ProducerSerialOnlyAffectsNextStage) {
