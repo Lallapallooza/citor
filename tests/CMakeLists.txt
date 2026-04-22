@@ -11,6 +11,7 @@ set(_citor_tests
     parallel_for_tsan_test
     parallel_pool_deadlock_fuzz_test
     parallel_pool_tsan_stress_test
+    parallel_reduce_cross_run_determinism_test
     parallel_reduce_determinism_test
     parallel_reduce_test
     parallel_scan_test
