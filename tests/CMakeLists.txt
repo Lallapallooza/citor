@@ -9,6 +9,7 @@ set(_citor_tests
     parallel_chain_test
     parallel_for_test
     parallel_for_tsan_test
+    parallel_pool_tsan_stress_test
     parallel_reduce_determinism_test
     parallel_reduce_test
     parallel_scan_test
