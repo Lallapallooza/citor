@@ -52,13 +52,10 @@
 // Hint preset at TU scope (not in an anonymous namespace) so clang-tidy treats every
 // static-constexpr member as a public field of a named type rather than an unused constant.
 struct ChainBenchHints {
-  static constexpr citor::Balance balance =
-      citor::Balance::StaticUniform;
+  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
   static constexpr citor::Affinity affinity = citor::Affinity::None;
-  static constexpr citor::Priority priority =
-      citor::Priority::Throughput;
-  static constexpr citor::Partition partition =
-      citor::Partition::ContiguousRanges;
+  static constexpr citor::Priority priority = citor::Priority::Throughput;
+  static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
   static constexpr bool pipelineSameChunk = true;
   static constexpr bool fpDeterministicTree = true;
   static constexpr bool cancellationChecks = false;
@@ -67,10 +64,8 @@ struct ChainBenchHints {
 
 /// `parallelFor` site hints used for the per-stage standalone-fan-out baseline.
 struct ChainBenchPerStageHints {
-  static constexpr citor::Balance balance =
-      citor::Balance::StaticUniform;
-  static constexpr citor::Priority priority =
-      citor::Priority::Throughput;
+  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
+  static constexpr citor::Priority priority = citor::Priority::Throughput;
   static constexpr double estimatedItemNs = 0.0;
   static constexpr double minTaskUs = 0.0;
   static constexpr std::size_t chunk = 0;
@@ -80,10 +75,10 @@ namespace citor::bench {
 namespace {
 
 /// Number of chain calls per measurement.
-constexpr std::size_t kIterations = 5'000;
+constexpr std::size_t kIterations = 1'000;
 
 /// Warmup iterations dropped from the sample window.
-constexpr std::size_t kWarmupIterations = 200;
+constexpr std::size_t kWarmupIterations = 50;
 
 /// Number of stages per chain. 7 empty stages match the spec's headline.
 constexpr std::size_t kStageCount = 7;

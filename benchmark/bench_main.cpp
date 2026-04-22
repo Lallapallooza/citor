@@ -6,13 +6,14 @@
 // used only by the calibration step that converts cycle deltas to wall-clock
 // nanoseconds.
 //
-// The driver is minimal by design: each workload TU registers its name and
+// The driver is minimal: each workload TU registers its name and
 // runner, the driver iterates them in registration order, prints the resulting
 // `BenchTable` for each, and returns 0 on success.
 
 #define ANKERL_NANOBENCH_IMPLEMENT
 #include <nanobench.h>
 
+#include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <iostream>
@@ -20,6 +21,7 @@
 #include "bench_format.h"
 #include "bench_registry.h"
 #include "cycle_clock.h"
+#include "harness.h"
 
 #ifdef CITOR_BENCH_HAS_OPENMP
 #include <omp.h>
@@ -46,6 +48,8 @@ int main(int argc, char ** /*argv*/) {
     std::cerr << "parallel_bench: ignoring CLI arguments (none accepted)\n";
   }
   printCalibrationBanner(cal);
+  printChecklist(std::cout);
+  std::cout << '\n';
 
 #ifdef CITOR_BENCH_HAS_OPENMP
   // OpenMP rows construct an `OpenMpRunner` carrying the requested participant
@@ -58,6 +62,8 @@ int main(int argc, char ** /*argv*/) {
 
   bool anyRan = false;
   for (const auto &reg : registry()) {
+    const std::uint64_t rssBeforeKb = readPeakRssKb();
+    const RusageSample rusageBefore = readRusage();
     try {
       const BenchTable table = reg.run(cal);
       formatTable(table, /*baselineName=*/"citor::ThreadPool", std::cout);
@@ -68,7 +74,15 @@ int main(int argc, char ** /*argv*/) {
       // is visible instead of faking a passing number, and continue with the next workload.
       std::cout << "workload: " << reg.name << " SKIPPED: " << ex.what() << '\n';
     }
+    const std::uint64_t rssAfterKb = readPeakRssKb();
+    const RusageSample rusageAfter = readRusage();
+    const std::uint64_t userDeltaUs = rusageAfter.userUs - rusageBefore.userUs;
+    const std::uint64_t systemDeltaUs = rusageAfter.systemUs - rusageBefore.systemUs;
+    std::cout << "[METRICS] " << reg.name << "  peak_rss_kb=" << rssAfterKb
+              << " (delta=" << (rssAfterKb >= rssBeforeKb ? rssAfterKb - rssBeforeKb : 0U)
+              << ")  user_us=" << userDeltaUs << "  system_us=" << systemDeltaUs << '\n';
     std::cout << '\n';
+    std::cout.flush();
     anyRan = true;
   }
 

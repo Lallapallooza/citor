@@ -43,14 +43,10 @@
 // Hint preset at TU scope so clang-tidy treats every static-constexpr member
 // as a public field of a named type rather than an unused constant.
 struct ScanBenchHints {
-  static constexpr citor::Balance balance =
-      citor::Balance::StaticUniform;
-  static constexpr citor::Determinism determinism =
-      citor::Determinism::FixedBlockOrder;
-  static constexpr citor::Priority priority =
-      citor::Priority::Throughput;
-  static constexpr citor::Partition partition =
-      citor::Partition::ContiguousRanges;
+  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
+  static constexpr citor::Determinism determinism = citor::Determinism::FixedBlockOrder;
+  static constexpr citor::Priority priority = citor::Priority::Throughput;
+  static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
   static constexpr double estimatedItemNs = 0.0;
   static constexpr double minTaskUs = 0.0;
   static constexpr std::size_t chunk = 0;
@@ -323,12 +319,12 @@ template <class Pool, class EnqueueFn>
   ScanData d = buildData();
   BenchRow row = measureLoop("OpenMP::scan_two_wave", cal, [&] {
     runTwoWaveScan(d, participants, [&](std::size_t blocks, auto blockBody) {
-      const int threads = static_cast<int>(blocks);
+      const auto threads = static_cast<int>(blocks);
       const std::size_t blockSize = (kN + blocks - 1) / blocks;
       const auto blocksSigned = static_cast<std::ptrdiff_t>(blocks);
 #pragma omp parallel for num_threads(threads) schedule(static)
       for (std::ptrdiff_t b = 0; b < blocksSigned; ++b) {
-        const std::size_t blockIdx = static_cast<std::size_t>(b);
+        const auto blockIdx = static_cast<std::size_t>(b);
         const std::size_t lo = std::min(kN, blockIdx * blockSize);
         const std::size_t hi = std::min(kN, (blockIdx + 1) * blockSize);
         if (lo < hi) {

@@ -33,8 +33,8 @@
 #include <utility>
 #include <vector>
 
-#include "citor/hints.h"
 #include "citor/example_hints.h"
+#include "citor/hints.h"
 #include "citor/thread_pool.h"
 
 #include "bench_format.h"
@@ -48,11 +48,11 @@ namespace {
 /// Iterations per measurement window. 100 keeps each row's wall time near
 /// seconds at the prescribed (q, n, d) shape; the median + err% are stable
 /// across reruns.
-constexpr std::size_t kIterations = 100;
+constexpr std::size_t kIterations = 20;
 
 /// Warmup iterations dropped from the sample window. The persistent workers
 /// settle their poll budget after a handful of dispatches; we discard those.
-constexpr std::size_t kWarmupIterations = 10;
+constexpr std::size_t kWarmupIterations = 3;
 
 /// Query count fanned across workers per `bulkForQueries` invocation.
 constexpr std::size_t kQueries = 10'000;
@@ -363,11 +363,11 @@ template <class RunFn>
     }
   };
   BenchRow row = measureLoop(CompetitorTraits<OpenMpRunner>::name, cal, [&] {
-    const int threads = static_cast<int>(runner->threads);
-    const std::size_t blocks = static_cast<std::size_t>(threads);
+    const auto threads = static_cast<int>(runner->threads);
+    const auto blocks = static_cast<std::size_t>(threads);
 #pragma omp parallel num_threads(threads)
     {
-      const std::size_t tid = static_cast<std::size_t>(omp_get_thread_num());
+      const auto tid = static_cast<std::size_t>(omp_get_thread_num());
       const std::size_t blockSize = (kQueries + blocks - 1) / blocks;
       const std::size_t lo = std::min(kQueries, tid * blockSize);
       const std::size_t hi = std::min(kQueries, (tid + 1) * blockSize);

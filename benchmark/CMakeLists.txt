@@ -155,7 +155,12 @@ set(_citor_bench_sources
     bench_main.cpp
     bulk_for_queries_bench.cpp
     chain_bench.cpp
+    cold_path_bench.cpp
+    differential_bench.cpp
     empty_fanout_bench.cpp
+    fork_join_bench.cpp
+    granularity_bench.cpp
+    parallel_reduce_bench.cpp
     plex_bench.cpp
     scan_bench.cpp
 )
@@ -180,8 +185,16 @@ if(TARGET TBB::tbb)
     target_link_libraries(parallel_bench PRIVATE TBB::tbb)
     target_compile_definitions(parallel_bench PRIVATE CITOR_BENCH_HAS_TBB)
 endif()
-if(TARGET Taskflow::Taskflow)
-    target_link_libraries(parallel_bench PRIVATE Taskflow::Taskflow)
+if(TARGET Taskflow)
+    # Taskflow ships its own warnings (signedness conversions, unused parameters)
+    # that trip the bench's `-Wsign-conversion`/`-Wextra` policy. Re-export its
+    # include directories as SYSTEM so its internal noise does not block the
+    # build, while keeping our own warning policy strict.
+    get_target_property(_taskflow_includes Taskflow INTERFACE_INCLUDE_DIRECTORIES)
+    if(_taskflow_includes)
+        target_include_directories(parallel_bench SYSTEM PRIVATE ${_taskflow_includes})
+    endif()
+    target_link_libraries(parallel_bench PRIVATE Taskflow)
     target_compile_definitions(parallel_bench PRIVATE CITOR_BENCH_HAS_TASKFLOW)
 endif()
 if(TARGET eigen_threadpool)
@@ -197,7 +210,10 @@ if(TARGET parallel_bench_openmp)
 endif()
 
 if(UNIX AND NOT APPLE)
-    target_compile_definitions(parallel_bench PRIVATE CITOR_BENCH_HAS_PERF_EVENT)
+    target_compile_definitions(
+        parallel_bench
+        PRIVATE CITOR_BENCH_HAS_PERF_EVENT
+    )
 endif()
 
 citor_enable_tidy(parallel_bench)

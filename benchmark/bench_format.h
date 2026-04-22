@@ -99,7 +99,12 @@ inline std::string formatSiNumber(double value, int sigDigits = 3) {
 inline void formatTable(const BenchTable &table, std::string_view baselineName, std::ostream &out) {
   double baselineNs = 0.0;
   for (const auto &row : table.rows) {
-    if (row.name == baselineName) {
+    // Workloads that exercise multiple primitives within citor (e.g. chain
+    // tables include both `citor::ThreadPool::parallelChain` and
+    // `citor::ThreadPool::parallelFor x7`) suffix the row name. Match on
+    // `baselineName` as a prefix so the relative column renders for every
+    // table without forcing every workload to use a single canonical name.
+    if (std::string_view{row.name}.starts_with(baselineName)) {
       baselineNs = row.nsPerOp;
       break;
     }
