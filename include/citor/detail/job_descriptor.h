@@ -30,8 +30,8 @@ namespace citor::detail {
 /// stack. Because every primitive in v1 is synchronous (the producer joins before returning), the
 /// closure outlives the descriptor by construction.
 ///
-/// The padding overhead trades several hundred bytes of stack against MESI cache-coherency
-/// traffic on the contended atomics, which is the dominant hot-path cost.
+/// The padding overhead trades several hundred bytes of stack against
+/// MESI cache-coherency traffic on the contended atomics, which is the dominant hot-path cost.
 // NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
 struct alignas(kCacheLine) JobDescriptor {
   /// Generation value the producer published this descriptor under; workers stamp `doneEpoch`
@@ -60,6 +60,19 @@ struct alignas(kCacheLine) JobDescriptor {
 
   /// Compile-time priority choice serialized into the descriptor for the runtime path.
   Priority priority = Priority::Throughput;
+
+  /// Opt-in flag for the producer-side hot-completion probe in `dispatchOneStaticLockedBody`.
+  /// When `true`, the producer briefly probes every background worker's `doneEpoch` after
+  /// publishing the new generation; if every background worker has already stamped the new
+  /// epoch (i.e. spinning workers picked up the dispatch and finished an empty / trivial body
+  /// before the probe ran), the producer skips the futex-word bump and the
+  /// `FUTEX_WAKE_PRIVATE(INT_MAX)` syscall entirely. Independent one-shot primitives
+  /// (`parallelFor`, `parallelReduce`, `bulkForQueries`) opt in; protocol-driving primitives
+  /// (`parallelChain`, `parallelScan`, `runPlex`, `forkJoin`) leave the flag default-`false`
+  /// because their wrapper bodies must run to completion regardless of when the producer
+  /// observes done. Sits inside the existing 16-bit padding before `body`, so it adds no
+  /// descriptor size.
+  bool preWakeCompletionProbe = false;
 
   /// Non-owning reference to the user's closure. Lives on the producer's stack for the duration
   /// of the synchronous primitive call.
