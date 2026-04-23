@@ -1,15 +1,106 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <fstream>
 #include <ostream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #if defined(__linux__)
 #include <sys/resource.h>
 #endif
+
+#include "cycle_clock.h"
+
+namespace citor::bench {
+
+/// Sample budget shared by every cell that uses time-budget collection.
+///
+/// The harness used to fix the iteration count per cell, which over-sampled the
+/// 1 ms-body cells and under-sampled the 1 us-body cells. Cells with a body cost
+/// around the bimodal-noise floor (THP defrag, NUMA scan, IRQ migration) need
+/// thousands of samples to converge a stable headline median; cells whose body
+/// is itself in the millisecond range only need a few dozen. A wall-time budget
+/// adapts both extremes in one knob.
+struct SampleBudget {
+  /// Wall-time spent collecting samples per (pool, cell) pair, in nanoseconds.
+  /// 100 ms is the smallest budget that consistently dropped the bench's err%
+  /// out of bimodal cliffs on this host's microarchitecture.
+  std::uint64_t budgetNs = 100'000'000ULL;
+
+  /// Hard cap on iteration count to bound short-body cells. Without the cap a
+  /// 50 ns body would run ~2 M iters per pool per cell.
+  std::size_t maxIters = 50'000;
+
+  /// Minimum iter count so even sub-microsecond bodies have enough samples to
+  /// compute a stable lower-quartile.
+  std::size_t minIters = 32;
+
+  /// Warmup iters dropped from the sample window. Sized to give the pool's
+  /// spin-then-park budget, the page table, and the host's first-touch faults
+  /// time to settle. A separate warmup count from the sample budget so very
+  /// short cells can warm up cheaply while long cells skip the warmup early.
+  std::size_t warmupIters = 64;
+
+  /// Warmup cap, in nanoseconds, so warmup never dominates a long-body cell.
+  std::uint64_t warmupBudgetNs = 20'000'000ULL;
+};
+
+/// Default sample budget used by every cell that does not override it.
+inline constexpr SampleBudget kDefaultSampleBudget{};
+
+/// Run |invoke| until either the wall-time budget or the iter cap is
+///        exhausted, returning the per-iteration timings (in ns).
+///
+/// The caller supplies |invoke| as a noexcept callable that performs one
+/// iteration's measurement bracket internally and returns the cycle delta. The
+/// helper converts cycles to ns via |cal| and applies a warmup phase first.
+///
+/// Invoke   Callable returning a `std::uint64_t` cycle delta per call.
+/// cal      Calibration constant for converting cycles to ns.
+/// budget   Sample budget driving warmup and measurement loops.
+/// invoke   Per-iteration measurement function.
+/// Vector of per-iter ns measurements, sized to whatever the budget
+///         produced. Always at least `budget.minIters` and at most
+///         `budget.maxIters` entries.
+template <class Invoke>
+[[nodiscard]] std::vector<double> runUntilBudget(const CyclesPerNanosecond &cal,
+                                                 const SampleBudget &budget, Invoke &&invoke) {
+  // Warmup: fixed iter count or budget, whichever expires first. Discarded
+  // samples are not retained.
+  const auto warmupStart = std::chrono::steady_clock::now();
+  for (std::size_t i = 0; i < budget.warmupIters; ++i) {
+    (void)invoke();
+    const auto now = std::chrono::steady_clock::now();
+    const auto elapsedNs =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(now - warmupStart).count();
+    if (static_cast<std::uint64_t>(elapsedNs) >= budget.warmupBudgetNs) {
+      break;
+    }
+  }
+
+  std::vector<double> samples;
+  samples.reserve(budget.minIters);
+  const auto sampleStart = std::chrono::steady_clock::now();
+  for (std::size_t i = 0; i < budget.maxIters; ++i) {
+    const std::uint64_t deltaCycles = invoke();
+    samples.push_back(cyclesToNs(deltaCycles, cal));
+    if (samples.size() >= budget.minIters) {
+      const auto now = std::chrono::steady_clock::now();
+      const auto elapsedNs =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(now - sampleStart).count();
+      if (static_cast<std::uint64_t>(elapsedNs) >= budget.budgetNs) {
+        break;
+      }
+    }
+  }
+  return samples;
+}
+
+} // namespace citor::bench
 
 namespace citor::bench {
 

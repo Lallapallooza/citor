@@ -82,18 +82,7 @@ template <class PoolT>
   // Touch the sink so the optimizer cannot prove the bench is dead code.
   (void)sink.load(std::memory_order_relaxed);
 
-  // Median is the headline; std-dev / mean is the err% column.
-  std::sort(samples.begin(), samples.end());
-  const double medianNs = samples[samples.size() / 2];
-  const double opsPerSec = medianNs > 0.0 ? 1.0e9 / medianNs : 0.0;
-  const double errPct = relativeStdDevPercent(samples);
-
-  return BenchRow{
-      .name = Traits::name,
-      .nsPerOp = medianNs,
-      .opsPerSec = opsPerSec,
-      .errPercent = errPct,
-  };
+  return finalizeRow(Traits::name, samples);
 }
 
 /// Build an empty-fan-out comparison table for a single `j` value.

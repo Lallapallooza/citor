@@ -23,18 +23,19 @@
 #include "bench_registry.h"
 #include "competitor_traits.h"
 #include "cycle_clock.h"
+#include "harness.h"
 
 namespace citor::bench {
 namespace {
 
 /// Per-row sample budget. The cool-off sleep dominates wall time, so the
-/// budget is tight -- 50 samples plus 5 warmup gives a stable
-/// median while keeping the sweep interactive (~2 min wall total).
+/// budget is tight: 50 samples plus 5 warmup gives a stable
+/// lower-quartile while keeping the sweep interactive (about 2 min wall total).
 constexpr std::size_t kIterations = 50;
 
 /// Warmup iterations dropped from the sample window. The first dispatch may
 /// observe lazy worker spin-up (citor and Eigen lazily allocate their wake
-/// scratch) which would skew the cold p50 high.
+/// scratch) which would skew the cold p25 high.
 constexpr std::size_t kWarmupIterations = 5;
 
 /// Sleep between iterations. Long enough for every pool's spin-then-park
@@ -82,17 +83,7 @@ template <class PoolT>
 
   (void)sink.load(std::memory_order_relaxed);
 
-  std::sort(samples.begin(), samples.end());
-  const double medianNs = samples[samples.size() / 2];
-  const double opsPerSec = medianNs > 0.0 ? 1.0e9 / medianNs : 0.0;
-  const double errPct = relativeStdDevPercent(samples);
-
-  return BenchRow{
-      .name = Traits::name,
-      .nsPerOp = medianNs,
-      .opsPerSec = opsPerSec,
-      .errPercent = errPct,
-  };
+  return finalizeRow(Traits::name, samples);
 }
 
 /// Build a cold-path comparison table for a single `j` value.

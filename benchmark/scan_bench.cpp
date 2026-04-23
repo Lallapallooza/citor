@@ -78,16 +78,7 @@ template <class RunFn>
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
   }
-  std::sort(samples.begin(), samples.end());
-  const double medianNs = samples[samples.size() / 2];
-  const double opsPerSec = medianNs > 0.0 ? 1.0e9 / medianNs : 0.0;
-  const double errPct = relativeStdDevPercent(samples);
-  return BenchRow{
-      .name = name,
-      .nsPerOp = medianNs,
-      .opsPerSec = opsPerSec,
-      .errPercent = errPct,
-  };
+  return finalizeRow(name, samples);
 }
 
 /// Build a deterministic input vector + zero-filled output buffer.

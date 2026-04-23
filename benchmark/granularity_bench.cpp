@@ -20,17 +20,10 @@
 #include "bench_registry.h"
 #include "competitor_traits.h"
 #include "cycle_clock.h"
+#include "harness.h"
 
 namespace citor::bench {
 namespace {
-
-/// Per-cell sample budget. Wall time per row is roughly
-/// `kIterations * bodyNs * j` for ideal scaling, so the largest body (1 ms)
-/// at j=16 finishes in well under a second per pool.
-constexpr std::size_t kIterations = 100;
-
-/// Warmup iterations dropped from the sample window.
-constexpr std::size_t kWarmupIterations = 10;
 
 /// Spin on the TSC until |targetNs| wall-time nanoseconds elapse.
 ///
@@ -71,32 +64,19 @@ template <class PoolT>
     sink.fetch_add(hi - lo, std::memory_order_relaxed);
   };
 
-  for (std::size_t i = 0; i < kWarmupIterations; ++i) {
-    Traits::submitBlocksAndWait(*pool, 0, participants, body);
-  }
-
-  std::vector<double> samples;
-  samples.reserve(kIterations);
-  for (std::size_t i = 0; i < kIterations; ++i) {
+  // Time-budget collection: many short samples for the body=0 / body=100 ns cells, fewer
+  // samples for the body=1 ms cell. Keeps per-cell wall time roughly constant and gives the
+  // sub-microsecond cells enough draws to stabilize the lower-quartile headline.
+  auto samples = runUntilBudget(cal, kDefaultSampleBudget, [&]() noexcept {
     const std::uint64_t startCycles = readCyclesStart();
     Traits::submitBlocksAndWait(*pool, 0, participants, body);
     const std::uint64_t endCycles = readCyclesEnd();
-    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-  }
+    return endCycles - startCycles;
+  });
 
   (void)sink.load(std::memory_order_relaxed);
 
-  std::sort(samples.begin(), samples.end());
-  const double medianNs = samples[samples.size() / 2];
-  const double opsPerSec = medianNs > 0.0 ? 1.0e9 / medianNs : 0.0;
-  const double errPct = relativeStdDevPercent(samples);
-
-  return BenchRow{
-      .name = Traits::name,
-      .nsPerOp = medianNs,
-      .opsPerSec = opsPerSec,
-      .errPercent = errPct,
-  };
+  return finalizeRow(Traits::name, samples);
 }
 
 /// One body-cost decade in the METG sweep.

@@ -331,17 +331,7 @@ template <class PoolT>
   volatile float sink = cBase[0] + cBase[elems - 1];
   (void)sink;
 
-  std::sort(samples.begin(), samples.end());
-  const double medianNs = samples[samples.size() / 2];
-  const double opsPerSec = medianNs > 0.0 ? 1.0e9 / medianNs : 0.0;
-  const double errPct = relativeStdDevPercent(samples);
-
-  return BenchRow{
-      .name = Traits::name,
-      .nsPerOp = medianNs,
-      .opsPerSec = opsPerSec,
-      .errPercent = errPct,
-  };
+  return finalizeRow(Traits::name, samples);
 }
 
 /// One square-matmul cell in the sweep.

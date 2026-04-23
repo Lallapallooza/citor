@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <iomanip>
@@ -8,6 +9,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace citor::bench {
@@ -133,6 +135,58 @@ inline void formatTable(const BenchTable &table, std::string_view baselineName, 
     out << std::left << std::setw(11) << relative << std::setw(10) << nsOss.str() << std::setw(10)
         << formatSiNumber(row.opsPerSec) << std::setw(8) << errOss.str() << row.name << '\n';
   }
+}
+
+/// Reduce a sample vector into a `BenchRow` using the lower-quartile (p25)
+///        as the headline statistic.
+///
+/// The bench formerly reported the median (p50). Median is robust to symmetric
+/// outliers but fragile on bimodal distributions: when the host is in a state
+/// where roughly half the iters are stalled by THP defrag, NUMA balancing, IRQ
+/// migration, or CPU-boost throttling, the median lands on the slow mode for
+/// one cell and the fast mode for another, even at the same workload. The lower
+/// quartile is below the slow mode for any bimodal distribution where the slow
+/// cluster is at most three times the size of the fast cluster, so it converges
+/// to the actual hardware-floor cost the comparison wants to surface. Stalls
+/// still pollute samples, but they no longer contaminate the headline.
+///
+/// name     Pool display name copied into the row.
+/// samples  Per-iteration ns measurements; mutated in place via sort.
+/// Populated `BenchRow` with `nsPerOp` set to the p25, `opsPerSec` set
+///         to `1e9 / nsPerOp`, and `errPercent` set to the relative standard
+///         deviation across the full sample vector.
+[[nodiscard]] inline BenchRow finalizeRow(std::string name, std::vector<double> &samples) {
+  if (samples.empty()) {
+    return BenchRow{.name = std::move(name), .nsPerOp = 0.0, .opsPerSec = 0.0, .errPercent = 0.0};
+  }
+  std::sort(samples.begin(), samples.end());
+  const std::size_t pIdx = samples.size() / 4U;
+  const double p25 = samples[pIdx];
+  const double opsPerSec = p25 > 0.0 ? 1.0e9 / p25 : 0.0;
+  // Error-stat reflects the FULL sample distribution including the slow tail
+  // so the user can see when the host noise is high even though the headline
+  // (p25) reads well.
+  double sum = 0.0;
+  for (double v : samples) {
+    sum += v;
+  }
+  const double mean = sum / static_cast<double>(samples.size());
+  double errPct = 0.0;
+  if (samples.size() >= 2 && std::isfinite(mean) && mean != 0.0) {
+    double sqSum = 0.0;
+    for (double v : samples) {
+      const double d = v - mean;
+      sqSum += d * d;
+    }
+    const double variance = sqSum / static_cast<double>(samples.size() - 1);
+    errPct = 100.0 * std::sqrt(variance) / std::fabs(mean);
+  }
+  return BenchRow{
+      .name = std::move(name),
+      .nsPerOp = p25,
+      .opsPerSec = opsPerSec,
+      .errPercent = errPct,
+  };
 }
 
 /// Compute the relative standard deviation of |samples| as a percentage.

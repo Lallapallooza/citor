@@ -41,10 +41,8 @@
 // Hint preset at TU scope (not in an anonymous namespace) so clang-tidy treats every
 // static-constexpr member as a public field of a named type rather than an unused constant.
 struct PlexBenchHints {
-  static constexpr citor::Balance balance =
-      citor::Balance::StaticUniform;
-  static constexpr citor::Priority priority =
-      citor::Priority::Throughput;
+  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
+  static constexpr citor::Priority priority = citor::Priority::Throughput;
   static constexpr double estimatedItemNs = 0.0;
   static constexpr double minTaskUs = 0.0;
   static constexpr std::size_t chunk = 0;
@@ -98,16 +96,7 @@ template <class RunFn>
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(toTransitionNs(cyclesToNs(endCycles - startCycles, cal)));
   }
-  std::sort(samples.begin(), samples.end());
-  const double medianNs = samples[samples.size() / 2];
-  const double opsPerSec = medianNs > 0.0 ? 1.0e9 / medianNs : 0.0;
-  const double errPct = relativeStdDevPercent(samples);
-  return BenchRow{
-      .name = name,
-      .nsPerOp = medianNs,
-      .opsPerSec = opsPerSec,
-      .errPercent = errPct,
-  };
+  return finalizeRow(name, samples);
 }
 
 [[nodiscard]] BenchRow measureNewPool(std::size_t participants, const CyclesPerNanosecond &cal) {
