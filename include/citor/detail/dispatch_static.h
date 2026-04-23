@@ -35,10 +35,10 @@ inline void runStaticPartition(JobDescriptor &desc, std::uint32_t rank) noexcept
   const std::size_t last = desc.last;
 
   for (std::size_t blockId = rank; blockId < blockCount; blockId += participants) {
-    if (desc.firstException.load(std::memory_order_acquire) != nullptr) {
+    if (desc.firstException.load(std::memory_order_acquire) != nullptr) [[unlikely]] {
       return;
     }
-    if (desc.token.stop_requested()) {
+    if (desc.token.stop_requested()) [[unlikely]] {
       return;
     }
     const std::size_t lo = first + (blockId * chunk);
