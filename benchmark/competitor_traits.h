@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <memory>
 #include <task_thread_pool.hpp>
 #include <utility>
@@ -69,16 +70,11 @@ template <class Pool> struct CompetitorTraits;
 /// dispatch-floor bench cares about: a single worker-strided block per participant, no extra
 /// branching on the hot path.
 struct EmptyFanoutHints {
-  static constexpr citor::Balance balance =
-      citor::Balance::StaticUniform;
-  static constexpr citor::Determinism determinism =
-      citor::Determinism::FixedBlockOrder;
-  static constexpr citor::Affinity affinity =
-      citor::Affinity::PhysicalCores;
-  static constexpr citor::Priority priority =
-      citor::Priority::Throughput;
-  static constexpr citor::Partition partition =
-      citor::Partition::ContiguousRanges;
+  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
+  static constexpr citor::Determinism determinism = citor::Determinism::FixedBlockOrder;
+  static constexpr citor::Affinity affinity = citor::Affinity::PhysicalCores;
+  static constexpr citor::Priority priority = citor::Priority::Throughput;
+  static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
   static constexpr double estimatedItemNs = 0.0;
   static constexpr double minTaskUs = 0.0;
   static constexpr std::size_t chunk = 1;
@@ -124,8 +120,8 @@ template <> struct CompetitorTraits<citor::ThreadPool> {
   /// last  Exclusive upper bound of the range.
   /// fn    Callable invoked once per block as `fn(blockFirst, blockAfterLast)`.
   template <class Fn>
-  static void submitBlocksAndWait(citor::ThreadPool &pool, std::size_t first,
-                                  std::size_t last, Fn fn) {
+  static void submitBlocksAndWait(citor::ThreadPool &pool, std::size_t first, std::size_t last,
+                                  Fn fn) {
     pool.parallelFor<EmptyFanoutHints>(first, last, fn);
   }
 };
@@ -153,16 +149,21 @@ template <> struct CompetitorTraits<BS::light_thread_pool> {
     return std::make_unique<BS::light_thread_pool>(participants);
   }
 
-  /// Submit a single block over `[first, last)` and wait for completion.
+  /// Submit `last - first` blocks of size 1 and wait for all of them.
   ///
-  /// pool  Pool the block is submitted to.
-  /// first Inclusive lower bound of the range.
-  /// last  Exclusive upper bound of the range.
-  /// fn    Callable invoked once with the block's range.
+  /// Per-block dispatch with one body invocation per element matches the shape
+  /// citor's `parallelFor<EmptyFanoutHints>` produces (chunk = 1, blockCount =
+  /// range size), so the comparison measures the same logical work for every
+  /// pool: every block of every range is a separate scheduling decision rather
+  /// than one task running on one worker.
   template <class Fn>
   static void submitBlocksAndWait(BS::light_thread_pool &pool, std::size_t first, std::size_t last,
                                   Fn fn) {
-    pool.submit_blocks(first, last, fn, /*num_blocks=*/std::size_t{1}).wait();
+    const std::size_t blocks = last > first ? (last - first) : std::size_t{0};
+    if (blocks == 0U) {
+      return;
+    }
+    pool.submit_blocks(first, last, fn, blocks).wait();
   }
 };
 
@@ -200,11 +201,20 @@ template <> struct CompetitorTraits<dp::thread_pool<>> {
   template <class Fn>
   static void submitBlocksAndWait(dp::thread_pool<> &pool, std::size_t first, std::size_t last,
                                   Fn fn) {
-    // `dp::thread_pool::enqueue` invokes the closure as a `const` callable in
-    // its C++17 fallback path (no `mutable` on the wrapping lambda). Use a
-    // const-callable closure so the compile-time fallback path stays valid.
-    auto fut = pool.enqueue([first, last, fn]() { fn(first, last); });
-    fut.get();
+    // Per-block dispatch with one body invocation per element so the bench
+    // measures actual N-way fan-out and not a single-task short-circuit. Each
+    // enqueue returns a future; the loop waits on all of them.
+    if (last <= first) {
+      return;
+    }
+    std::vector<std::future<void>> futures;
+    futures.reserve(last - first);
+    for (std::size_t i = first; i < last; ++i) {
+      futures.emplace_back(pool.enqueue([i, &fn]() { fn(i, i + 1U); }));
+    }
+    for (auto &f : futures) {
+      f.get();
+    }
   }
 };
 
@@ -236,8 +246,18 @@ template <> struct CompetitorTraits<::task_thread_pool::task_thread_pool> {
   template <class Fn>
   static void submitBlocksAndWait(::task_thread_pool::task_thread_pool &pool, std::size_t first,
                                   std::size_t last, Fn fn) {
-    auto fut = pool.submit([first, last, fn = std::move(fn)]() mutable { fn(first, last); });
-    fut.get();
+    // Per-block dispatch matching every other adapter's shape.
+    if (last <= first) {
+      return;
+    }
+    std::vector<std::future<void>> futures;
+    futures.reserve(last - first);
+    for (std::size_t i = first; i < last; ++i) {
+      futures.emplace_back(pool.submit([i, &fn]() { fn(i, i + 1U); }));
+    }
+    for (auto &f : futures) {
+      f.get();
+    }
   }
 };
 
@@ -267,8 +287,18 @@ template <> struct CompetitorTraits<riften::Thiefpool> {
   template <class Fn>
   static void submitBlocksAndWait(riften::Thiefpool &pool, std::size_t first, std::size_t last,
                                   Fn fn) {
-    auto fut = pool.enqueue([first, last, fn = std::move(fn)]() mutable { fn(first, last); });
-    fut.get();
+    // Per-block dispatch matching every other adapter's shape.
+    if (last <= first) {
+      return;
+    }
+    std::vector<std::future<void>> futures;
+    futures.reserve(last - first);
+    for (std::size_t i = first; i < last; ++i) {
+      futures.emplace_back(pool.enqueue([i, &fn]() { fn(i, i + 1U); }));
+    }
+    for (auto &f : futures) {
+      f.get();
+    }
   }
 };
 
@@ -425,12 +455,18 @@ template <> struct CompetitorTraits<::tf::Executor> {
     return std::make_unique<::tf::Executor>(static_cast<std::size_t>(participants));
   }
 
-  /// Single-block fan-out used by the dispatch-floor workload.
+  /// Per-block fan-out used by the dispatch-floor workload. One task per element
+  /// matches the shape every other adapter uses.
   template <class Fn>
   static void submitBlocksAndWait(::tf::Executor &exec, std::size_t first, std::size_t last,
                                   Fn fn) {
+    if (last <= first) {
+      return;
+    }
     ::tf::Taskflow flow;
-    flow.emplace([first, last, fn = std::move(fn)]() mutable { fn(first, last); });
+    for (std::size_t i = first; i < last; ++i) {
+      flow.emplace([i, &fn]() { fn(i, i + 1U); });
+    }
     exec.run(flow).wait();
   }
 
@@ -550,27 +586,20 @@ template <> struct CompetitorTraits<::Eigen::ThreadPool> {
     return std::make_unique<::Eigen::ThreadPool>(static_cast<int>(participants));
   }
 
-  /// Per-block schedule fan-out + barrier wait. Splits `[first, last)` into
-  /// one block per worker so the comparison stays apples-to-apples with the
-  /// other pools' fan-out shape; a single Schedule would skip the cross-thread
-  /// dispatch every worker on every other pool actually pays.
+  /// Per-element schedule fan-out + barrier wait. One Schedule call per element
+  /// matches every other adapter's shape so the comparison measures actual
+  /// fan-out cost, not a collapsed single-task path.
   template <class Fn>
   static void submitBlocksAndWait(::Eigen::ThreadPool &pool, std::size_t first, std::size_t last,
                                   Fn fn) {
-    const auto participantCount = static_cast<std::size_t>(pool.NumThreads());
-    const std::size_t span = last - first;
-    const std::size_t blocks = std::min(participantCount, span == 0 ? std::size_t{1} : span);
-    if (blocks == 0 || span == 0) {
-      fn(first, last);
+    if (last <= first) {
       return;
     }
-    const std::size_t chunk = (span + blocks - 1) / blocks;
+    const std::size_t blocks = last - first;
     ::Eigen::Barrier bar(static_cast<unsigned int>(blocks));
-    for (std::size_t b = 0; b < blocks; ++b) {
-      const std::size_t lo = first + std::min(span, b * chunk);
-      const std::size_t hi = first + std::min(span, (b + 1) * chunk);
-      pool.Schedule([&bar, lo, hi, &fn]() {
-        fn(lo, hi);
+    for (std::size_t i = first; i < last; ++i) {
+      pool.Schedule([&bar, i, &fn]() {
+        fn(i, i + 1U);
         bar.Notify();
       });
     }
@@ -715,15 +744,21 @@ template <> struct CompetitorTraits<OpenMpRunner> {
     return std::make_unique<OpenMpRunner>(OpenMpRunner{participants});
   }
 
-  /// Single-block dispatch: one `parallel for` over the trivial range.
+  /// Per-element parallel for. One body invocation per element matches every
+  /// other adapter's shape so the comparison measures actual N-way fan-out and
+  /// not a `single` short-circuit.
   template <class Fn>
   static void submitBlocksAndWait(OpenMpRunner &runner, std::size_t first, std::size_t last,
                                   Fn fn) {
+    if (last <= first) {
+      return;
+    }
     const int threads = static_cast<int>(runner.threads);
-#pragma omp parallel num_threads(threads)
-    {
-#pragma omp single
-      fn(first, last);
+    const auto firstSigned = static_cast<std::ptrdiff_t>(first);
+    const auto lastSigned = static_cast<std::ptrdiff_t>(last);
+#pragma omp parallel for num_threads(threads) schedule(static, 1)
+    for (std::ptrdiff_t i = firstSigned; i < lastSigned; ++i) {
+      fn(static_cast<std::size_t>(i), static_cast<std::size_t>(i + 1));
     }
   }
 

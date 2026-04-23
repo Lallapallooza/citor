@@ -13,10 +13,12 @@
 #define ANKERL_NANOBENCH_IMPLEMENT
 #include <nanobench.h>
 
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <iostream>
+#include <thread>
 
 #include "bench_format.h"
 #include "bench_registry.h"
@@ -60,8 +62,20 @@ int main(int argc, char ** /*argv*/) {
   omp_set_num_threads(16);
 #endif
 
+  // Inter-cell cool-off. After a 100 ms-budget cell that pegged 16 cores, the package
+  // accumulates thermal load and the next cell starts in a different operating point.
+  // Sleeping briefly between cells lets thermals, THP defrag scans, and any pending IRQ
+  // migrations settle so successive cells start from a comparable baseline. The cost is
+  // additive wall time, not bench correctness.
+  constexpr auto kInterCellCoolOff = std::chrono::milliseconds(100);
+
   bool anyRan = false;
+  bool firstCell = true;
   for (const auto &reg : registry()) {
+    if (!firstCell) {
+      std::this_thread::sleep_for(kInterCellCoolOff);
+    }
+    firstCell = false;
     const std::uint64_t rssBeforeKb = readPeakRssKb();
     const RusageSample rusageBefore = readRusage();
     try {
