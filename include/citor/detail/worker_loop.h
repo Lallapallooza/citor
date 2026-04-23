@@ -154,10 +154,13 @@ inline void runActiveJob(JobDescriptor &desc, std::uint32_t rank) noexcept {
 /// control Pool's shared control block.
 inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
   std::uint64_t lastSeenGen = 0;
+  // Cache the worker's identity locally; `WorkerState::workerId` lives on a
+  // read-only line but the local lets the compiler keep it in a register
+  // across the dispatch+stamp loop.
+  const std::uint32_t workerId = self.workerId;
+  std::uint64_t gen = control.generation.load(std::memory_order_acquire);
 
   while (true) {
-    const std::uint64_t gen = control.generation.load(std::memory_order_acquire);
-
     if ((gen & PoolControl::kShutdownBit) != 0) {
       // Drain any pending active job before exiting; the producer's join already saw the shutdown
       // bit, so any new job is the very last one and must complete.
@@ -172,13 +175,14 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
         auto *desc = static_cast<JobDescriptor *>(raw);
         if (desc->generation == gen) {
           self.dispatches.fetch_add(1, std::memory_order_relaxed);
-          runActiveJob(*desc, self.workerId);
+          runActiveJob(*desc, workerId);
         }
       }
       // Publish done-epoch with `release`: anything the body wrote is now visible to the
       // producer's acquire-load on this slot.
       self.doneEpoch.store(gen, std::memory_order_release);
       lastSeenGen = gen;
+      gen = control.generation.load(std::memory_order_acquire);
       continue;
     }
 
@@ -189,10 +193,14 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
       cpuRelax();
       const std::uint64_t spinGen = control.generation.load(std::memory_order_acquire);
       if (spinGen != lastSeenGen) {
+        // Carry the freshly-observed generation into the next loop pass instead of
+        // round-tripping through the top-of-loop reload.
+        gen = spinGen;
         parkRequired = false;
         break;
       }
       if ((spinGen & PoolControl::kShutdownBit) != 0) {
+        gen = spinGen;
         parkRequired = false;
         break;
       }
@@ -210,6 +218,7 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
     const std::uint32_t parkToken = control.futexWord.load(std::memory_order_relaxed);
     const std::uint64_t recheck = control.generation.load(std::memory_order_acquire);
     if (recheck != lastSeenGen) {
+      gen = recheck;
       continue;
     }
     if ((recheck & PoolControl::kShutdownBit) != 0 &&
@@ -225,6 +234,7 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
 #endif
     self.wakes.store(self.wakes.load(std::memory_order_relaxed) + 1U,
                      std::memory_order_relaxed);
+    gen = control.generation.load(std::memory_order_acquire);
   }
 }
 
