@@ -319,3 +319,256 @@ template <class T, class Pool, class EnqueueFn, class Kernel>
 }
 
 // =============================================================================
+// oneTBB -- native parallel_reduce
+// =============================================================================
+
+#ifdef CITOR_BENCH_HAS_TBB
+[[nodiscard]] BenchRow measureTbbPlain(std::size_t participants, const CyclesPerNanosecond &cal) {
+  auto arena = CompetitorTraits<::tbb::task_arena>::make(participants);
+  ReduceData<std::int64_t> d = buildData<std::int64_t>();
+  return measureLoop<std::int64_t>("oneTBB::parallel_reduce", cal, [&] {
+    return CompetitorTraits<::tbb::task_arena>::parallelReduce<std::int64_t>(
+        *arena, std::size_t{0}, kN, std::int64_t{0},
+        [&d](std::size_t lo, std::size_t hi, std::int64_t local) {
+          return local + partialSumPlain(d.in, lo, hi);
+        },
+        std::plus<std::int64_t>{});
+  });
+}
+
+[[nodiscard]] BenchRow measureTbbKahan(std::size_t participants, const CyclesPerNanosecond &cal) {
+  auto arena = CompetitorTraits<::tbb::task_arena>::make(participants);
+  ReduceData<double> d = buildData<double>();
+  return measureLoop<double>("oneTBB::parallel_reduce_kahan", cal, [&] {
+    return CompetitorTraits<::tbb::task_arena>::parallelReduce<double>(
+        *arena, std::size_t{0}, kN, 0.0,
+        [&d](std::size_t lo, std::size_t hi, double local) {
+          return local + partialSumKahan(d.in, lo, hi);
+        },
+        std::plus<double>{});
+  });
+}
+#endif
+
+// =============================================================================
+// Taskflow -- for_each_index over per-block partials, serial merge
+// =============================================================================
+
+#ifdef CITOR_BENCH_HAS_TASKFLOW
+template <class T, class Kernel>
+[[nodiscard]] T runTaskflowTwoWave(::tf::Executor &exec, const std::vector<T> &in,
+                                    std::size_t blocks, Kernel kernel) {
+  std::vector<T> partials(blocks, T{0});
+  ::tf::Taskflow flow;
+  flow.for_each_index(std::size_t{0}, blocks, std::size_t{1},
+                      [&in, &partials, blocks, kernel](std::size_t blockIdx) {
+                        const std::size_t blockSize = (kN + blocks - 1) / blocks;
+                        const std::size_t lo = std::min(kN, blockIdx * blockSize);
+                        const std::size_t hi = std::min(kN, (blockIdx + 1) * blockSize);
+                        if (lo < hi) {
+                          partials[blockIdx] = kernel(in, lo, hi);
+                        }
+                      });
+  exec.run(flow).wait();
+  T total{0};
+  for (T v : partials) {
+    total += v;
+  }
+  return total;
+}
+
+[[nodiscard]] BenchRow measureTaskflowPlain(std::size_t participants,
+                                              const CyclesPerNanosecond &cal) {
+  auto exec = CompetitorTraits<::tf::Executor>::make(participants);
+  ReduceData<std::int64_t> d = buildData<std::int64_t>();
+  return measureLoop<std::int64_t>("Taskflow::reduce_two_wave", cal, [&] {
+    return runTaskflowTwoWave<std::int64_t>(*exec, d.in, participants,
+                                              partialSumPlain<std::int64_t>);
+  });
+}
+
+[[nodiscard]] BenchRow measureTaskflowKahan(std::size_t participants,
+                                              const CyclesPerNanosecond &cal) {
+  auto exec = CompetitorTraits<::tf::Executor>::make(participants);
+  ReduceData<double> d = buildData<double>();
+  return measureLoop<double>("Taskflow::reduce_kahan_two_wave", cal, [&] {
+    return runTaskflowTwoWave<double>(*exec, d.in, participants, partialSumKahan);
+  });
+}
+#endif
+
+// =============================================================================
+// Eigen::ThreadPool -- per-block partials, Schedule + Barrier
+// =============================================================================
+
+#ifdef CITOR_BENCH_HAS_EIGEN_THREADPOOL
+template <class T, class Kernel>
+[[nodiscard]] T runEigenTwoWave(::Eigen::ThreadPool &pool, const std::vector<T> &in,
+                                  std::size_t blocks, Kernel kernel) {
+  std::vector<T> partials(blocks, T{0});
+  const std::size_t blockSize = (kN + blocks - 1) / blocks;
+  CompetitorTraits<::Eigen::ThreadPool>::parallelFor(
+      pool, std::size_t{0}, kN, blocks,
+      [&in, &partials, blockSize, kernel](std::size_t lo, std::size_t hi) {
+        const std::size_t blockIdx = lo / blockSize;
+        partials[blockIdx] = kernel(in, lo, hi);
+      });
+  T total{0};
+  for (T v : partials) {
+    total += v;
+  }
+  return total;
+}
+
+[[nodiscard]] BenchRow measureEigenPlain(std::size_t participants,
+                                          const CyclesPerNanosecond &cal) {
+  auto pool = CompetitorTraits<::Eigen::ThreadPool>::make(participants);
+  ReduceData<std::int64_t> d = buildData<std::int64_t>();
+  return measureLoop<std::int64_t>("Eigen::ThreadPool::reduce_two_wave", cal, [&] {
+    return runEigenTwoWave<std::int64_t>(*pool, d.in, participants,
+                                          partialSumPlain<std::int64_t>);
+  });
+}
+
+[[nodiscard]] BenchRow measureEigenKahan(std::size_t participants,
+                                          const CyclesPerNanosecond &cal) {
+  auto pool = CompetitorTraits<::Eigen::ThreadPool>::make(participants);
+  ReduceData<double> d = buildData<double>();
+  return measureLoop<double>("Eigen::ThreadPool::reduce_kahan_two_wave", cal, [&] {
+    return runEigenTwoWave<double>(*pool, d.in, participants, partialSumKahan);
+  });
+}
+#endif
+
+// =============================================================================
+// OpenMP -- parallel for reduction(+:)
+// =============================================================================
+
+#ifdef CITOR_BENCH_HAS_OPENMP
+[[nodiscard]] BenchRow measureOpenMpPlain(std::size_t participants,
+                                            const CyclesPerNanosecond &cal) {
+  ReduceData<std::int64_t> d = buildData<std::int64_t>();
+  const auto threads = static_cast<int>(participants);
+  return measureLoop<std::int64_t>("OpenMP::reduce_plus", cal, [&] {
+    std::int64_t total = 0;
+    const auto n = static_cast<std::ptrdiff_t>(kN);
+#pragma omp parallel for num_threads(threads) reduction(+ : total)
+    for (std::ptrdiff_t i = 0; i < n; ++i) {
+      total += d.in[static_cast<std::size_t>(i)];
+    }
+    return total;
+  });
+}
+
+[[nodiscard]] BenchRow measureOpenMpKahan(std::size_t participants,
+                                            const CyclesPerNanosecond &cal) {
+  // OpenMP's `reduction(+:)` on `double` is not Kahan-compensated; emulate by
+  // computing per-thread Kahan sums into a per-thread partials array and merging
+  // serially, matching the shape of the other emulations.
+  ReduceData<double> d = buildData<double>();
+  const auto threads = static_cast<int>(participants);
+  return measureLoop<double>("OpenMP::reduce_kahan_two_wave", cal, [&] {
+    std::vector<double> partials(static_cast<std::size_t>(threads), 0.0);
+    const auto blocks = static_cast<std::ptrdiff_t>(threads);
+#pragma omp parallel for num_threads(threads) schedule(static)
+    for (std::ptrdiff_t b = 0; b < blocks; ++b) {
+      const auto blockIdx = static_cast<std::size_t>(b);
+      const std::size_t blockSize = (kN + static_cast<std::size_t>(threads) - 1) /
+                                    static_cast<std::size_t>(threads);
+      const std::size_t lo = std::min(kN, blockIdx * blockSize);
+      const std::size_t hi = std::min(kN, (blockIdx + 1) * blockSize);
+      if (lo < hi) {
+        partials[blockIdx] = partialSumKahan(d.in, lo, hi);
+      }
+    }
+    double total = 0.0;
+    for (const double v : partials) {
+      total += v;
+    }
+    return total;
+  });
+}
+#endif
+
+// =============================================================================
+// Table builders + registrar
+// =============================================================================
+
+BenchTable buildPlainTable(std::size_t participants, const char *suffix,
+                           const CyclesPerNanosecond &cal) {
+  BenchTable table;
+  table.workload = std::string{"reduce_plus_int64_"} + suffix;
+  table.rows.push_back(measureCitorPlain(participants, cal));
+  table.rows.push_back(measureBsPlain(participants, cal));
+  table.rows.push_back(measureDpPlain(participants, cal));
+  table.rows.push_back(measureTaskPlain(participants, cal));
+  table.rows.push_back(measureRiftenPlain(participants, cal));
+#ifdef CITOR_BENCH_HAS_TBB
+  table.rows.push_back(measureTbbPlain(participants, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_TASKFLOW
+  table.rows.push_back(measureTaskflowPlain(participants, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_EIGEN_THREADPOOL
+  table.rows.push_back(measureEigenPlain(participants, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_OPENMP
+  table.rows.push_back(measureOpenMpPlain(participants, cal));
+#endif
+  return table;
+}
+
+BenchTable buildKahanTable(std::size_t participants, const char *suffix,
+                           const CyclesPerNanosecond &cal) {
+  BenchTable table;
+  table.workload = std::string{"reduce_kahan_double_"} + suffix;
+  table.rows.push_back(measureCitorKahan(participants, cal));
+  table.rows.push_back(measureBsKahan(participants, cal));
+  table.rows.push_back(measureDpKahan(participants, cal));
+  table.rows.push_back(measureTaskKahan(participants, cal));
+  table.rows.push_back(measureRiftenKahan(participants, cal));
+#ifdef CITOR_BENCH_HAS_TBB
+  table.rows.push_back(measureTbbKahan(participants, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_TASKFLOW
+  table.rows.push_back(measureTaskflowKahan(participants, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_EIGEN_THREADPOOL
+  table.rows.push_back(measureEigenKahan(participants, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_OPENMP
+  table.rows.push_back(measureOpenMpKahan(participants, cal));
+#endif
+  return table;
+}
+
+BenchTable runReducePlainJ2(const CyclesPerNanosecond &cal) {
+  return buildPlainTable(2, "j2_n1M", cal);
+}
+BenchTable runReducePlainJ8(const CyclesPerNanosecond &cal) {
+  return buildPlainTable(8, "j8_n1M", cal);
+}
+BenchTable runReducePlainJ16(const CyclesPerNanosecond &cal) {
+  return buildPlainTable(16, "j16_n1M", cal);
+}
+BenchTable runReduceKahanJ8(const CyclesPerNanosecond &cal) {
+  return buildKahanTable(8, "j8_n1M", cal);
+}
+BenchTable runReduceKahanJ16(const CyclesPerNanosecond &cal) {
+  return buildKahanTable(16, "j16_n1M", cal);
+}
+
+struct ReduceRegistrar {
+  ReduceRegistrar() {
+    registerWorkload({.name = "reduce_plus_int64_j2_n1M", .run = &runReducePlainJ2});
+    registerWorkload({.name = "reduce_plus_int64_j8_n1M", .run = &runReducePlainJ8});
+    registerWorkload({.name = "reduce_plus_int64_j16_n1M", .run = &runReducePlainJ16});
+    registerWorkload({.name = "reduce_kahan_double_j8_n1M", .run = &runReduceKahanJ8});
+    registerWorkload({.name = "reduce_kahan_double_j16_n1M", .run = &runReduceKahanJ16});
+  }
+};
+
+const ReduceRegistrar kRegistrar;
+
+} // namespace
+} // namespace citor::bench
