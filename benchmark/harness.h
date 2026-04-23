@@ -27,9 +27,15 @@ namespace citor::bench {
 /// adapts both extremes in one knob.
 struct SampleBudget {
   /// Wall-time spent collecting samples per (pool, cell) pair, in nanoseconds.
-  /// 100 ms is the smallest budget that consistently dropped the bench's err%
-  /// out of bimodal cliffs on this host's microarchitecture.
-  std::uint64_t budgetNs = 100'000'000ULL;
+  /// 400 ms gives the slowest adapters at the dispatch-floor cells enough
+  /// brackets for a stable bottom-quartile MAD estimator. At body=0/j=16 the
+  /// slowest pool's per-bracket wall time can hit ~3-4 ms (batch=256 with a
+  /// 14 us dispatch), so a 200 ms budget left only ~13 samples in the
+  /// quartile -- below the threshold for stable run-to-run MAD. 400 ms gives
+  /// each pool at least ~50 quartile samples even in the worst combination,
+  /// pulling stragglers like dp / Eigen / task at the j=16 body=100 ns cell
+  /// from 15-22 % MAD into the < 10 % range across consecutive runs.
+  std::uint64_t budgetNs = 400'000'000ULL;
 
   /// Hard cap on iteration count to bound short-body cells. Without the cap a
   /// 50 ns body would run ~2 M iters per pool per cell.

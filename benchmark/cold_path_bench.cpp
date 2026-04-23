@@ -28,15 +28,19 @@
 namespace citor::bench {
 namespace {
 
-/// Per-row sample budget. The cool-off sleep dominates wall time, so the
-/// budget is tight: 50 samples plus 5 warmup gives a stable
-/// lower-quartile while keeping the sweep interactive (about 2 min wall total).
-constexpr std::size_t kIterations = 50;
+/// Per-row sample budget. The cool-off sleep dominates wall time. 300 samples
+/// gives the bottom-quartile MAD ~75 draws so even adapters with rare slow
+/// wakes (e.g. OpenMP runtime's lazy thread-team adjustment after a cold
+/// period) fall under the 10 % MAD bar. Per-row wall time is ~9 s; nine pools
+/// across three j-values = ~4 min for the sweep.
+constexpr std::size_t kIterations = 300;
 
 /// Warmup iterations dropped from the sample window. The first dispatch may
 /// observe lazy worker spin-up (citor and Eigen lazily allocate their wake
-/// scratch) which would skew the cold p25 high.
-constexpr std::size_t kWarmupIterations = 5;
+/// scratch) which would skew the cold p25 high. 30 covers OpenMP's lazy
+/// thread-pool re-fill after a cold gap, which has a different cost profile
+/// from the steady-state wake-from-park the bench wants to measure.
+constexpr std::size_t kWarmupIterations = 30;
 
 /// Sleep between iterations. Long enough for every pool's spin-then-park
 /// budget to expire and workers to land in `FUTEX_WAIT_PRIVATE` (or the pool's

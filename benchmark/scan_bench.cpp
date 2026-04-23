@@ -55,28 +55,39 @@ struct ScanBenchHints {
 namespace citor::bench {
 namespace {
 
-/// Iterations per measurement.
-constexpr std::size_t kIterations = 200;
+/// Brackets per measurement.
+constexpr std::size_t kIterations = 500;
+
+/// Inner-batch size. Scan dispatch is ~70-100 us at n=1M; batching 4 pushes
+/// per-bracket wall time over the timer-tick floor while keeping samples
+/// within the 100 ms / cell wall budget.
+constexpr std::size_t kBatchSize = 4;
 
 /// Warmup iterations dropped from the sample window.
-constexpr std::size_t kWarmupIterations = 20;
+constexpr std::size_t kWarmupIterations = 30;
 
 /// Range length scanned per iteration.
 constexpr std::size_t kN = 1'000'000;
 
-/// Generic measurement loop sampling per-call wall time.
+/// Generic measurement loop sampling per-call wall time. Each bracket runs
+/// `kBatchSize` scans and reports the average per-scan ns.
 template <class RunFn>
 [[nodiscard]] BenchRow measureLoop(const char *name, const CyclesPerNanosecond &cal, RunFn run) {
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
-    run();
+    for (std::size_t k = 0; k < kBatchSize; ++k) {
+      run();
+    }
   }
   std::vector<double> samples;
   samples.reserve(kIterations);
   for (std::size_t i = 0; i < kIterations; ++i) {
     const std::uint64_t startCycles = readCyclesStart();
-    run();
+    for (std::size_t k = 0; k < kBatchSize; ++k) {
+      run();
+    }
     const std::uint64_t endCycles = readCyclesEnd();
-    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal) /
+                      static_cast<double>(kBatchSize));
   }
   return finalizeRow(name, samples);
 }

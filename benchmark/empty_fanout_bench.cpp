@@ -25,14 +25,22 @@
 namespace citor::bench {
 namespace {
 
-/// Iterations per measurement. 10 000 keeps per-row wall time on the order of
-/// seconds while giving enough samples for a stable median and err%.
-constexpr std::size_t kIterations = 10'000;
+/// Number of measurement brackets per row. Each bracket times an inner batch
+/// of `kBatchSize` dispatches so the per-bracket wall time stays well above
+/// the host's OS-jitter timescale (~1 kHz timer ticks); the headline is the
+/// p25 of per-dispatch ns across `kIterations` brackets.
+constexpr std::size_t kIterations = 2'000;
+
+/// Inner-batch size. Empty fan-out dispatch spans roughly two orders of magnitude across the
+/// surveyed pools; batching 64 dispatches per bracket pushes the slowest pool
+/// safely above the timer-tick floor and amortizes the `__rdtscp` overhead
+/// below the noise floor for the fastest pool.
+constexpr std::size_t kBatchSize = 64;
 
 /// Warmup iterations dropped from the sample window. Hot dispatch numbers are
 /// only meaningful once each worker's spin-then-park budget has been observed
 /// at least once, which typically takes ~100 dispatches.
-constexpr std::size_t kWarmupIterations = 200;
+constexpr std::size_t kWarmupIterations = 50;
 
 /// Sample one pool's empty-fan-out latency over `kIterations` rounds.
 ///
@@ -65,18 +73,24 @@ template <class PoolT>
 
   // Warmup: each pool may amortize first-time setup across the first handful
   // of dispatches (worker spin-up, queue allocation, futex-counter
-  // observation). Drop the first `kWarmupIterations` from the sample window.
+  // observation). The warmup runs `kBatchSize` dispatches per iteration to
+  // mirror the steady-state shape.
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
-    Traits::submitBlocksAndWait(*pool, 0, participants, body);
+    for (std::size_t k = 0; k < kBatchSize; ++k) {
+      Traits::submitBlocksAndWait(*pool, 0, participants, body);
+    }
   }
 
   std::vector<double> samples;
   samples.reserve(kIterations);
   for (std::size_t i = 0; i < kIterations; ++i) {
     const std::uint64_t startCycles = readCyclesStart();
-    Traits::submitBlocksAndWait(*pool, 0, participants, body);
+    for (std::size_t k = 0; k < kBatchSize; ++k) {
+      Traits::submitBlocksAndWait(*pool, 0, participants, body);
+    }
     const std::uint64_t endCycles = readCyclesEnd();
-    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal) /
+                      static_cast<double>(kBatchSize));
   }
 
   // Touch the sink so the optimizer cannot prove the bench is dead code.

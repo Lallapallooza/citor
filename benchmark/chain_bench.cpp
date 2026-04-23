@@ -74,11 +74,17 @@ struct ChainBenchPerStageHints {
 namespace citor::bench {
 namespace {
 
-/// Number of chain calls per measurement.
-constexpr std::size_t kIterations = 1'000;
+/// Number of measurement brackets per row. Each bracket times an inner batch
+/// of `kBatchSize` chain calls so per-bracket wall time stays above the
+/// host's timer-tick floor.
+constexpr std::size_t kIterations = 500;
+
+/// Inner-batch size. Chain dispatch is ~5-10 us at j={8,16}; batching 16
+/// pushes per-bracket wall time to ~80-160 us, well above OS-jitter timescale.
+constexpr std::size_t kBatchSize = 16;
 
 /// Warmup iterations dropped from the sample window.
-constexpr std::size_t kWarmupIterations = 50;
+constexpr std::size_t kWarmupIterations = 25;
 
 /// Number of stages per chain. 7 empty stages match the spec's headline.
 constexpr std::size_t kStageCount = 7;
@@ -86,19 +92,26 @@ constexpr std::size_t kStageCount = 7;
 /// Iteration range upper bound forwarded to each stage. Empty body in practice.
 constexpr std::size_t kRangeN = 16;
 
-/// Generic measurement loop sampling per-call wall time.
+/// Generic measurement loop sampling per-call wall time. Each bracket runs
+/// `kBatchSize` chain calls; per-bracket cycles divided by the batch size to
+/// produce per-call ns samples.
 template <class RunFn>
 [[nodiscard]] BenchRow measureLoop(const char *name, const CyclesPerNanosecond &cal, RunFn run) {
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
-    run();
+    for (std::size_t k = 0; k < kBatchSize; ++k) {
+      run();
+    }
   }
   std::vector<double> samples;
   samples.reserve(kIterations);
   for (std::size_t i = 0; i < kIterations; ++i) {
     const std::uint64_t startCycles = readCyclesStart();
-    run();
+    for (std::size_t k = 0; k < kBatchSize; ++k) {
+      run();
+    }
     const std::uint64_t endCycles = readCyclesEnd();
-    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal) /
+                      static_cast<double>(kBatchSize));
   }
   return finalizeRow(name, samples);
 }

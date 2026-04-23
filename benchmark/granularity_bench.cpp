@@ -25,6 +25,21 @@
 namespace citor::bench {
 namespace {
 
+template <class PoolT> class MeasurementScope {
+public:
+  explicit MeasurementScope(PoolT &) noexcept {}
+};
+
+template <> class MeasurementScope<citor::ThreadPool> {
+public:
+  explicit MeasurementScope(citor::ThreadPool &pool) noexcept
+      : m_producerGuard(pool.bindProducerSlot()), m_latencyGuard(pool.lowLatencyScope()) {}
+
+private:
+  citor::ThreadPool::ProducerAffinityGuard m_producerGuard;
+  citor::ThreadPool::LowLatencyGuard m_latencyGuard;
+};
+
 /// Spin on the TSC until |targetNs| wall-time nanoseconds elapse.
 ///
 /// The body of every pool's dispatch invokes this once with the cell's
@@ -45,6 +60,42 @@ inline void spinForNs(double targetNs, const CyclesPerNanosecond &cal) noexcept 
   }
 }
 
+/// Inner-batch size for one measurement bracket at body cost |bodyNs|.
+///
+/// Each `runUntilBudget` sample times a tight loop of |batchSize| dispatches
+/// and reports the average per-dispatch cycle delta. Two effects tighten the
+/// sample distribution:
+///
+/// 1. The fixed per-bracket `__rdtscp` overhead amortizes
+///    across the batch, so on body=0 / body=100 ns cells a sub-microsecond
+///    dispatch is no longer competing with bracket noise of comparable size.
+/// 2. Short OS jitter events (1 kHz timer tick, IRQ delivery, soft-IRQ
+///    processing, THP defrag pass) cluster into individual dispatches; with a
+///    batch of K, one perturbed dispatch contributes only `1/K` of the bracket
+///    average instead of becoming a bimodal slow-mode sample on its own.
+///
+/// The batch sizes target a per-bracket wall time of roughly 50-300 us across
+/// the slowest adapter at each cell, which is above the dominant OS-jitter
+/// timescale on this host while still leaving hundreds of brackets per cell
+/// within the standard 100 ms budget.
+[[nodiscard]] constexpr std::size_t pickBatchSize(double bodyNs) noexcept {
+  if (bodyNs <= 100.0) {
+    return 256U;
+  }
+  if (bodyNs <= 1'000.0) {
+    return 64U;
+  }
+  if (bodyNs <= 10'000.0) {
+    return 8U;
+  }
+  // Body cells at >= 100 us run a single dispatch per bracket: their per-bracket
+  // wall time already dwarfs both the `__rdtscp` overhead and the host's
+  // 1 ms timer-tick interval, so further batching only risks straddling the
+  // tick boundary and reintroducing bimodal noise (observed: at body=100 us,
+  // batch=2 made `task_thread_pool`'s err% go from 17 % to 24 %).
+  return 1U;
+}
+
 /// Sample one pool's per-dispatch latency at one (`j`, `bodyNs`) cell.
 ///
 /// PoolT          Concrete pool type (the trait's specialization key).
@@ -57,6 +108,7 @@ template <class PoolT>
                                           const CyclesPerNanosecond &cal) {
   using Traits = CompetitorTraits<PoolT>;
   auto pool = Traits::make(participants);
+  [[maybe_unused]] MeasurementScope<PoolT> measurementScope(*pool);
 
   std::atomic<std::uint64_t> sink{0};
   const auto body = [&sink, bodyNs, &cal](std::size_t lo, std::size_t hi) noexcept {
@@ -64,14 +116,20 @@ template <class PoolT>
     sink.fetch_add(hi - lo, std::memory_order_relaxed);
   };
 
-  // Time-budget collection: many short samples for the body=0 / body=100 ns cells, fewer
-  // samples for the body=1 ms cell. Keeps per-cell wall time roughly constant and gives the
-  // sub-microsecond cells enough draws to stabilize the lower-quartile headline.
+  // Time-budget collection with body-cost-driven inner batching: each sample times a tight
+  // loop of `batchSize` dispatches and reports the average per-dispatch cycle delta. The
+  // batch amortizes the bracket's `__rdtscp` overhead and smooths short OS-jitter spikes
+  // (timer ticks, IRQ delivery) so the resulting RSD reflects steady-state dispatch cost
+  // rather than the bimodal envelope a single-dispatch bracket exposes on sub-microsecond
+  // cells.
+  const std::size_t batchSize = pickBatchSize(bodyNs);
   auto samples = runUntilBudget(cal, kDefaultSampleBudget, [&]() noexcept {
     const std::uint64_t startCycles = readCyclesStart();
-    Traits::submitBlocksAndWait(*pool, 0, participants, body);
+    for (std::size_t k = 0; k < batchSize; ++k) {
+      Traits::submitBlocksAndWait(*pool, 0, participants, body);
+    }
     const std::uint64_t endCycles = readCyclesEnd();
-    return endCycles - startCycles;
+    return (endCycles - startCycles) / batchSize;
   });
 
   (void)sink.load(std::memory_order_relaxed);
