@@ -189,6 +189,11 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
     // No new work. Spin within the budget, then park on the futex.
     const std::uint64_t startTsc = readTsc();
     bool parkRequired = true;
+    // `rdtscp` serializes the pipeline and costs roughly the same as a small batch of
+    // pause-load-compare iterations on Zen, so reading the TSC every iter doubled the spin loop
+    // body. Sample it every 64 iters instead: the overshoot bound is `64 * pause_cycles`
+    // (microseconds, well under the cycle budget), and the iteration cap still covers the
+    // descheduled-worker case where the TSC sample never fires.
     for (std::uint32_t iter = 0; iter < kSpinAfterBulkJob.maxIters; ++iter) {
       cpuRelax();
       const std::uint64_t spinGen = control.generation.load(std::memory_order_acquire);
@@ -204,7 +209,7 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
         parkRequired = false;
         break;
       }
-      if (readTsc() - startTsc >= kSpinAfterBulkJob.maxCycles) {
+      if ((iter & 63U) == 63U && readTsc() - startTsc >= kSpinAfterBulkJob.maxCycles) {
         break;
       }
     }
