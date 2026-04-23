@@ -4,8 +4,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
-#include <memory>
-#include <new>
 #include <utility>
 
 #include "citor/hints.h"
@@ -74,62 +72,31 @@ struct PlexState {
   /// after joining and rethrows if non-null.
   alignas(kCacheLine) std::atomic<std::exception_ptr *> firstException{nullptr};
 
-  /// Custom deleter that destroys each `PlexDoneSlot` in place and frees the aligned heap
-  /// block.
+  /// Borrowed pointer to the pool's pre-allocated per-worker completion slots.
   ///
-  /// Mirrors `ThreadPool::WorkerArrayDeleter`: the slot type holds an `std::atomic` which is not
-  /// copy- or move-insertable, so `std::vector` cannot hold it directly. Bare aligned `operator
-  /// new[]` plus per-element placement-new is the established pattern in the pool.
-  struct DoneArrayDeleter {
-    /// Number of slots in the block; supplied by `allocateDone`.
-    std::size_t count = 0;
+  /// The pool owns the storage (`ThreadPool::m_plexDoneSlots`); the plex call reserves a fresh
+  /// interval `[epochBase, epochBase + nPhases]` in the pool's monotonically-advancing
+  /// `m_plexEpochBase` counter so successive calls observe disjoint targets without zero-resetting
+  /// the slots. Sized `participants` valid elements; reading past that index is undefined.
+  PlexDoneSlot *doneSlots = nullptr;
 
-    /// Destroy and deallocate the slot block previously created via aligned `operator new`.
-    ///
-    /// ptr Pointer to the first slot; may be `nullptr`.
-    void operator()(PlexDoneSlot *ptr) const noexcept {
-      if (ptr == nullptr) {
-        return;
-      }
-      for (std::size_t i = count; i > 0; --i) {
-        (ptr + (i - 1))->~PlexDoneSlot();
-      }
-      ::operator delete(static_cast<void *>(ptr), std::align_val_t{kCacheLine});
-    }
-  };
-
-  /// Per-worker completion slots, sized `participants`. Index 0 is the producer; indices
-  /// `[1, participants)` are background workers.
+  /// Per-call base of the pool's monotonic done-epoch counter.
   ///
-  /// Allocated through aligned `operator new[]` so each slot's first byte falls on a cache-line
-  /// boundary; the `alignas(kCacheLine)` on `PlexDoneSlot` then keeps adjacent slots on
-  /// separate lines, eliminating false sharing on the worker-write hot path.
-  std::unique_ptr<PlexDoneSlot, DoneArrayDeleter> done{nullptr, DoneArrayDeleter{}};
-
-  /// Allocate the per-worker `done` slots for |p| participants.
-  ///
-  /// Each slot is default-constructed with `done = 0`. Throws `std::bad_alloc` on failure.
-  ///
-  /// p Number of participants the plex will dispatch.
-  void allocateDone(std::size_t p) {
-    void *raw = ::operator new(sizeof(PlexDoneSlot) * p, std::align_val_t{kCacheLine});
-    auto *first = static_cast<PlexDoneSlot *>(raw);
-    for (std::size_t i = 0; i < p; ++i) {
-      ::new (static_cast<void *>(first + i)) PlexDoneSlot();
-    }
-    done = std::unique_ptr<PlexDoneSlot, DoneArrayDeleter>(first, DoneArrayDeleter{p});
-    participants = static_cast<std::uint32_t>(p);
-  }
+  /// Stamps are absolute: `done = epochBase + p` after running phase `p`. Waits compare against
+  /// `epochBase + p`. The producer reserves the interval under the dispatch gate before
+  /// publishing, so prior-dispatch stamps cannot satisfy a current wait. Cancellation stamps
+  /// `epochBase + nPhases` (the saturation value) so peers waiting on any active phase advance.
+  std::uint64_t epochBase = 0;
 
   /// Subscript a slot by index.
   ///
   /// The slot itself owns mutable atomics; the accessor is `const` because reading from the
-  /// `unique_ptr` does not modify the owning state, and the returned slot's atomics carry their
-  /// own internal mutability.
+  /// borrowed pointer does not modify the owning state, and the returned slot's atomics carry
+  /// their own internal mutability.
   ///
   /// idx Slot index in `[0, participants)`.
   /// Reference to the slot.
-  [[nodiscard]] PlexDoneSlot &doneSlot(std::size_t idx) const noexcept { return done.get()[idx]; }
+  [[nodiscard]] PlexDoneSlot &doneSlot(std::size_t idx) const noexcept { return doneSlots[idx]; }
 
   /// Compute a slot's contiguous row range over `[0, n)` using static partitioning.
   ///
