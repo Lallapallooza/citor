@@ -92,10 +92,19 @@ struct ChainState {
 
   /// Borrowed pointer to the pool's pre-allocated per-worker completion slots.
   ///
-  /// The pool owns the storage; the chain call is responsible for zero-resetting each slot's
-  /// `done` value at entry so successive calls observe a fresh epoch. Sized `participants` valid
+  /// The pool owns the storage; the chain call reserves a fresh interval `[epochBase,
+  /// epochBase + nStages]` in the pool's monotonically-advancing epoch counter so successive calls
+  /// observe disjoint targets without zero-resetting the slots. Sized `participants` valid
   /// elements; reading past that index is undefined.
   ChainDoneSlot *doneSlots = nullptr;
+
+  /// Per-call base of the pool's monotonic done-epoch counter.
+  ///
+  /// Stamps are absolute: `done = epochBase + I + 1` where `I` is the just-finished stage index.
+  /// Waits compare against `epochBase + target`. The producer reserves the interval under the
+  /// dispatch gate before publishing, so prior-dispatch values cannot satisfy a current wait.
+  /// Cancellation stamps `epochBase + nStages` so peers waiting on any active stage advance.
+  std::uint64_t epochBase = 0;
 
   /// Subscript a slot by index.
   ///

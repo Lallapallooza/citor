@@ -105,10 +105,19 @@ template <class T> struct ScanState {
 
   /// Borrowed pointer to the pool's pre-allocated per-worker completion slots.
   ///
-  /// The pool owns the storage; the scan call is responsible for zero-resetting each slot's
-  /// `done` value at entry so successive calls observe a fresh epoch. Sized `participants` valid
+  /// The pool owns the storage; the scan call reserves a fresh interval `[epochBase,
+  /// epochBase + 2]` in the pool's monotonically-advancing epoch counter so successive calls
+  /// observe disjoint targets without zero-resetting the slots. Sized `participants` valid
   /// elements; reading past that index is undefined.
   ChainDoneSlot *doneSlots = nullptr;
+
+  /// Per-call base of the pool's monotonic done-epoch counter.
+  ///
+  /// Stamps are absolute: `done = epochBase + 1` after Pass 1, `done = epochBase + 2` after Pass 2.
+  /// Waits compare against `epochBase + 1` or `epochBase + 2`. The producer reserves the interval
+  /// under the dispatch gate before publishing, so prior-dispatch values cannot satisfy a current
+  /// wait. Cancellation stamps `epochBase + 2` so peers waiting on either pass advance.
+  std::uint64_t epochBase = 0;
 
   /// Subscript a slot by index.
   ///
