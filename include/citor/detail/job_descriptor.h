@@ -30,7 +30,7 @@ namespace citor::detail {
 /// stack. Because every primitive in v1 is synchronous (the producer joins before returning), the
 /// closure outlives the descriptor by construction.
 ///
-/// The padding overhead trades several hundred bytes of stack against
+/// The padding overhead trades: the layout trades several hundred bytes of stack against
 /// MESI cache-coherency traffic on the contended atomics, which is the dominant hot-path cost.
 // NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
 struct alignas(kCacheLine) JobDescriptor {
@@ -81,19 +81,22 @@ struct alignas(kCacheLine) JobDescriptor {
   /// Cancellation token observed by workers at chunk boundaries when the call site requested it.
   CancellationToken token;
 
-  /// Centralized counter used by `Balance::DynamicChunked`; workers race on a relaxed
-  /// `fetch_add(1)` to claim the next block id. Sits on its own line so contention here does not
-  /// invalidate the immutable descriptor body.
-  alignas(kCacheLine) std::atomic<std::uint64_t> nextBlock{0};
-
   /// First-exception capture slot. Workers `compare_exchange` this from null to a heap-allocated
   /// `std::exception_ptr` to record the first failure deterministically; subsequent throws drop.
   /// Worker rank that filled the slot is captured alongside so the slot's line carries both
-  /// values that change together.
-  alignas(kCacheLine) std::atomic<std::exception_ptr *> firstException{nullptr};
+  /// values that change together. Co-located with `token` on the secondary publication line so
+  /// the worker's per-block exception probe and cancellation poll share one cache-line fetch.
+  /// Common-case writes here are rare (only on a throwing body), so the producer's body-line
+  /// stays uninvalidated.
+  std::atomic<std::exception_ptr *> firstException{nullptr};
 
   /// Worker rank that filled `firstException`; used to break ties between simultaneous throws.
   std::atomic<std::uint32_t> exceptionWorkerId{0};
+
+  /// Centralized counter used by `Balance::DynamicChunked`; workers race on a relaxed
+  /// `fetch_add(1)` to claim the next block id. Sits on its own line so contention here does not
+  /// invalidate the immutable descriptor body or the exception-capture line.
+  alignas(kCacheLine) std::atomic<std::uint64_t> nextBlock{0};
 };
 
 } // namespace citor::detail
