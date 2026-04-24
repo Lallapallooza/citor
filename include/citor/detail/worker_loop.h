@@ -174,7 +174,6 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
       if (raw != nullptr) {
         auto *desc = static_cast<JobDescriptor *>(raw);
         if (desc->generation == gen) {
-          self.dispatches.fetch_add(1, std::memory_order_relaxed);
           runActiveJob(*desc, workerId);
         }
       }
