@@ -48,8 +48,19 @@ struct PoolControl {
   ///
   /// Bit 0 = shutdown, bit 1 = cancel-broadcast, bits 2..63 = monotonic phase. Producer publishes
   /// a new phase via `release`; workers read with `acquire`. Together with `activeJob` this is the
-  /// acquire/release pair that orders descriptor visibility.
+  /// acquire/release pair that orders descriptor visibility. `activeJob` is co-located on the
+  /// same cache line so the worker's first acquire-load of `generation` also pulls in the
+  /// new descriptor pointer with one cache-line transit.
   alignas(kCacheLine) std::atomic<std::uint64_t> generation{0};
+
+  /// Descriptor pointer published alongside each new generation.
+  ///
+  /// Co-located with `generation` on the same cache line: the producer writes both in program
+  /// order (`activeJob` first, then `generation`), and on x86 TSO the worker's acquire-load of
+  /// `generation` synchronizes-with both stores in a single cache-line fetch. The slot is
+  /// cleared to `nullptr` once in `shutdownAndJoin` (BEFORE the shutdown bit is set on
+  /// `generation`) so worker `shouldExit` semantics are preserved without per-dispatch clears.
+  std::atomic<void *> activeJob{nullptr};
 
   /// 32-bit parking token used as the futex address.
   ///
@@ -58,13 +69,6 @@ struct PoolControl {
   /// construction because callers re-read `generation` after a wake before assuming a new job
   /// landed.
   alignas(kCacheLine) std::atomic<std::uint32_t> futexWord{0};
-
-  /// Descriptor pointer published alongside each new generation.
-  ///
-  /// The slot is `nullptr` until a primitive publishes a `JobDescriptor` via `release`; workers
-  /// consume the descriptor via `acquire`. While the slot is `nullptr` the worker loop treats
-  /// every observed generation change as a no-op.
-  alignas(kCacheLine) std::atomic<void *> activeJob{nullptr};
 
   /// Active low-latency scopes that keep workers spinning instead of parking.
   ///
