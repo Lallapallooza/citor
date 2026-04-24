@@ -67,4 +67,50 @@ inline void runStaticPartition(JobDescriptor &desc, std::uint32_t rank) noexcept
   }
 }
 
+/// Typed slot-0 partition runner: same as `runStaticPartition` but calls `fn(lo, hi)`
+///        directly instead of going through `desc.body`'s `FunctionRef` indirection.
+///
+/// Used by the producer's slot-0 path inside `dispatchOneStaticLockedBody` when the caller has
+/// the body's static type available (parallelFor / parallelReduce / bulkForQueries instantiations
+/// pass the lambda type as a template parameter). Workers still go through `desc.body` because
+/// they cannot recover the body's type from the published descriptor.
+///
+/// Eliminates the `call *<func_ptr>` indirect call (a large slice of
+/// `runStaticPartition`'s samples landed on this instruction) for the producer's slot-0 body.
+template <class FOp>
+inline void runStaticPartitionTyped(JobDescriptor &desc, std::uint32_t rank, FOp &fn) noexcept {
+  const std::size_t participants = desc.participants;
+  const std::size_t blockCount = desc.blockCount;
+  const std::size_t chunk = desc.chunk;
+  const std::size_t first = desc.first;
+  const std::size_t last = desc.last;
+
+  for (std::size_t blockId = rank; blockId < blockCount; blockId += participants) {
+    if (desc.firstException.load(std::memory_order_acquire) != nullptr) [[unlikely]] {
+      return;
+    }
+    if (desc.token.stop_requested()) [[unlikely]] {
+      return;
+    }
+    const std::size_t lo = first + (blockId * chunk);
+    const std::size_t hi = std::min(lo + chunk, last);
+    try {
+      fn(lo, hi);
+    } catch (...) {
+      auto *eptr = new (std::nothrow) std::exception_ptr(std::current_exception());
+      if (eptr == nullptr) {
+        std::terminate();
+      }
+      std::exception_ptr *expected = nullptr; // NOLINT(misc-const-correctness)
+      if (!desc.firstException.compare_exchange_strong(expected, eptr, std::memory_order_release,
+                                                       std::memory_order_acquire)) {
+        delete eptr;
+      } else {
+        desc.exceptionWorkerId.store(rank, std::memory_order_release);
+      }
+      return;
+    }
+  }
+}
+
 } // namespace citor::detail
