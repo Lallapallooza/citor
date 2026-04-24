@@ -187,11 +187,17 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
     }
 
     // No new work. Spin within the budget, then park on the futex.
-    if (control.hotSpinDepth.load(std::memory_order_acquire) != 0U) {
+    const bool lowLatencyActive = control.hotSpinDepth.load(std::memory_order_acquire) != 0U;
+    if (lowLatencyActive) {
       const std::uint64_t hotEpoch = control.hotSpinEpoch.load(std::memory_order_acquire);
       self.hotSpinEpoch.store(hotEpoch, std::memory_order_release);
     }
-    const std::uint64_t startTsc = readTsc();
+    // Under low-latency scope the spin's cycle budget is dead weight: the contract is
+    // "do not park", so an iter-cap exit just routes back into the outer `while(true)` and
+    // re-enters spin. Skipping the `rdtscp` (serializing, ~30-50 cycles per dispatch in
+    // steady state) removes the ride-along stall the worker pays right after stamping
+    // `doneEpoch` and before observing the next published generation.
+    const std::uint64_t startTsc = lowLatencyActive ? 0ULL : readTsc();
     bool parkRequired = true;
     // `rdtscp` serializes the pipeline and costs roughly the same as a small batch of
     // pause-load-compare iterations on Zen, so reading the TSC every iter doubled the spin loop
@@ -213,7 +219,8 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
         parkRequired = false;
         break;
       }
-      if ((iter & 63U) == 63U && readTsc() - startTsc >= kSpinAfterBulkJob.maxCycles) {
+      if (!lowLatencyActive && (iter & 63U) == 63U &&
+          readTsc() - startTsc >= kSpinAfterBulkJob.maxCycles) {
         break;
       }
     }
