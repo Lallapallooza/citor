@@ -173,9 +173,10 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
       void *raw = control.activeJob.load(std::memory_order_acquire);
       if (raw != nullptr) {
         auto *desc = static_cast<JobDescriptor *>(raw);
-        if (desc->generation == gen) {
-          runActiveJob(*desc, workerId);
-        }
+        // The producer's release-store on `activeJob` happens-before its release-store on
+        // `generation`; this acquire-load on `gen` therefore implies `desc->generation == gen`.
+        // The defensive equality check is dead cycles on the hot path -- skip and dispatch.
+        runActiveJob(*desc, workerId);
       }
       // Publish done-epoch with `release`: anything the body wrote is now visible to the
       // producer's acquire-load on this slot.
