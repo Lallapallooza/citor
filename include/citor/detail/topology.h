@@ -201,6 +201,25 @@ inline Topology detectTopology() {
   }
 
   topo.ccdCount = static_cast<std::uint32_t>(topo.ccdGroups.size());
+
+  // Reorder `physicalCores` so each CCD's members appear in descending CPU id order. The
+  // standalone-pool slot-0 CPU (the caller thread's current CPU) is later rotated to the
+  // front by `reserveProducerCpuFirst`; until that rotation, putting the highest-CPU member
+  // of each CCD first means slots 1..N-1 of the same-CCD subset land on the higher-numbered
+  // sibling pairs. On Linux those pairs typically have lighter IRQ steering than the BSP-
+  // adjacent siblings (CPU 0+16 / 1+17 are the conventional irqbalance defaults), so a
+  // hot-spinning worker on the high-CPU end of the CCD sees fewer SMT-cross-issue collisions
+  // from kthreads on its sibling.
+  std::vector<std::uint32_t> reordered;
+  reordered.reserve(topo.physicalCores.size());
+  for (const auto &group : topo.ccdGroups) {
+    for (auto it = group.rbegin(); it != group.rend(); ++it) {
+      reordered.push_back(*it);
+    }
+  }
+  if (reordered.size() == topo.physicalCores.size()) {
+    topo.physicalCores = std::move(reordered);
+  }
   return topo;
 }
 
