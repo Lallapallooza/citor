@@ -187,6 +187,10 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
     }
 
     // No new work. Spin within the budget, then park on the futex.
+    if (control.hotSpinDepth.load(std::memory_order_acquire) != 0U) {
+      const std::uint64_t hotEpoch = control.hotSpinEpoch.load(std::memory_order_acquire);
+      self.hotSpinEpoch.store(hotEpoch, std::memory_order_release);
+    }
     const std::uint64_t startTsc = readTsc();
     bool parkRequired = true;
     // `rdtscp` serializes the pipeline and costs roughly the same as a small batch of
@@ -214,6 +218,12 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
       }
     }
     if (!parkRequired) {
+      continue;
+    }
+    if (control.hotSpinDepth.load(std::memory_order_acquire) != 0U) {
+      const std::uint64_t hotEpoch = control.hotSpinEpoch.load(std::memory_order_acquire);
+      self.hotSpinEpoch.store(hotEpoch, std::memory_order_release);
+      gen = control.generation.load(std::memory_order_acquire);
       continue;
     }
 

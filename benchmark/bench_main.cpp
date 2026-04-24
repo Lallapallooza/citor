@@ -18,7 +18,9 @@
 #include <cstdlib>
 #include <exception>
 #include <iostream>
+#include <string_view>
 #include <thread>
+#include <vector>
 
 #include "bench_format.h"
 #include "bench_registry.h"
@@ -38,18 +40,98 @@ void printCalibrationBanner(const citor::bench::CyclesPerNanosecond &cal) {
             << (cal.value > 0.0 ? 1000.0 / cal.value : 0.0) << " ns/cycle)\n";
 }
 
+struct CliOptions {
+  std::vector<std::string_view> filters;
+  bool listOnly = false;
+};
+
+void printUsage(std::ostream &out) {
+  out << "usage: parallel_bench [--filter SUBSTR] [--filter=SUBSTR] [--list]\n"
+      << "       parallel_bench SUBSTR\n";
+}
+
+bool parseArgs(int argc, char **argv, CliOptions &opts) {
+  for (int i = 1; i < argc; ++i) {
+    const std::string_view arg{argv[i]};
+    if (arg == "--help" || arg == "-h") {
+      printUsage(std::cout);
+      std::exit(EXIT_SUCCESS);
+    }
+    if (arg == "--list") {
+      opts.listOnly = true;
+      continue;
+    }
+    if (arg == "--filter" || arg == "-f") {
+      if (i + 1 >= argc) {
+        std::cerr << "parallel_bench: --filter requires a substring\n";
+        return false;
+      }
+      opts.filters.emplace_back(argv[++i]);
+      continue;
+    }
+    constexpr std::string_view kFilterPrefix = "--filter=";
+    if (arg.substr(0, kFilterPrefix.size()) == kFilterPrefix) {
+      const std::string_view value = arg.substr(kFilterPrefix.size());
+      if (value.empty()) {
+        std::cerr << "parallel_bench: --filter requires a non-empty substring\n";
+        return false;
+      }
+      opts.filters.push_back(value);
+      continue;
+    }
+    if (!arg.empty() && arg.front() == '-') {
+      std::cerr << "parallel_bench: unknown option '" << arg << "'\n";
+      printUsage(std::cerr);
+      return false;
+    }
+    opts.filters.push_back(arg);
+  }
+  return true;
+}
+
+bool matchesFilters(std::string_view name, const std::vector<std::string_view> &filters) {
+  if (filters.empty()) {
+    return true;
+  }
+  for (const std::string_view filter : filters) {
+    if (name.find(filter) != std::string_view::npos) {
+      return true;
+    }
+  }
+  return false;
+}
+
 } // namespace
 
-int main(int argc, char ** /*argv*/) {
+int main(int argc, char **argv) {
   using namespace citor::bench;
 
-  const CyclesPerNanosecond cal = calibrateCyclesPerNs();
-  if (argc > 1) {
-    // The bench accepts no CLI arguments yet; warn so a stray flag does not
-    // silently affect a result the caller is about to compare.
-    std::cerr << "parallel_bench: ignoring CLI arguments (none accepted)\n";
+  CliOptions opts;
+  if (!parseArgs(argc, argv, opts)) {
+    return EXIT_FAILURE;
   }
+  if (registry().empty()) {
+    std::cerr << "parallel_bench: no workloads registered; check link order\n";
+    return EXIT_FAILURE;
+  }
+  if (opts.listOnly) {
+    for (const auto &reg : registry()) {
+      if (matchesFilters(reg.name, opts.filters)) {
+        std::cout << reg.name << '\n';
+      }
+    }
+    return EXIT_SUCCESS;
+  }
+
+  const CyclesPerNanosecond cal = calibrateCyclesPerNs();
   printCalibrationBanner(cal);
+  if (!opts.filters.empty()) {
+    std::cout << "Workload filter:";
+    for (const std::string_view filter : opts.filters) {
+      std::cout << ' ' << filter;
+    }
+    std::cout << "\n";
+  }
   printChecklist(std::cout);
   std::cout << '\n';
 
@@ -72,6 +154,9 @@ int main(int argc, char ** /*argv*/) {
   bool anyRan = false;
   bool firstCell = true;
   for (const auto &reg : registry()) {
+    if (!matchesFilters(reg.name, opts.filters)) {
+      continue;
+    }
     if (!firstCell) {
       std::this_thread::sleep_for(kInterCellCoolOff);
     }
@@ -101,7 +186,7 @@ int main(int argc, char ** /*argv*/) {
   }
 
   if (!anyRan) {
-    std::cerr << "parallel_bench: no workloads registered; check link order\n";
+    std::cerr << "parallel_bench: no workloads matched filter\n";
     return EXIT_FAILURE;
   }
   return EXIT_SUCCESS;

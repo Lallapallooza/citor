@@ -79,6 +79,9 @@ struct WorkerState {
   /// Number of dispatches this worker participated in.
   alignas(kCacheLine) std::atomic<std::uint64_t> dispatches{0};
 
+  /// Low-latency scope epoch most recently observed by this worker while idle.
+  alignas(kCacheLine) std::atomic<std::uint64_t> hotSpinEpoch{0};
+
   /// Total steal probes attempted by this worker.
   alignas(kCacheLine) std::atomic<std::uint64_t> stealAttempts{0};
 

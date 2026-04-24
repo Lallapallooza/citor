@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <thread>
@@ -15,6 +16,26 @@
 using citor::ThreadPool;
 
 namespace {
+
+struct LifecycleHotHints {
+  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
+  [[maybe_unused]] static constexpr citor::Determinism determinism =
+      citor::Determinism::FixedBlockOrder;
+  [[maybe_unused]] static constexpr citor::Affinity affinity = citor::Affinity::PhysicalCores;
+  static constexpr citor::Priority priority = citor::Priority::Throughput;
+  [[maybe_unused]] static constexpr citor::Partition partition =
+      citor::Partition::ContiguousRanges;
+  static constexpr double estimatedItemNs = 0.0;
+  [[maybe_unused]] static constexpr double minTaskUs = 0.0;
+  static constexpr std::size_t chunk = 1;
+  [[maybe_unused]] static constexpr bool tlsRequired = false;
+  [[maybe_unused]] static constexpr bool allowProducer = true;
+  [[maybe_unused]] static constexpr bool allowWorkerSteal = false;
+  [[maybe_unused]] static constexpr bool allowNestedParallelism = false;
+  [[maybe_unused]] static constexpr bool fpDeterministicTree = true;
+  [[maybe_unused]] static constexpr bool cancellationChecks = false;
+  [[maybe_unused]] static constexpr bool pipelineSameChunk = false;
+};
 
 /// Read the calling process's affinity mask; returns the count of allowed logical CPUs.
 std::size_t allowedLogicalCpus() noexcept {
@@ -106,6 +127,25 @@ TEST(ThreadPoolLifecycle, WorkerIndexIsZeroOutsidePool) {
   EXPECT_GE(pool.participants(), 1U);
   EXPECT_EQ(ThreadPool::workerIndex(), 0U);
   EXPECT_FALSE(ThreadPool::insidePoolWorker());
+}
+
+TEST(ThreadPoolLifecycle, LowLatencyScopeRunsHotDispatchBurst) {
+  ThreadPool pool(4);
+  const std::size_t participants = pool.participants();
+  ASSERT_GE(participants, 1U);
+
+  std::atomic<std::size_t> visited{0};
+  {
+    const auto producerGuard = pool.bindProducerSlot();
+    const auto hotGuard = pool.lowLatencyScope();
+    for (int iter = 0; iter < 256; ++iter) {
+      pool.parallelFor<LifecycleHotHints>(0, participants, [&](std::size_t lo, std::size_t hi) {
+        visited.fetch_add(hi - lo, std::memory_order_relaxed);
+      });
+    }
+  }
+
+  EXPECT_EQ(visited.load(std::memory_order_relaxed), participants * std::size_t{256});
 }
 
 // Idle pool's CPU usage must be under 1% of one core. The spec's production bound is 60 seconds;

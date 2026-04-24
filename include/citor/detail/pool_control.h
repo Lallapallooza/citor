@@ -9,11 +9,11 @@ namespace citor::detail {
 
 /// Process-internal control word shared between producer and workers.
 ///
-/// Three contended atomics (`generation`, `futexWord`, `activeJob`) plus a const `participants`
-/// count form the source of truth for pool state. Each contended atomic is on its own
+/// Four contended atomics (`generation`, `futexWord`, `activeJob`, `hotSpinDepth`) plus a const
+/// `participants` count form the source of truth for pool state. Each contended atomic is on its own
 /// `kCacheLine`-sized line so MESI traffic on one never invalidates another. The layout places
-/// `generation` (release publish), `futexWord` (parking token), `activeJob` (descriptor pointer),
-/// and `participants` on four dedicated 128-byte lines.
+/// `generation` (release publish), `futexWord` (parking token), `activeJob` (descriptor pointer), a
+/// low-latency spin-depth gate, and `participants` on dedicated 128-byte lines.
 ///
 /// The 64-bit `generation` carries both flags and a monotonic phase counter. Bits 0 (shutdown) and
 /// 1 (cancel) are reserved; the producer increments by 4 per published job so the high 62 bits act
@@ -65,6 +65,16 @@ struct PoolControl {
   /// consume the descriptor via `acquire`. While the slot is `nullptr` the worker loop treats
   /// every observed generation change as a no-op.
   alignas(kCacheLine) std::atomic<void *> activeJob{nullptr};
+
+  /// Active low-latency scopes that keep workers spinning instead of parking.
+  ///
+  /// When non-zero, idle workers re-enter their spin loop after the normal spin budget instead of
+  /// calling into futex wait. Producers may skip the per-dispatch futex wake while this gate is set
+  /// because a scope transition wakes parked workers once before hot dispatch begins.
+  alignas(kCacheLine) std::atomic<std::uint32_t> hotSpinDepth{0};
+
+  /// Monotonic epoch bumped when entering low-latency mode so workers can acknowledge readiness.
+  alignas(kCacheLine) std::atomic<std::uint64_t> hotSpinEpoch{0};
 
   /// Number of participants the pool was constructed with (producer + background workers).
   ///
