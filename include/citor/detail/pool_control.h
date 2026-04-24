@@ -81,6 +81,14 @@ struct PoolControl {
   /// Read by every worker but never modified after construction; placed on its own line so reads
   /// never share a cache line with the contended atomics above.
   alignas(kCacheLine) std::uint32_t participants = 0;
+
+  /// Pre-computed bitmask of background-worker slots `[1, participants)` for the join's
+  ///        pending set; producer slot 0 already cleared.
+  ///
+  /// Constant for the pool's lifetime (set once at construction). Co-located on the
+  /// `participants` cache line so the producer's dispatch picks both fields from a single
+  /// cache-line fetch instead of reaching into `ThreadPool`'s own member layout.
+  std::uint64_t pendingMaskBits = 0;
 };
 
 } // namespace citor::detail
