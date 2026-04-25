@@ -54,7 +54,7 @@ struct ParallelScanFn {
   /// The inclusive prefix accumulator at the right edge of the scan.
   template <class HintsT, class Pool, class T, class BodyFn, class PrefixFn>
   [[nodiscard]] T operator()(Pool &pool, std::size_t n, T identity, BodyFn &&body,
-                             PrefixFn &&prefix, CancellationToken tok = {}) const {
+                             PrefixFn &&prefix, CancellationToken tok = CancellationToken{}) const {
     return tag_invoke(*this, pool, n, std::move(identity), std::forward<BodyFn>(body),
                       std::forward<PrefixFn>(prefix), HintsT{}, std::move(tok));
   }

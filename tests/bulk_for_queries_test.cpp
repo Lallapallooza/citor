@@ -120,7 +120,7 @@ TEST(BulkForQueries, CancellationAtChunkBoundary) {
                     "boundary has no observable surface";
   }
   constexpr std::size_t kQ = 4096;
-  CancellationToken tok;
+  CancellationToken tok = CancellationToken::makeOwned();
   std::atomic<std::size_t> processed{0};
 
   pool.bulkForQueries<BulkForQueriesTestHints>(

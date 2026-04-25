@@ -120,7 +120,7 @@ TEST(ParallelFor, CancellationAtChunkBoundary) {
                     "boundary has no observable surface";
   }
   constexpr std::size_t kN = 4096;
-  CancellationToken tok;
+  CancellationToken tok = CancellationToken::makeOwned();
   std::atomic<std::size_t> processed{0};
 
   pool.parallelFor<DynamicChunkedTestHints>(
@@ -341,7 +341,7 @@ TEST(ParallelFor, NestedSamePoolCallDoesNotDeadlock) {
 // A pre-cancelled token on the inline-fallback path must short-circuit before the body runs.
 TEST(ParallelFor, InlinePathHonorsPreCancelledToken) {
   ThreadPool pool(1);
-  CancellationToken tok;
+  CancellationToken tok = CancellationToken::makeOwned();
   tok.request_stop();
 
   std::atomic<int> calls{0};

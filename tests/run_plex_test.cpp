@@ -102,7 +102,7 @@ TEST(RunPlex, CancellationMidPhase) {
   constexpr std::size_t kPhases = 100;
   constexpr std::size_t kN = 32;
 
-  CancellationToken tok;
+  CancellationToken tok = CancellationToken::makeOwned();
   std::atomic<std::size_t> phasesObserved{0};
   // Stop after the first phase completes (slot-0 hook fires inside phase 0 for slot 0).
   pool.runPlex<PlexTestHints>(

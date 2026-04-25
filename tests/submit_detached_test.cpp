@@ -85,7 +85,7 @@ TEST(SubmitDetached, SubmitDetachedCancellation) {
   std::atomic<bool> ran{false};
   {
     ThreadPool pool(2);
-    CancellationToken tok;
+    CancellationToken tok = CancellationToken::makeOwned();
     (void)tok.request_stop();
     pool.submitDetached<DetachedTestHints>([&ran]() { ran.store(true, std::memory_order_release); },
                                            tok);

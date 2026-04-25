@@ -123,7 +123,7 @@ TEST(ForkJoin, ExceptionRethrownAndOthersComplete) {
 // the join still rendezvous, no exception.
 TEST(ForkJoin, CancellationBeforeStart) {
   ThreadPool pool(4);
-  CancellationToken tok;
+  CancellationToken tok = CancellationToken::makeOwned();
   tok.request_stop();
 
   std::atomic<int> ranCount{0};
@@ -139,7 +139,7 @@ TEST(ForkJoin, CancellationBeforeStart) {
 // Cancellation requested mid-flight: partial completion is acceptable, but no UB.
 TEST(ForkJoin, CancellationMidFlight) {
   ThreadPool pool(4);
-  CancellationToken tok;
+  CancellationToken tok = CancellationToken::makeOwned();
   std::atomic<int> ranCount{0};
   std::atomic<bool> firstObserved{false};
 

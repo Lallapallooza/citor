@@ -49,7 +49,7 @@ struct ParallelReduceFn {
   ///         deterministic combine tree.
   template <class HintsT, class Pool, class T, class Map, class Combine>
   [[nodiscard]] T operator()(Pool &pool, std::size_t first, std::size_t last, T init, Map &&map,
-                             Combine &&combine, CancellationToken tok = {}) const {
+                             Combine &&combine, CancellationToken tok = CancellationToken{}) const {
     return tag_invoke(*this, pool, first, last, std::move(init), std::forward<Map>(map),
                       std::forward<Combine>(combine), HintsT{}, std::move(tok));
   }

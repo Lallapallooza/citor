@@ -45,7 +45,7 @@ struct RunPlexFn {
   /// tok      Cancellation token observed at phase boundaries.
   template <class HintsT, class Pool, class Phase>
   void operator()(Pool &pool, std::size_t nPhases, std::size_t n, Phase &&phaseFn,
-                  CancellationToken tok = {}) const {
+                  CancellationToken tok = CancellationToken{}) const {
     tag_invoke(*this, pool, nPhases, n, std::forward<Phase>(phaseFn), HintsT{}, std::move(tok));
   }
 };

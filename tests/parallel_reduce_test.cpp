@@ -198,7 +198,7 @@ TEST(ParallelReduce, CancellationProducesPartial) {
   }
   constexpr std::size_t kN = 100000;
   std::vector<double> data(kN, 1.0);
-  CancellationToken tok;
+  CancellationToken tok = CancellationToken::makeOwned();
 
   bool sawCancellation = false;
   try {
@@ -229,7 +229,7 @@ TEST(ParallelReduce, CancellationProducesPartial) {
 // must observe the partial-value cancellation contract with `partial_value == init`.
 TEST(ParallelReduce, InlinePathHonorsPreCancelledToken) {
   ThreadPool pool(1);
-  CancellationToken tok;
+  CancellationToken tok = CancellationToken::makeOwned();
   tok.request_stop();
 
   std::atomic<int> mapCalls{0};
@@ -259,7 +259,7 @@ TEST(ParallelReduce, AllChunksCancelledReturnsInitUnchanged) {
     GTEST_SKIP() << "single-participant pool tested in InlinePathHonorsPreCancelledToken";
   }
 
-  CancellationToken tok;
+  CancellationToken tok = CancellationToken::makeOwned();
   tok.request_stop();
 
   bool sawCancellation = false;

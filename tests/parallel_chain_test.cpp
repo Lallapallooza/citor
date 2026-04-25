@@ -429,7 +429,7 @@ TEST(ParallelChain, CancellationStopsChain) {
   ThreadPool pool(4);
   constexpr std::size_t kN = 32;
 
-  CancellationToken tok;
+  CancellationToken tok = CancellationToken::makeOwned();
   std::atomic<std::uint32_t> stage1Calls{0};
   std::atomic<std::uint32_t> stage2Calls{0};
 

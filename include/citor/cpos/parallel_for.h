@@ -43,7 +43,7 @@ struct ParallelForFn {
   /// tok    Cancellation token observed at chunk boundaries.
   template <class HintsT, class Pool, class F>
   void operator()(Pool &pool, std::size_t first, std::size_t last, F &&fn,
-                  CancellationToken tok = {}) const {
+                  CancellationToken tok = CancellationToken{}) const {
     tag_invoke(*this, pool, first, last, std::forward<F>(fn), HintsT{}, std::move(tok));
   }
 };

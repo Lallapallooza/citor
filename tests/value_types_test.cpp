@@ -13,9 +13,9 @@
 #endif
 
 #include "citor/cancellation.h"
+#include "citor/example_hints.h"
 #include "citor/function_ref.h"
 #include "citor/hints.h"
-#include "citor/example_hints.h"
 
 using citor::Affinity;
 using citor::Balance;
@@ -141,7 +141,7 @@ TEST(ParallelHints, ChainHintsDefaults) {
 
 // CancellationToken returns false initially; after request_stop, returns true.
 TEST(ParallelCancellation, TokenStartsNotStoppedAndTransitions) {
-  CancellationToken tok;
+  CancellationToken tok = CancellationToken::makeOwned();
   EXPECT_FALSE(tok.stop_requested());
   EXPECT_TRUE(tok.request_stop());
   EXPECT_TRUE(tok.stop_requested());
@@ -149,15 +149,16 @@ TEST(ParallelCancellation, TokenStartsNotStoppedAndTransitions) {
 
 // Subsequent request_stop calls return false (the first call wins the CAS).
 TEST(ParallelCancellation, SecondRequestStopReturnsFalse) {
-  CancellationToken tok;
+  CancellationToken tok = CancellationToken::makeOwned();
   EXPECT_TRUE(tok.request_stop());
   EXPECT_FALSE(tok.request_stop());
   EXPECT_TRUE(tok.stop_requested());
 }
 
-// Copies share state: stopping the copy also stops the original.
+// Copies of an owned token share the underlying state: stopping the copy also stops the
+// original. Default-constructed tokens are sentinel and are not subject to this contract.
 TEST(ParallelCancellation, CopiesShareState) {
-  const CancellationToken a;
+  const CancellationToken a = CancellationToken::makeOwned();
   CancellationToken b = a;
   EXPECT_FALSE(a.stop_requested());
   EXPECT_FALSE(b.stop_requested());
@@ -168,7 +169,7 @@ TEST(ParallelCancellation, CopiesShareState) {
 
 // Stop signal becomes visible to a worker thread (release / acquire synchronization).
 TEST(ParallelCancellation, CrossThreadStopVisibility) {
-  CancellationToken tok;
+  CancellationToken tok = CancellationToken::makeOwned();
   std::atomic<int> observed{-1};
   std::thread worker([&]() {
     while (!tok.stop_requested()) {

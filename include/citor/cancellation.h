@@ -26,18 +26,39 @@ namespace citor {
 /// allocate. `stop_requested()` and `request_stop()` are `noexcept` and allocation-free.
 class CancellationToken {
 public:
-  /// Construct a fresh, non-stopped token.
+  /// Construct a "never-stopped" sentinel token without heap allocation.
   ///
-  /// Allocates a single 32-bit atomic on the heap to back the shared state. The allocation
-  /// happens here, not in `stop_requested` / `request_stop`, so the polling primitives are
-  /// allocation-free.
-  CancellationToken() : m_state(std::make_shared<std::atomic<std::uint32_t>>(0U)) {}
+  /// The default-constructed token holds no shared state: `stop_requested()` always returns
+  /// `false`, `request_stop()` is a no-op (returns `false`). This is the always-on default for
+  /// call sites that do not need cancellation; the per-dispatch heap allocation +
+  /// shared_ptr dispose/destroy chain (a string of indirect calls per dispatch on the
+  /// j=2 hot path) goes away when the caller does not pass an explicit token.
+  ///
+  /// Callers that need to actually call `request_stop()` from elsewhere must construct via
+  /// `makeOwned`, which allocates the shared atomic. Constructing a default-`{}` token and
+  /// then calling `request_stop()` will not signal anything.
+  constexpr CancellationToken() noexcept = default;
+
+  /// Construct a token that owns a shared, heap-allocated stop flag.
+  ///
+  /// Use this when the caller intends to call `request_stop` on a copy held elsewhere.
+  /// Allocates a single 32-bit atomic on the heap; copies share the atomic via shared_ptr.
+  [[nodiscard]] static CancellationToken makeOwned() {
+    CancellationToken t;
+    t.m_state = std::make_shared<std::atomic<std::uint32_t>>(0U);
+    return t;
+  }
 
   /// Test whether `request_stop()` has been called on any copy of this token.
   ///
-  /// `true` if any holder has signalled cancellation; `false` otherwise.
+  /// `true` if any holder has signalled cancellation; `false` for the never-stopped
+  ///         sentinel and for any owned token whose flag is still clear.
   [[nodiscard]] bool stop_requested() const noexcept {
-    return m_state->load(std::memory_order_acquire) != 0U;
+    auto *state = m_state.get();
+    if (state == nullptr) {
+      return false;
+    }
+    return state->load(std::memory_order_acquire) != 0U;
   }
 
   /// Signal cancellation to every holder of this token.
@@ -46,11 +67,15 @@ public:
   /// wrote before invoking `request_stop` is visible to a worker that observes the stop flag.
   ///
   /// `true` if this call transitioned the token from non-stopped to stopped; `false` if
-  ///         the token was already stopped (a previous `request_stop` won the race).
+  ///         the token was already stopped, or if this is the `neverStopped` sentinel.
   bool request_stop() noexcept {
+    auto *state = m_state.get();
+    if (state == nullptr) {
+      return false;
+    }
     std::uint32_t expected = 0U;
-    return m_state->compare_exchange_strong(expected, 1U, std::memory_order_release,
-                                            std::memory_order_relaxed);
+    return state->compare_exchange_strong(expected, 1U, std::memory_order_release,
+                                          std::memory_order_relaxed);
   }
 
 private:
@@ -62,8 +87,8 @@ private:
 ///
 /// `Deadline` stores an absolute `__rdtsc` reading at which the deadline expires. `expired()`
 /// compares the current TSC against the threshold. The reading is taken once at construction and
-/// never refreshed; the only call sites are inside hot worker bodies where a syscall-based
-/// `clock_gettime` would dominate the budget.
+/// never refreshed; the only call sites are inside hot worker bodies
+/// where a syscall-based `clock_gettime` would dominate the budget.
 ///
 /// A default-constructed deadline never expires (threshold is `UINT64_MAX`). `Deadline::expired`
 /// is `noexcept` and allocation-free.
@@ -78,7 +103,7 @@ public:
   /// Construct a deadline at an absolute TSC threshold.
   ///
   /// The caller provides a precomputed `__rdtsc()` value; the deadline expires when the live TSC
-  /// reaches or passes the threshold. The interface is low-level so callers can reuse a single
+  /// reaches or passes the threshold. This is low-level: callers can reuse a single
   /// `__rdtsc` reading taken at job-publish time across many primitives.
   ///
   /// tscThreshold Absolute TSC cycle count at which the deadline expires.
@@ -114,9 +139,7 @@ class cancelled_exception : public std::exception {
 public:
   /// Return the diagnostic string identifying the exception kind.
   /// A non-null, statically-stored C-string.
-  [[nodiscard]] const char *what() const noexcept override {
-    return "citor: cancelled";
-  }
+  [[nodiscard]] const char *what() const noexcept override { return "citor: cancelled"; }
 };
 
 /// Thrown from a value-producing primitive whose join was cancelled mid-flight.

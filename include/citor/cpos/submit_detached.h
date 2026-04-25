@@ -39,7 +39,7 @@ struct SubmitDetachedFn {
   /// fn     Task body the executor runs without joining.
   /// tok    Cancellation token observed cooperatively by the body.
   template <class HintsT, class Pool, class TaskFn>
-  void operator()(Pool &pool, TaskFn &&fn, CancellationToken tok = {}) const {
+  void operator()(Pool &pool, TaskFn &&fn, CancellationToken tok = CancellationToken{}) const {
     tag_invoke(*this, pool, HintsT{}, std::forward<TaskFn>(fn), std::move(tok));
   }
 };

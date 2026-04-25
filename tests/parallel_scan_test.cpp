@@ -257,7 +257,7 @@ TEST(ParallelScan, ScanCancellation) {
   constexpr std::size_t kN = 100'000;
   std::vector<std::int64_t> in(kN, 1);
 
-  CancellationToken tok;
+  CancellationToken tok = CancellationToken::makeOwned();
   EXPECT_TRUE(tok.request_stop());
 
   std::atomic<int> bodyCalls{0};
