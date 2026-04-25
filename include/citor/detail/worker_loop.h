@@ -199,17 +199,16 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
     // `doneEpoch` and before observing the next published generation.
     const std::uint64_t startTsc = lowLatencyActive ? 0ULL : readTsc();
     bool parkRequired = true;
-    // `rdtscp` serializes the pipeline and costs roughly the same as a small batch of
-    // pause-load-compare iterations on Zen, so reading the TSC every iter doubled the spin loop
-    // body. Sample it every 64 iters instead: the overshoot bound is `64 * pause_cycles`
-    // (microseconds, well under the cycle budget), and the iteration cap still covers the
-    // descheduled-worker case where the TSC sample never fires.
-    for (std::uint32_t iter = 0; iter < kSpinAfterBulkJob.maxIters; ++iter) {
-      cpuRelax();
+    // Tight-first-N spin: a freshly-stamped producer release on `generation` propagates
+    // intra-CCD in tens of nanoseconds. PAUSE adds back-off slack which means each PAUSE-load iter
+    // adds detection slack. For the first 8 iterations skip PAUSE so the worker
+    // detects a "publish-already-arrived" case (cache line was prefetched on the producer's
+    // store edge) within a handful of cycles of the load, before falling back to PAUSE-spin for the
+    // longer-tail case.
+    constexpr std::uint32_t kTightProbeIters = 8U;
+    for (std::uint32_t iter = 0; iter < kTightProbeIters; ++iter) {
       const std::uint64_t spinGen = control.generation.load(std::memory_order_acquire);
       if (spinGen != lastSeenGen) {
-        // Carry the freshly-observed generation into the next loop pass instead of
-        // round-tripping through the top-of-loop reload.
         gen = spinGen;
         parkRequired = false;
         break;
@@ -219,9 +218,28 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
         parkRequired = false;
         break;
       }
-      if (!lowLatencyActive && (iter & 63U) == 63U &&
-          readTsc() - startTsc >= kSpinAfterBulkJob.maxCycles) {
-        break;
+    }
+    if (parkRequired) {
+      // `rdtscp` serializes the pipeline and costs roughly the same as a small batch of
+      // pause-load-compare iterations on Zen, so reading the TSC every iter doubled the spin
+      // loop body. Sample it every 64 iters instead.
+      for (std::uint32_t iter = 0; iter < kSpinAfterBulkJob.maxIters; ++iter) {
+        cpuRelax();
+        const std::uint64_t spinGen = control.generation.load(std::memory_order_acquire);
+        if (spinGen != lastSeenGen) {
+          gen = spinGen;
+          parkRequired = false;
+          break;
+        }
+        if ((spinGen & PoolControl::kShutdownBit) != 0) {
+          gen = spinGen;
+          parkRequired = false;
+          break;
+        }
+        if (!lowLatencyActive && (iter & 63U) == 63U &&
+            readTsc() - startTsc >= kSpinAfterBulkJob.maxCycles) {
+          break;
+        }
       }
     }
     if (!parkRequired) {
