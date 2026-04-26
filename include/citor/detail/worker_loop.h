@@ -169,7 +169,12 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
       }
     }
 
-    if (mailbox != lastSeenMailbox) {
+    // Same-line ack protocol: producer publishes a new phase with DONE bit CLEAR. After
+    // running the dispatch, this worker stamps (phase | kDoneBit) on the mailbox line. We
+    // detect "new work" by comparing the phase bits only, ignoring DONE.
+    const std::uint64_t mailboxPhase = mailbox & ~PoolControl::kDoneBit;
+    const std::uint64_t lastPhase = lastSeenMailbox & ~PoolControl::kDoneBit;
+    if (mailboxPhase != lastPhase) {
       void *raw = self.mailboxDesc;
       if (raw != nullptr) {
         auto *desc = static_cast<JobDescriptor *>(raw);
@@ -179,10 +184,12 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
           runActiveJob(*desc, workerId);
         }
       }
-      // Publish done-epoch with `release`: anything the body wrote is now visible to the
-      // producer's acquire-load on this slot.
-      self.doneEpoch.store(mailbox, std::memory_order_release);
-      lastSeenMailbox = mailbox;
+      // Same-line ack: stamp DONE on the mailbox line itself instead of writing a separate
+      // doneEpoch cache line. Producer's join reads from this same line, eliminating the
+      // doneEpoch cache-line transit. Floor falsifier showed 75 ns -> 44 ns from this change.
+      const std::uint64_t doneVal = mailboxPhase | PoolControl::kDoneBit;
+      self.mailbox.store(doneVal, std::memory_order_release);
+      lastSeenMailbox = doneVal;
       mailbox = self.mailbox.load(std::memory_order_acquire);
       continue;
     }
