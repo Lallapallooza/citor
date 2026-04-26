@@ -169,9 +169,10 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
       }
     }
 
-    // Same-line ack protocol: producer publishes a new phase with DONE bit CLEAR. After
-    // running the dispatch, this worker stamps (phase | kDoneBit) on the mailbox line. We
-    // detect "new work" by comparing the phase bits only, ignoring DONE.
+    // Same-line ack protocol: producer publishes new phase with DONE bit CLEAR. The reuse bit
+    // (kReuseBit) is set by the producer when this dispatch reuses cached params; the worker
+    // observes it and skips reading desc fields, calling the typed runner's cached fn directly.
+    // We compare phase ignoring DONE.
     const std::uint64_t mailboxPhase = mailbox & ~PoolControl::kDoneBit;
     const std::uint64_t lastPhase = lastSeenMailbox & ~PoolControl::kDoneBit;
     if (mailboxPhase != lastPhase) {
@@ -179,14 +180,16 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
       if (raw != nullptr) {
         auto *desc = static_cast<JobDescriptor *>(raw);
         if (desc->workerEntry != nullptr) {
-          desc->workerEntry(desc, workerId);
+          // Pass kReuseBit-aware mailbox to the runner: when set, runner uses TLS cache
+          // and skips reading desc fields, eliminating the producer's TLS desc cache-line
+          // transit on steady-state repeated calls.
+          desc->workerEntry(desc, workerId | static_cast<std::uint32_t>(
+                                                  (mailbox & PoolControl::kReuseBit) ? 0x80000000U
+                                                                                     : 0U));
         } else {
           runActiveJob(*desc, workerId);
         }
       }
-      // Same-line ack: stamp DONE on the mailbox line itself instead of writing a separate
-      // doneEpoch cache line. Producer's join reads from this same line, eliminating the
-      // doneEpoch cache-line transit. Floor falsifier showed 75 ns -> 44 ns from this change.
       const std::uint64_t doneVal = mailboxPhase | PoolControl::kDoneBit;
       self.mailbox.store(doneVal, std::memory_order_release);
       lastSeenMailbox = doneVal;

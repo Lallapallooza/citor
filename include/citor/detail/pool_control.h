@@ -43,18 +43,30 @@ struct PoolControl {
   /// Same-line ack protocol: the producer publishes the new phase with this bit clear; the
   /// worker stamps `mailbox = phase | kDoneBit` after running its share. The producer's join
   /// reads the worker's mailbox (the same line it published to) and waits for the DONE bit
-  /// to appear. Removes the separate `doneEpoch` cache-line transit on the hot path (proven
-  /// 35+ ns cheaper at the bare-protocol floor: 75 ns -> 44 ns on Zen5 intra-CCD).
+  /// to appear. Removes the separate `doneEpoch` cache-line transit on the hot path
   ///
   /// Lives in the bit-1 slot that was reserved for cancel broadcasts. The cancel path is
   /// carried by `CancellationToken`, not by a generation/mailbox flag, so the bit was free.
   static constexpr std::uint64_t kDoneBit = 1ULL << 1;
 
+  /// Bit set by the producer on the worker's `mailbox` when this dispatch reuses the previous
+  /// dispatch's typed-runner cached parameters (same-command reuse fast path). When the worker
+  /// observes this bit, it skips reading desc fields entirely and uses its TLS-cached
+  /// (HintsT, F) job parameters. Producer sets it only when:
+  ///   1. Hints opt-in (StaticUniform balance, no cancellation, nothrow body, lvalue F)
+  ///   2. The current dispatch's key matches the producer's TLS-cached key
+  ///   3. Low-latency scope is active (so workers spin and observe the bit promptly)
+  static constexpr std::uint64_t kReuseBit = 1ULL << 2;
+
   /// Number of low bits reserved for flags; producer increments `generation` by `1 << kPhaseShift`.
-  static constexpr std::uint64_t kPhaseShift = 2;
+  /// Bits: 0=shutdown, 1=done (worker->producer ack), 2=reuse (producer->worker hot-path hint).
+  static constexpr std::uint64_t kPhaseShift = 3;
 
   /// Increment applied per published phase so flags survive the bump.
   static constexpr std::uint64_t kPhaseStep = 1ULL << kPhaseShift;
+
+  /// Mask of all flag bits below the phase counter.
+  static constexpr std::uint64_t kFlagMask = kPhaseStep - 1;
 
   /// Source-of-truth phase counter.
   ///

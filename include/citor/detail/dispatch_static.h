@@ -119,14 +119,51 @@ inline void runStaticPartitionTyped(JobDescriptor &desc, std::uint32_t rank, FOp
 ///   - `desc->token.stop_requested()` when HintsT::cancellationChecks is false
 ///   - try/catch frame when F is nothrow_invocable
 ///   - per-block exception load when F is nothrow_invocable
+/// Per-worker, per-(HintsT, F) cached job parameters. Same-command reuse: when the producer
+/// detects an identical key vs the previous dispatch, it bumps only mailbox.gen without
+/// re-publishing desc fields. Worker reads cached values from TLS instead of the producer's
+/// TLS desc cache line, eliminating that line transit on the hot path.
+struct alignas(kCacheLine) CachedStaticForJob {
+  std::size_t participants{0};
+  std::size_t blockCount{0};
+  std::size_t chunk{0};
+  std::size_t first{0};
+  std::size_t last{0};
+  void *fnPtr{nullptr};
+  bool primed{false};
+};
+
 template <class HintsT, class F>
-inline void typedStaticUniformWorkerEntry(JobDescriptor *desc, std::uint32_t rank) noexcept {
-  const std::size_t participants = desc->participants;
-  const std::size_t blockCount = desc->blockCount;
-  const std::size_t chunk = desc->chunk;
-  const std::size_t first = desc->first;
-  const std::size_t last = desc->last;
-  auto &fn = *static_cast<F *>(desc->fnPtr);
+inline CachedStaticForJob &cachedStaticForSlot() noexcept {
+  static thread_local CachedStaticForJob cache;
+  return cache;
+}
+
+template <class HintsT, class F>
+inline void typedStaticUniformWorkerEntry(JobDescriptor *desc, std::uint32_t rankPacked) noexcept {
+  // High bit of rankPacked encodes producer's "reuse" hint: when set, the producer's TLS key
+  // matched the previous dispatch (same fn / range / chunk / participants), and the worker can
+  // safely skip reading desc fields entirely -- they're identical to the cached values.
+  // Otherwise the worker reads desc and refreshes its TLS cache.
+  constexpr std::uint32_t kReuseFlag = 0x80000000U;
+  const bool reuse = (rankPacked & kReuseFlag) != 0U;
+  const std::uint32_t rank = rankPacked & ~kReuseFlag;
+  auto &cache = cachedStaticForSlot<HintsT, F>();
+  if (!reuse || !cache.primed) {
+    cache.participants = desc->participants;
+    cache.blockCount = desc->blockCount;
+    cache.chunk = desc->chunk;
+    cache.first = desc->first;
+    cache.last = desc->last;
+    cache.fnPtr = desc->fnPtr;
+    cache.primed = true;
+  }
+  const std::size_t participants = cache.participants;
+  const std::size_t blockCount = cache.blockCount;
+  const std::size_t chunk = cache.chunk;
+  const std::size_t first = cache.first;
+  const std::size_t last = cache.last;
+  auto &fn = *static_cast<F *>(cache.fnPtr);
 
   constexpr bool kHasCancellation = requires { HintsT::cancellationChecks; };
   constexpr bool kCancellationActive = []() {
