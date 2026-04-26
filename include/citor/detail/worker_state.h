@@ -40,12 +40,24 @@ struct TraceRingSlot {
 /// Counters are relaxed-atomic so workers can update them on the hot path without synchronizing
 /// other state; readers (telemetry, tests) accept order-tolerant snapshots.
 struct WorkerState {
+  /// Per-worker mailbox: the producer's publish line for this slot.
+  ///
+  /// Producer publishes a new dispatch by writing this slot's mailbox to the dispatch's phase
+  /// counter (bit 0 = shutdown, bits 2..63 = monotonic phase, matching `PoolControl::generation`'s
+  /// layout). The worker spins on its own mailbox instead of the shared `generation`, eliminating
+  /// the N-readers-on-one-line coherence storm that scales as O(N) wakeup latency under fan-out.
+  ///
+  /// Lives alone on a 128-byte line because the producer writes it on every dispatch and the
+  /// worker reads it every spin iteration; false sharing with any other field on the worker's
+  /// critical hot path would defeat the redesign.
+  alignas(kCacheLine) std::atomic<std::uint64_t> mailbox{0};
+
   /// Per-worker done-epoch that the producer's join path waits on.
   ///
-  /// Worker writes the value of `PoolControl::generation` it last completed via `release`. The
-  /// producer reads via `acquire`; the pair establishes happens-before for any data the worker
-  /// wrote during the job. Lives alone on a 128-byte line because the producer reads it on the
-  /// critical join path and false sharing here would gate every dispatch.
+  /// Worker writes the mailbox phase value it last completed via `release`. The producer reads
+  /// via `acquire`; the pair establishes happens-before for any data the worker wrote during the
+  /// job. Lives alone on a 128-byte line because the producer reads it on the critical join path
+  /// and false sharing here would gate every dispatch.
   alignas(kCacheLine) std::atomic<std::uint64_t> doneEpoch{0};
 
   /// Identity, affinity, and link to topology metadata.

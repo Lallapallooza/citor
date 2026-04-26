@@ -153,36 +153,35 @@ inline void runActiveJob(JobDescriptor &desc, std::uint32_t rank) noexcept {
 /// self    Worker's per-thread state (mutable; counters incremented).
 /// control Pool's shared control block.
 inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
-  std::uint64_t lastSeenGen = 0;
+  std::uint64_t lastSeenMailbox = 0;
   // Cache the worker's identity locally; `WorkerState::workerId` lives on a
   // read-only line but the local lets the compiler keep it in a register
   // across the dispatch+stamp loop.
   const std::uint32_t workerId = self.workerId;
-  std::uint64_t gen = control.generation.load(std::memory_order_acquire);
+  std::uint64_t mailbox = self.mailbox.load(std::memory_order_acquire);
 
   while (true) {
-    if ((gen & PoolControl::kShutdownBit) != 0) {
-      // Drain any pending active job before exiting; the producer's join already saw the shutdown
-      // bit, so any new job is the very last one and must complete.
+    if ((mailbox & PoolControl::kShutdownBit) != 0) {
+      // Drain any pending active job before exiting; shutdown is signaled by stamping the
+      // worker's mailbox with the shutdown bit set.
       if (control.activeJob.load(std::memory_order_acquire) == nullptr) {
         return;
       }
     }
 
-    if (gen != lastSeenGen) {
+    if (mailbox != lastSeenMailbox) {
       void *raw = control.activeJob.load(std::memory_order_acquire);
       if (raw != nullptr) {
         auto *desc = static_cast<JobDescriptor *>(raw);
         // The producer's release-store on `activeJob` happens-before its release-store on
-        // `generation`; this acquire-load on `gen` therefore implies `desc->generation == gen`.
-        // The defensive equality check is dead cycles on the hot path -- skip and dispatch.
+        // this slot's `mailbox`; this acquire-load therefore picks up the descriptor pointer.
         runActiveJob(*desc, workerId);
       }
       // Publish done-epoch with `release`: anything the body wrote is now visible to the
       // producer's acquire-load on this slot.
-      self.doneEpoch.store(gen, std::memory_order_release);
-      lastSeenGen = gen;
-      gen = control.generation.load(std::memory_order_acquire);
+      self.doneEpoch.store(mailbox, std::memory_order_release);
+      lastSeenMailbox = mailbox;
+      mailbox = self.mailbox.load(std::memory_order_acquire);
       continue;
     }
 
@@ -196,25 +195,20 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
     // "do not park", so an iter-cap exit just routes back into the outer `while(true)` and
     // re-enters spin. Skipping the `rdtscp` (serializing, ~30-50 cycles per dispatch in
     // steady state) removes the ride-along stall the worker pays right after stamping
-    // `doneEpoch` and before observing the next published generation.
+    // `doneEpoch` and before observing the next published mailbox.
     const std::uint64_t startTsc = lowLatencyActive ? 0ULL : readTsc();
     bool parkRequired = true;
-    // Tight-first-N spin: a freshly-stamped producer release on `generation` propagates
-    // intra-CCD in tens of nanoseconds. PAUSE adds back-off slack which means each PAUSE-load iter
-    // adds detection slack. For the first 8 iterations skip PAUSE so the worker
-    // detects a "publish-already-arrived" case (cache line was prefetched on the producer's
-    // store edge) within a handful of cycles of the load, before falling back to PAUSE-spin for the
-    // longer-tail case.
+    // Tight-first-N spin on the worker's own mailbox line. The producer's release-store on
+    // mailbox propagates intra-CCD in tens of nanoseconds. PAUSE adds back-off slack which means each
+    // PAUSE-load iter adds detection slack. For the first 8 iterations skip PAUSE so
+    // the worker detects a "publish-already-arrived" case (cache line was prefetched on the
+    // producer's store edge) within a handful of cycles of the load, before falling back to PAUSE-spin
+    // for the longer-tail case.
     constexpr std::uint32_t kTightProbeIters = 8U;
     for (std::uint32_t iter = 0; iter < kTightProbeIters; ++iter) {
-      const std::uint64_t spinGen = control.generation.load(std::memory_order_acquire);
-      if (spinGen != lastSeenGen) {
-        gen = spinGen;
-        parkRequired = false;
-        break;
-      }
-      if ((spinGen & PoolControl::kShutdownBit) != 0) {
-        gen = spinGen;
+      const std::uint64_t spinMb = self.mailbox.load(std::memory_order_acquire);
+      if (spinMb != lastSeenMailbox) {
+        mailbox = spinMb;
         parkRequired = false;
         break;
       }
@@ -225,14 +219,9 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
       // loop body. Sample it every 64 iters instead.
       for (std::uint32_t iter = 0; iter < kSpinAfterBulkJob.maxIters; ++iter) {
         cpuRelax();
-        const std::uint64_t spinGen = control.generation.load(std::memory_order_acquire);
-        if (spinGen != lastSeenGen) {
-          gen = spinGen;
-          parkRequired = false;
-          break;
-        }
-        if ((spinGen & PoolControl::kShutdownBit) != 0) {
-          gen = spinGen;
+        const std::uint64_t spinMb = self.mailbox.load(std::memory_order_acquire);
+        if (spinMb != lastSeenMailbox) {
+          mailbox = spinMb;
           parkRequired = false;
           break;
         }
@@ -248,7 +237,7 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
     if (control.hotSpinDepth.load(std::memory_order_acquire) != 0U) {
       const std::uint64_t hotEpoch = control.hotSpinEpoch.load(std::memory_order_acquire);
       self.hotSpinEpoch.store(hotEpoch, std::memory_order_release);
-      gen = control.generation.load(std::memory_order_acquire);
+      mailbox = self.mailbox.load(std::memory_order_acquire);
       continue;
     }
 
@@ -256,12 +245,12 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
     // closes the lost-wakeup race: if a wake happens between reading the token and the syscall,
     // the kernel returns EAGAIN immediately because the token's value moved.
     const std::uint32_t parkToken = control.futexWord.load(std::memory_order_relaxed);
-    const std::uint64_t recheck = control.generation.load(std::memory_order_acquire);
-    if (recheck != lastSeenGen) {
-      gen = recheck;
+    const std::uint64_t recheckMb = self.mailbox.load(std::memory_order_acquire);
+    if (recheckMb != lastSeenMailbox) {
+      mailbox = recheckMb;
       continue;
     }
-    if ((recheck & PoolControl::kShutdownBit) != 0 &&
+    if ((recheckMb & PoolControl::kShutdownBit) != 0 &&
         control.activeJob.load(std::memory_order_acquire) == nullptr) {
       return;
     }
@@ -274,7 +263,7 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
 #endif
     self.wakes.store(self.wakes.load(std::memory_order_relaxed) + 1U,
                      std::memory_order_relaxed);
-    gen = control.generation.load(std::memory_order_acquire);
+    mailbox = self.mailbox.load(std::memory_order_acquire);
   }
 }
 
