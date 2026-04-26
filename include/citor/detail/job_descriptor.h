@@ -81,6 +81,16 @@ struct alignas(kCacheLine) JobDescriptor {
   /// Cancellation token observed by workers at chunk boundaries when the call site requested it.
   CancellationToken token;
 
+  /// Direct pointer to the user's callable. Set by `parallelFor<HintsT,F>` so the typed
+  /// `workerEntry` runner can recover `F*` and call it without going through `desc.body`'s
+  /// FunctionRef indirection. Null for legacy primitives.
+  void *fnPtr = nullptr;
+
+  /// Optional monomorphized worker entry. When non-null, workers call this function pointer
+  /// instead of `runActiveJob -> runStaticPartition`. Set by `parallelFor<HintsT,F>` to a runner
+  /// specialized on (HintsT, F) so token check / try-catch elide via if-constexpr.
+  void (*workerEntry)(JobDescriptor *, std::uint32_t) noexcept = nullptr;
+
   /// First-exception capture slot. Workers `compare_exchange` this from null to a heap-allocated
   /// `std::exception_ptr` to record the first failure deterministically; subsequent throws drop.
   /// Worker rank that filled the slot is captured alongside so the slot's line carries both
