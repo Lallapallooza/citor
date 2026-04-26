@@ -31,7 +31,7 @@ public:
   /// The default-constructed token holds no shared state: `stop_requested()` always returns
   /// `false`, `request_stop()` is a no-op (returns `false`). This is the always-on default for
   /// call sites that do not need cancellation; the per-dispatch heap allocation +
-  /// shared_ptr dispose/destroy chain (a string of indirect calls per dispatch on the
+  /// shared_ptr dispose/destroy chain (several indirect calls per dispatch on the
   /// j=2 hot path) goes away when the caller does not pass an explicit token.
   ///
   /// Callers that need to actually call `request_stop()` from elsewhere must construct via
@@ -60,6 +60,15 @@ public:
     }
     return state->load(std::memory_order_acquire) != 0U;
   }
+
+  /// Equality on the underlying control-block pointer. Used by descriptor write elision:
+  /// two tokens compare equal when they share the same control block (or both are the
+  /// no-state sentinel). Steady-state bench loops re-bind the same default sentinel each
+  /// call, so producers skip the redundant store.
+  bool operator==(const CancellationToken &other) const noexcept {
+    return m_state.get() == other.m_state.get();
+  }
+  bool operator!=(const CancellationToken &other) const noexcept { return !(*this == other); }
 
   /// Signal cancellation to every holder of this token.
   ///

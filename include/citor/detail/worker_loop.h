@@ -191,7 +191,9 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
     const bool lowLatencyActive = control.hotSpinDepth.load(std::memory_order_acquire) != 0U;
     if (lowLatencyActive) {
       const std::uint64_t hotEpoch = control.hotSpinEpoch.load(std::memory_order_acquire);
-      self.hotSpinEpoch.store(hotEpoch, std::memory_order_release);
+      if (self.hotSpinEpoch.load(std::memory_order_relaxed) != hotEpoch) {
+        self.hotSpinEpoch.store(hotEpoch, std::memory_order_release);
+      }
     }
     // Under low-latency scope the spin's cycle budget is dead weight: the contract is
     // "do not park", so an iter-cap exit just routes back into the outer `while(true)` and
@@ -238,7 +240,9 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
     }
     if (control.hotSpinDepth.load(std::memory_order_acquire) != 0U) {
       const std::uint64_t hotEpoch = control.hotSpinEpoch.load(std::memory_order_acquire);
-      self.hotSpinEpoch.store(hotEpoch, std::memory_order_release);
+      if (self.hotSpinEpoch.load(std::memory_order_relaxed) != hotEpoch) {
+        self.hotSpinEpoch.store(hotEpoch, std::memory_order_release);
+      }
       mailbox = self.mailbox.load(std::memory_order_acquire);
       continue;
     }

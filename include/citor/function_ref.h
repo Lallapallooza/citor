@@ -9,8 +9,8 @@ namespace citor {
 /// Primary template; specialized below for function-type signatures.
 ///
 /// Instantiating `FunctionRef` with a non-function type is a programmer error and produces a
-/// compile-time diagnostic. The empty primary template catches misuse before the specialization
-/// mismatch can leak into a downstream context.
+/// compile-time diagnostic. The empty primary template is the surface that catches
+/// misuse before the specialization mismatch can leak into a downstream context.
 template <class Sig> class FunctionRef;
 
 /// 16-byte non-owning callable reference; analogous to `std::string_view` for callables.
@@ -68,6 +68,14 @@ public:
   /// The bound callable's return value.
   R operator()(Args... args) const { return m_invoke(m_obj, std::forward<Args>(args)...); }
 
+  /// Equality on (object pointer, thunk pointer). Used by descriptor write elision: when the
+  /// same callable is re-bound across back-to-back calls (steady-state bench loop), the
+  /// producer skips the redundant store and keeps the descriptor cache line MESI-Shared.
+  constexpr bool operator==(const FunctionRef &other) const noexcept {
+    return m_obj == other.m_obj && m_invoke == other.m_invoke;
+  }
+  constexpr bool operator!=(const FunctionRef &other) const noexcept { return !(*this == other); }
+
   /// Test whether the `FunctionRef` is bound to a callable.
   /// `true` if a callable is bound, `false` if the instance is default-constructed.
   [[nodiscard]] constexpr explicit operator bool() const noexcept { return m_invoke != nullptr; }
@@ -92,8 +100,8 @@ private:
   R (*m_invoke)(void *, Args...) = nullptr;
 };
 
-// 16-byte size invariant: two pointers, no padding. The architecture document and acceptance
-// criteria depend on this shape; if a future compiler regresses it, the hot-dispatch budget
+// 16-byte size invariant: two pointers, no padding. The descriptor layout invariant and the dispatch budget
+// depend on this shape; if a future compiler regresses it, the hot-dispatch budget
 // breaks.
 static_assert(sizeof(FunctionRef<void(std::size_t, std::size_t)>) == 16,
               "FunctionRef must be exactly two pointers (16 bytes on x86-64)");
