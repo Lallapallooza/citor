@@ -170,11 +170,13 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
     }
 
     if (mailbox != lastSeenMailbox) {
-      void *raw = control.activeJob.load(std::memory_order_acquire);
+      // Read descriptor pointer off the mailbox's private cache line. The producer wrote
+      // `mailboxDesc` before bumping `mailbox`; the acquire-load above synchronizes with both
+      // writes via release ordering, so this load picks up the new descriptor without touching
+      // the shared `control.activeJob` line.
+      void *raw = self.mailboxDesc;
       if (raw != nullptr) {
         auto *desc = static_cast<JobDescriptor *>(raw);
-        // The producer's release-store on `activeJob` happens-before its release-store on
-        // this slot's `mailbox`; this acquire-load therefore picks up the descriptor pointer.
         runActiveJob(*desc, workerId);
       }
       // Publish done-epoch with `release`: anything the body wrote is now visible to the

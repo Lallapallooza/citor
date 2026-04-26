@@ -47,10 +47,20 @@ struct WorkerState {
   /// layout). The worker spins on its own mailbox instead of the shared `generation`, eliminating
   /// the N-readers-on-one-line coherence storm that scales as O(N) wakeup latency under fan-out.
   ///
+  /// Co-located with `mailboxDesc`: producer writes `mailboxDesc` first (relaxed) then `mailbox`
+  /// (release) so the worker's acquire-load on `mailbox` synchronizes with both writes. Worker
+  /// reads `mailboxDesc` directly off this private cache line instead of going through the shared
+  /// `m_control.activeJob`, eliminating the N-readers shared-line read on every dispatch.
+  ///
   /// Lives alone on a 128-byte line because the producer writes it on every dispatch and the
   /// worker reads it every spin iteration; false sharing with any other field on the worker's
   /// critical hot path would defeat the redesign.
   alignas(kCacheLine) std::atomic<std::uint64_t> mailbox{0};
+
+  /// Per-worker descriptor pointer co-located with `mailbox`. Producer writes this immediately
+  /// before bumping `mailbox`; the worker's acquire-load on `mailbox` picks both up via release
+  /// ordering. `nullptr` outside an active dispatch.
+  void *mailboxDesc = nullptr;
 
   /// Per-worker done-epoch that the producer's join path waits on.
   ///
