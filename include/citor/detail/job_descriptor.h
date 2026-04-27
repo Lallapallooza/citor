@@ -91,6 +91,15 @@ struct alignas(kCacheLine) JobDescriptor {
   /// specialized on (HintsT, F) so token check / try-catch elide via if-constexpr.
   void (*workerEntry)(JobDescriptor *, std::uint32_t) noexcept = nullptr;
 
+  /// Pointer to the pool's `WorkerState` array, set by primitives that opt into producer
+  /// cold-collapse (`parallelFor<HintsT, F>` only at present). When non-null, the worker entry
+  /// CAS-races the producer's join path on `WorkerState[rank].claimedAt`; whoever wins runs rank
+  /// R's blocks, the loser stamps mailbox=doneSentinel without re-running the work. When null,
+  /// the legacy "every worker runs its own blocks" protocol holds (used by parallelReduce /
+  /// parallelScan / runPlex / forkJoin which need rank-keyed partial outputs). The pointer is a
+  /// `void*` so this header does not have to pull in `worker_state.h`.
+  void *workerStateBase = nullptr;
+
   /// First-exception capture slot. Workers `compare_exchange` this from null to a heap-allocated
   /// `std::exception_ptr` to record the first failure deterministically; subsequent throws drop.
   /// Worker rank that filled the slot is captured alongside so the slot's line carries both

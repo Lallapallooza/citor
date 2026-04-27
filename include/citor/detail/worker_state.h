@@ -110,6 +110,20 @@ struct WorkerState {
   /// Total steal probes that successfully dequeued a task.
   alignas(kCacheLine) std::atomic<std::uint64_t> stealSuccesses{0};
 
+  /// Per-rank generation claim slot for producer/worker cold-collapse races.
+  ///
+  /// For dispatches that opt into cold-collapse (`JobDescriptor::workerStateBase != nullptr`), the
+  /// producer and the worker race on this slot via `compare_exchange`: the side that bumps
+  /// `claimedAt` from `<currentGen` to `currentGen` wins the right to run rank R's blocks. The
+  /// loser observes the new value and skips its share. The winner stamps `mailbox = doneSentinel`
+  /// after running the partition so the producer's join wait is satisfied.
+  ///
+  /// Lives alone on a 128-byte line because the producer's cold-collapse loop CAS-probes every
+  /// background worker's slot in turn; co-locating with `mailbox` would invalidate the wakeup line
+  /// during the probe and pessimize the steady-state hot path. Default value `0` is below any real
+  /// generation (workers' first dispatch sees gen >= `kPhaseStep` > 0).
+  alignas(kCacheLine) std::atomic<std::uint64_t> claimedAt{0};
+
   /// Reserved deque slot; populated by the work-stealing deque type when it lands.
   alignas(kCacheLine) ChaseLevDequeSlot deque{};
 

@@ -177,8 +177,10 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
     const std::uint64_t lastPhase = lastSeenMailbox & ~PoolControl::kDoneBit;
     if (mailboxPhase != lastPhase) {
       void *raw = self.mailboxDesc;
+      bool coldCollapseDispatch = false;
       if (raw != nullptr) {
         auto *desc = static_cast<JobDescriptor *>(raw);
+        coldCollapseDispatch = desc->workerStateBase != nullptr;
         if (desc->workerEntry != nullptr) {
           // Pass kReuseBit-aware mailbox to the runner: when set, runner uses TLS cache
           // and skips reading desc fields, eliminating the producer's TLS desc cache-line
@@ -197,9 +199,35 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
       // bit is reserved for the worker's stamp), so this equality holds whenever we reach this
       // branch (i.e. the phase changed).
       const std::uint64_t doneVal = mailbox | PoolControl::kDoneBit;
-      self.mailbox.store(doneVal, std::memory_order_release);
-      lastSeenMailbox = doneVal;
-      mailbox = self.mailbox.load(std::memory_order_acquire);
+      if (coldCollapseDispatch) [[unlikely]] {
+        // Cold-collapse opt-in dispatches let the producer return as soon as it has
+        // satisfied the join via a producer-side mailbox stamp, which means the producer can
+        // publish the NEXT dispatch's `publishedMb` before this worker finishes its own stamp.
+        // A naive `mailbox.store(doneVal)` would clobber that next-gen mailbox value and
+        // deadlock the next dispatch's join. CAS the stamp instead: it commits only when the
+        // mailbox is still the value this worker observed. If a later dispatch has overtaken
+        // the slot, the CAS fails, `expected` holds the new value, and we re-enter the loop
+        // to process that next dispatch. The CAS overhead is gated on the rare path -- only
+        // primitives that wired `workerStateBase` (currently parallelFor) pay it.
+        std::uint64_t expected = mailbox;
+        if (self.mailbox.compare_exchange_strong(expected, doneVal,
+                                                  std::memory_order_release,
+                                                  std::memory_order_acquire)) {
+          lastSeenMailbox = doneVal;
+          mailbox = doneVal;
+        } else {
+          // The producer overtook us with a newer dispatch (or stamped done itself and a
+          // later dispatch ran). Adopt the observed value so we can drive its phase compare
+          // on the next loop iteration.
+          mailbox = expected;
+          // lastSeenMailbox stays at its prior value; the next iteration's phase compare
+          // will detect the new dispatch and run it.
+        }
+      } else {
+        self.mailbox.store(doneVal, std::memory_order_release);
+        lastSeenMailbox = doneVal;
+        mailbox = self.mailbox.load(std::memory_order_acquire);
+      }
       continue;
     }
 

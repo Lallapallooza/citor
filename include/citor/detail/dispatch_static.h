@@ -7,8 +7,33 @@
 #include <new>
 
 #include "citor/detail/job_descriptor.h"
+#include "citor/detail/worker_state.h"
 
 namespace citor::detail {
+
+/// CAS-claim a generation on a worker's `claimedAt` slot.
+///
+/// Returns true when this caller successfully bumped `slot.claimedAt` from a value `<currentGen`
+/// up to `currentGen`. Returns false when the slot is already at `>= currentGen` (i.e. another
+/// caller -- producer cold-collapse vs. the worker -- has already claimed this rank for the
+/// current dispatch).
+///
+/// Used by both the typed worker entry (worker side) and the producer's join-wait fallback path
+/// (cold-collapse). The CAS arbitrates which side runs rank R's blocks; the loser returns without
+/// doing work. The contract is symmetric -- whichever side wins is responsible for stamping
+/// `mailbox = doneSentinel` so the producer's join can rendezvous.
+[[gnu::always_inline]] inline bool tryClaimRank(WorkerState &slot,
+                                                 std::uint64_t currentGen) noexcept {
+  std::uint64_t expected = slot.claimedAt.load(std::memory_order_acquire);
+  while (expected < currentGen) {
+    if (slot.claimedAt.compare_exchange_weak(expected, currentGen,
+                                              std::memory_order_acq_rel,
+                                              std::memory_order_acquire)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /// Worker-strided block execution for `Balance::StaticUniform`.
 ///
@@ -157,6 +182,17 @@ inline void typedStaticUniformWorkerEntry(JobDescriptor *desc, std::uint32_t ran
     cache.last = desc->last;
     cache.fnPtr = desc->fnPtr;
     cache.primed = true;
+  }
+  // Cold-collapse CAS-claim: when the producer opted into producer cold-collapse for this
+  // dispatch, race the producer's join-wait fallback for the right to run rank R's blocks. The
+  // loser returns immediately. The cache refresh above runs unconditionally so workers that lose
+  // the race still have a fresh cache for the NEXT dispatch -- otherwise a string of cold
+  // dispatches with reuse=true would leave the worker's TLS cache stale forever.
+  if (desc->workerStateBase != nullptr) [[unlikely]] {
+    auto *wsBase = static_cast<WorkerState *>(desc->workerStateBase);
+    if (!tryClaimRank(wsBase[rank], desc->generation)) {
+      return;
+    }
   }
   const std::size_t participants = cache.participants;
   const std::size_t blockCount = cache.blockCount;
