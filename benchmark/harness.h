@@ -13,6 +13,13 @@
 #include <sys/resource.h>
 #endif
 
+#ifdef CITOR_BENCH_HAS_OPENMP
+// LLVM libomp's Intel-compatibility extension; declared here as a free C
+// function so the checklist can probe the runtime's blocktime without
+// pulling `omp-tools.h` into every TU that includes this header.
+extern "C" int kmp_get_blocktime(void);
+#endif
+
 #include "cycle_clock.h"
 
 namespace citor::bench {
@@ -147,9 +154,8 @@ struct GateResult {
   }
   return {.name = "governor=performance", .status = GateStatus::Fail, .detail = g};
 #else
-  return {.name = "governor=performance",
-          .status = GateStatus::Unknown,
-          .detail = "non-linux host"};
+  return {
+      .name = "governor=performance", .status = GateStatus::Unknown, .detail = "non-linux host"};
 #endif
 }
 
@@ -165,8 +171,7 @@ struct GateResult {
     }
     return {.name = "boost=off", .status = GateStatus::Fail, .detail = "amd boost=" + amdBoost};
   }
-  const std::string intelNoTurbo =
-      readFirstLine("/sys/devices/system/cpu/intel_pstate/no_turbo");
+  const std::string intelNoTurbo = readFirstLine("/sys/devices/system/cpu/intel_pstate/no_turbo");
   if (!intelNoTurbo.empty()) {
     if (intelNoTurbo == "1") {
       return {.name = "boost=off", .status = GateStatus::Pass, .detail = "intel no_turbo=1"};
@@ -235,6 +240,38 @@ struct GateResult {
 #endif
 }
 
+/// Report libomp's `_OPENMP` macro (year-month spec stamp the runtime
+/// implements) plus the runtime's blocktime via `kmp_get_blocktime()`. Every
+/// libomp build exposes both so the gate is `Pass` whenever OpenMP is
+/// compiled in. The bench's cold-fan-out cell forces blocktime=0 via
+/// `kmp_set_blocktime(0)` immediately before the checklist; without that
+/// override libomp's default 200 ms blocktime keeps OpenMP workers spinning
+/// across the bench's cool-off window so the cell measures hot dispatch on
+/// libomp while measuring cold dispatch on every other pool. The reported
+/// blocktime is therefore the value visible to subsequent workloads, not the
+/// libomp default.
+[[nodiscard]] inline GateResult probeLibompBlocktime() {
+#ifdef CITOR_BENCH_HAS_OPENMP
+  const int blocktime = kmp_get_blocktime();
+#ifdef _OPENMP
+  std::string detail = "_OPENMP=";
+  detail += std::to_string(_OPENMP);
+  detail += " kmp_blocktime=";
+  detail += std::to_string(blocktime);
+#else
+  std::string detail = "kmp_blocktime=";
+  detail += std::to_string(blocktime);
+#endif
+  return {.name = "libomp_blocktime=0",
+          .status = blocktime == 0 ? GateStatus::Pass : GateStatus::Fail,
+          .detail = std::move(detail)};
+#else
+  return {.name = "libomp_blocktime=0",
+          .status = GateStatus::Unknown,
+          .detail = "OpenMP not compiled in"};
+#endif
+}
+
 /// Read `VmHWM` (peak resident set size) from `/proc/self/status`, in KiB.
 /// Returns 0 when the field cannot be read.
 [[nodiscard]] inline std::uint64_t readPeakRssKb() {
@@ -285,12 +322,13 @@ struct RusageSample {
 
 /// Format and print the honest-bench checklist banner at the top of a run.
 inline void printChecklist(std::ostream &out) {
-  const std::array<GateResult, 5> gates{{
+  const std::array<GateResult, 6> gates{{
       probeGovernor(),
       probeBoost(),
       probeSmt(),
       probeAslr(),
       probeTsanOff(),
+      probeLibompBlocktime(),
   }};
   out << "[CHECKLIST] honest-bench gates:\n";
   for (const GateResult &g : gates) {

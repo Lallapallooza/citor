@@ -11,7 +11,7 @@ include(${PROJECT_SOURCE_DIR}/cmake/CPM.cmake)
 cpmaddpackage(
     NAME bshoshany_thread_pool
     GITHUB_REPOSITORY bshoshany/thread-pool
-    GIT_TAG v5.1.0
+    GIT_TAG bd4533f1f70c2b975cbd5769a60d8eaaea1d2233
     DOWNLOAD_ONLY YES
 )
 if(bshoshany_thread_pool_ADDED AND NOT TARGET bshoshany_thread_pool)
@@ -26,7 +26,7 @@ endif()
 cpmaddpackage(
     NAME dp_thread_pool
     GITHUB_REPOSITORY DeveloperPaul123/thread-pool
-    GIT_TAG 0.7.0
+    GIT_TAG 2417b702026b56303486dc1442fed9658990185f
     DOWNLOAD_ONLY YES
 )
 if(dp_thread_pool_ADDED AND NOT TARGET dp_thread_pool)
@@ -41,7 +41,7 @@ endif()
 cpmaddpackage(
     NAME task_thread_pool
     GITHUB_REPOSITORY alugowski/task-thread-pool
-    GIT_TAG v1.0.10
+    GIT_TAG 44f1d6ee2ba8bed4873cb5b24b3cd1d8bf825b48
     DOWNLOAD_ONLY YES
 )
 if(task_thread_pool_ADDED AND NOT TARGET task_thread_pool)
@@ -56,7 +56,7 @@ endif()
 cpmaddpackage(
     NAME function2
     GITHUB_REPOSITORY Naios/function2
-    GIT_TAG 4.1.0
+    GIT_TAG 3a0746bf5f601dfed05330aefcb6854354fce07d
     DOWNLOAD_ONLY YES
 )
 if(function2_ADDED AND NOT TARGET function2)
@@ -71,7 +71,7 @@ endif()
 cpmaddpackage(
     NAME riften_deque
     GITHUB_REPOSITORY ConorWilliams/ConcurrentDeque
-    GIT_TAG v1.1.0
+    GIT_TAG 41884b536a53166775fd20918aba4fa066983815
     DOWNLOAD_ONLY YES
 )
 if(riften_deque_ADDED AND NOT TARGET riften_deque)
@@ -86,7 +86,7 @@ endif()
 cpmaddpackage(
     NAME riften_threadpool
     GITHUB_REPOSITORY ConorWilliams/Threadpool
-    GIT_TAG v2.1.1
+    GIT_TAG ea1a1f4d5804643b48dcd352196bbe45016c5022
     DOWNLOAD_ONLY YES
 )
 if(riften_threadpool_ADDED AND NOT TARGET riften_threadpool)
@@ -102,13 +102,13 @@ endif()
 cpmaddpackage(
     NAME nanobench
     GITHUB_REPOSITORY martinus/nanobench
-    GIT_TAG v4.3.11
+    GIT_TAG a5a50c2b33eea2ff1fcb355cacdface43eb42b25
 )
 
 cpmaddpackage(
     NAME oneTBB
     GITHUB_REPOSITORY oneapi-src/oneTBB
-    GIT_TAG v2022.0.0
+    GIT_TAG 0c0ff192a2304e114bc9e6557582dfba101360ff
     OPTIONS
         "TBB_TEST OFF"
         "TBB_EXAMPLES OFF"
@@ -120,7 +120,7 @@ cpmaddpackage(
 cpmaddpackage(
     NAME Taskflow
     GITHUB_REPOSITORY taskflow/taskflow
-    GIT_TAG v3.7.0
+    GIT_TAG 7d9e85b6b2e9bf501021f857f2f3cbe43bc37c85
     OPTIONS
         "TF_BUILD_TESTS OFF"
         "TF_BUILD_EXAMPLES OFF"
@@ -133,7 +133,7 @@ cpmaddpackage(
 cpmaddpackage(
     NAME Eigen
     GITLAB_REPOSITORY libeigen/eigen
-    GIT_TAG 3.4.0
+    GIT_TAG 3147391d946bb4b6c68edd901f2add6ac1f31f8c
     DOWNLOAD_ONLY YES
 )
 if(Eigen_ADDED AND NOT TARGET eigen_threadpool)
@@ -144,6 +144,19 @@ if(Eigen_ADDED AND NOT TARGET eigen_threadpool)
         INTERFACE ${Eigen_SOURCE_DIR}
     )
 endif()
+
+cpmaddpackage(
+    NAME HdrHistogram_c
+    GITHUB_REPOSITORY HdrHistogram/HdrHistogram_c
+    GIT_TAG be60a9987ee48d0abf0d7b6a175bad8d6c1585d1
+    OPTIONS
+        "HDR_LOG_REQUIRED OFF"
+        "HDR_HISTOGRAM_BUILD_SHARED OFF"
+        "HDR_HISTOGRAM_BUILD_STATIC ON"
+        "HDR_HISTOGRAM_INSTALL_SHARED OFF"
+        "HDR_HISTOGRAM_INSTALL_STATIC OFF"
+        "HDR_HISTOGRAM_BUILD_PROGRAMS OFF"
+)
 
 find_package(OpenMP QUIET)
 if(OpenMP_CXX_FOUND)
@@ -159,10 +172,14 @@ set(_citor_bench_sources
     differential_bench.cpp
     empty_fanout_bench.cpp
     fork_join_bench.cpp
+    forkjoin_knapsack_cancel_bench.cpp
+    forkjoin_uts_bench.cpp
     granularity_bench.cpp
     matmul_bench.cpp
+    parallel_for_cold_dispatch_bench.cpp
     parallel_reduce_bench.cpp
     plex_bench.cpp
+    runplex_heat_bench.cpp
     scan_bench.cpp
 )
 
@@ -177,6 +194,7 @@ target_link_libraries(
         task_thread_pool
         riften_threadpool
         nanobench
+        hdr_histogram_static
 )
 if(CITOR_IS_TOP_LEVEL)
     target_link_libraries(parallel_bench PRIVATE citor_warnings)
@@ -191,9 +209,17 @@ if(TARGET Taskflow)
     # that trip the bench's `-Wsign-conversion`/`-Wextra` policy. Re-export its
     # include directories as SYSTEM so its internal noise does not block the
     # build, while keeping our own warning policy strict.
-    get_target_property(_taskflow_includes Taskflow INTERFACE_INCLUDE_DIRECTORIES)
+    get_target_property(
+        _taskflow_includes
+        Taskflow
+        INTERFACE_INCLUDE_DIRECTORIES
+    )
     if(_taskflow_includes)
-        target_include_directories(parallel_bench SYSTEM PRIVATE ${_taskflow_includes})
+        target_include_directories(
+            parallel_bench
+            SYSTEM
+            PRIVATE ${_taskflow_includes}
+        )
     endif()
     target_link_libraries(parallel_bench PRIVATE Taskflow)
     target_compile_definitions(parallel_bench PRIVATE CITOR_BENCH_HAS_TASKFLOW)

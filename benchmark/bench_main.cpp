@@ -48,11 +48,25 @@ void printCalibrationBanner(const citor::bench::CyclesPerNanosecond &cal) {
 struct CliOptions {
   std::vector<std::string_view> filters;
   bool listOnly = false;
+  /// When set, populate `BenchRow::tailNs` (p25/p50/p99) on workloads that
+  /// support it and emit the three extra columns. Default OFF so existing
+  /// (they key off `$2` ns/op and `$NF` row name; the tail columns sit
+  /// between `err%` and the row name).
+  bool withTailPercentiles = false;
 };
 
 void printUsage(std::ostream &out) {
   out << "usage: parallel_bench [--filter SUBSTR] [--filter=SUBSTR] [--list]\n"
-      << "       parallel_bench SUBSTR\n";
+      << "                      [--with-tail-percentiles]\n"
+      << "       parallel_bench SUBSTR\n"
+      << '\n'
+      << "  --filter SUBSTR          Run only workloads whose name contains SUBSTR.\n"
+      << "                           May be repeated; matches are OR-ed.\n"
+      << "  --list                   Print matching workload names and exit.\n"
+      << "  --with-tail-percentiles  Populate p25/p50/p99 columns on workloads that\n"
+      << "                           build an `hdr_histogram` over their cycle\n"
+      << "                           samples. OFF by default; downstream awk\n"
+      << "                           parsers see the pre-tail column layout.\n";
 }
 
 bool parseArgs(int argc, char **argv, CliOptions &opts) {
@@ -64,6 +78,10 @@ bool parseArgs(int argc, char **argv, CliOptions &opts) {
     }
     if (arg == "--list") {
       opts.listOnly = true;
+      continue;
+    }
+    if (arg == "--with-tail-percentiles") {
+      opts.withTailPercentiles = true;
       continue;
     }
     if (arg == "--filter" || arg == "-f") {
@@ -115,6 +133,7 @@ int main(int argc, char **argv) {
   if (!parseArgs(argc, argv, opts)) {
     return EXIT_FAILURE;
   }
+  tailPercentilesEnabled() = opts.withTailPercentiles;
   if (registry().empty()) {
     std::cerr << "parallel_bench: no workloads registered; check link order\n";
     return EXIT_FAILURE;
@@ -137,8 +156,6 @@ int main(int argc, char **argv) {
     }
     std::cout << "\n";
   }
-  printChecklist(std::cout);
-  std::cout << '\n';
 
 #ifdef CITOR_BENCH_HAS_OPENMP
   // OpenMP rows construct an `OpenMpRunner` carrying the requested participant
@@ -157,9 +174,16 @@ int main(int argc, char **argv) {
   // `kmp_set_blocktime(0)` so libomp parks promptly between dispatches and
   // every pool's cold-cell number is comparable. Hot-path cells are not
   // affected by parking choice (workers see the next dispatch before any
-  // park budget can fire).
+  // park budget can fire). The checklist below reports the resulting
+  // blocktime so the printed value reflects the post-override state, not libomp's
+  // default.
   kmp_set_blocktime(0);
 #endif
+
+  // Checklist runs AFTER `kmp_set_blocktime(0)` so the reported libomp
+  // blocktime reflects the bench's policy override, not libomp's default.
+  printChecklist(std::cout);
+  std::cout << '\n';
 
   // Inter-cell cool-off. After a 100 ms-budget cell that pegged 16 cores, the package
   // accumulates thermal load and the next cell starts in a different operating point.

@@ -3,9 +3,12 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <iomanip>
 #include <ios>
+#include <optional>
 #include <ostream>
+#include <random>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -13,6 +16,21 @@
 #include <vector>
 
 namespace citor::bench {
+
+/// Process-global toggle for the tail-percentile output columns.
+///
+/// Bench TUs that can populate `BenchRow::tailNs` consult this flag before
+/// doing so. The default is OFF so the current bench output is byte-identical
+/// to runs that pre-date the flag; downstream awk parsers in the
+/// both stay stable across the flag toggle. The flag is set from
+/// `bench_main.cpp` based on the `--with-tail-percentiles` command-line
+/// argument.
+///
+/// Mutable reference to the flag.
+inline bool &tailPercentilesEnabled() {
+  static bool enabled = false;
+  return enabled;
+}
 
 /// One competitor's measurement row in a comparative bench table.
 ///
@@ -30,6 +48,14 @@ struct BenchRow {
 
   /// Relative standard deviation of `nsPerOp` (percentage).
   double errPercent = 0.0;
+
+  /// Optional tail-percentile triple (p25, p50, p99) in ns. Populated only by
+  /// workloads that explicitly opt in (typically those that build an
+  /// `hdr_histogram` over their cycle samples) and only when the global
+  /// `tailPercentilesEnabled()` flag is true. When `std::nullopt`, `formatTable`
+  /// renders no extra columns and the row is byte-identical to the pre-tail
+  /// output.
+  std::optional<std::array<double, 3>> tailNs;
 };
 
 /// A complete comparison table for one workload.
@@ -112,9 +138,25 @@ inline void formatTable(const BenchTable &table, std::string_view baselineName, 
     }
   }
 
+  // Tail-percentile columns are emitted only when at least one row populated
+  // `tailNs`. Workloads that do not populate the optional render byte-identical
+  // to the pre-tail format; downstream awk parsers that key off `$2` and `$NF`
+  // remain stable in either mode.
+  bool anyTail = false;
+  for (const auto &row : table.rows) {
+    if (row.tailNs.has_value()) {
+      anyTail = true;
+      break;
+    }
+  }
+
   // Header row.
   out << std::left << std::setw(11) << "relative" << std::setw(10) << "ns/op" << std::setw(10)
-      << "op/s" << std::setw(8) << "err%" << "workload: " << table.workload << '\n';
+      << "op/s" << std::setw(8) << "err%";
+  if (anyTail) {
+    out << std::setw(10) << "p25" << std::setw(10) << "p50" << std::setw(10) << "p99";
+  }
+  out << "workload: " << table.workload << '\n';
 
   for (const auto &row : table.rows) {
     std::string relative;
@@ -133,7 +175,20 @@ inline void formatTable(const BenchTable &table, std::string_view baselineName, 
     errOss << std::fixed << std::setprecision(1) << row.errPercent << "%";
 
     out << std::left << std::setw(11) << relative << std::setw(10) << nsOss.str() << std::setw(10)
-        << formatSiNumber(row.opsPerSec) << std::setw(8) << errOss.str() << row.name << '\n';
+        << formatSiNumber(row.opsPerSec) << std::setw(8) << errOss.str();
+    if (anyTail) {
+      auto renderTail = [](const std::optional<std::array<double, 3>> &tail, std::size_t idx) {
+        if (!tail.has_value()) {
+          return std::string{"-"};
+        }
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(0) << (*tail)[idx];
+        return oss.str();
+      };
+      out << std::setw(10) << renderTail(row.tailNs, 0U) << std::setw(10)
+          << renderTail(row.tailNs, 1U) << std::setw(10) << renderTail(row.tailNs, 2U);
+    }
+    out << row.name << '\n';
   }
 }
 
@@ -157,7 +212,11 @@ inline void formatTable(const BenchTable &table, std::string_view baselineName, 
 ///         deviation across the full sample vector.
 [[nodiscard]] inline BenchRow finalizeRow(std::string name, std::vector<double> &samples) {
   if (samples.empty()) {
-    return BenchRow{.name = std::move(name), .nsPerOp = 0.0, .opsPerSec = 0.0, .errPercent = 0.0};
+    return BenchRow{.name = std::move(name),
+                    .nsPerOp = 0.0,
+                    .opsPerSec = 0.0,
+                    .errPercent = 0.0,
+                    .tailNs = std::nullopt};
   }
   std::sort(samples.begin(), samples.end());
   const std::size_t pIdx = samples.size() / 4U;
@@ -199,6 +258,7 @@ inline void formatTable(const BenchTable &table, std::string_view baselineName, 
       .nsPerOp = p25,
       .opsPerSec = opsPerSec,
       .errPercent = errPct,
+      .tailNs = std::nullopt,
   };
 }
 
@@ -229,6 +289,68 @@ inline double relativeStdDevPercent(const std::vector<double> &samples) {
   }
   const double variance = sqSum / static_cast<double>(samples.size() - 1);
   return 100.0 * std::sqrt(variance) / std::fabs(mean);
+}
+
+/// Centered 95 % bootstrap confidence interval half-width for the median
+///        of |samples|, expressed as a percentage of that median.
+///
+/// For sample sizes below `kBootstrapMinSamples` (30) the parametric
+/// `relativeStdDevPercent` is the better estimator: bootstrap percentile
+/// coverage at small n is biased even on Gaussian data (Kalibera & Jones,
+/// ISMM 2013), and the ns/op samples this bench collects are heavy-tailed in
+/// the cold-cell regime where the bootstrap window would underweight rare
+/// stalls. For n >= 30 the bootstrap is stable under multimodality and outliers;
+/// the parametric stddev mis-reports under heavy-tailed distributions because
+/// the second moment is inflated by the tail.
+///
+/// The helper returns 0.0 for sample sizes below the bootstrap threshold so
+/// the caller can fall back to `relativeStdDevPercent` for the small-n path
+/// without negotiating a sentinel; both helpers return zero for degenerate
+/// inputs (n < 2, mean == 0, NaN), which keeps the err% column output at
+/// `0.0%` in the same edge cases the parametric path already covers.
+///
+/// samples  Per-iteration ns measurements; not modified.
+/// resamples Number of bootstrap resamples to draw. 1024 gives a
+///                  a few percent standard error on the half-width estimate, which is
+///                  small enough to be invisible in the rendered err% cell.
+/// seed     RNG seed for the resample loop. The bench wants
+///                 reproducible CI estimates across runs, so this defaults to
+///                 a fixed value rather than `std::random_device`.
+/// Bootstrap-CI half-width as a percentage of the sample median, or
+///         0.0 when |samples| has fewer than `kBootstrapMinSamples` entries
+///         or when the median is zero / non-finite.
+constexpr std::size_t kBootstrapMinSamples = 30;
+
+inline double bootstrapMedianCiPercent(std::vector<double> samples, std::size_t resamples = 1024,
+                                       std::uint64_t seed = 0xC1709F22ABULL) {
+  if (samples.size() < kBootstrapMinSamples) {
+    return 0.0;
+  }
+  std::vector<double> sorted = samples;
+  std::sort(sorted.begin(), sorted.end());
+  const double median = sorted[sorted.size() / 2U];
+  if (!std::isfinite(median) || median == 0.0) {
+    return 0.0;
+  }
+  std::mt19937_64 rng(seed);
+  std::uniform_int_distribution<std::size_t> pick(0U, samples.size() - 1U);
+  std::vector<double> medians;
+  medians.reserve(resamples);
+  std::vector<double> resample(samples.size());
+  for (std::size_t r = 0; r < resamples; ++r) {
+    for (std::size_t i = 0; i < samples.size(); ++i) {
+      resample[i] = samples[pick(rng)];
+    }
+    std::nth_element(resample.begin(), resample.begin() + (resample.size() / 2U), resample.end());
+    medians.push_back(resample[resample.size() / 2U]);
+  }
+  std::sort(medians.begin(), medians.end());
+  const std::size_t lowIdx = (medians.size() * 25U) / 1000U;
+  const std::size_t highIdx = (medians.size() * 975U) / 1000U;
+  const double low = medians[lowIdx];
+  const double high = medians[highIdx];
+  const double halfWidth = (high - low) * 0.5;
+  return 100.0 * halfWidth / std::fabs(median);
 }
 
 } // namespace citor::bench
