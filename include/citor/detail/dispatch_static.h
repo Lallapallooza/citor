@@ -76,7 +76,7 @@ inline void runStaticPartition(JobDescriptor &desc, std::uint32_t rank) noexcept
 /// they cannot recover the body's type from the published descriptor.
 ///
 /// Eliminates the `call *<func_ptr>` indirect call (a large slice of
-/// `runStaticPartition`'s samples on this instruction) for the producer's slot-0 body.
+/// `runStaticPartition`'s samples landed there) for the producer's slot-0 body.
 template <class FOp>
 inline void runStaticPartitionTyped(JobDescriptor &desc, std::uint32_t rank, FOp &fn) noexcept {
   const std::size_t participants = desc.participants;
@@ -149,7 +149,7 @@ inline void typedStaticUniformWorkerEntry(JobDescriptor *desc, std::uint32_t ran
   const bool reuse = (rankPacked & kReuseFlag) != 0U;
   const std::uint32_t rank = rankPacked & ~kReuseFlag;
   auto &cache = cachedStaticForSlot<HintsT, F>();
-  if (!reuse || !cache.primed) {
+  if (!reuse || !cache.primed) [[unlikely]] {
     cache.participants = desc->participants;
     cache.blockCount = desc->blockCount;
     cache.chunk = desc->chunk;
