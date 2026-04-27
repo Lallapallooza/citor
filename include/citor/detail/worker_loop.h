@@ -190,7 +190,11 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
           runActiveJob(*desc, workerId);
         }
       }
-      const std::uint64_t doneVal = mailboxPhase | PoolControl::kDoneBit;
+      // (mailbox & ~kDoneBit) | kDoneBit is identity to (mailbox | kDoneBit) when kDoneBit is
+      // already clear in mailbox. The producer publishes new phases with kDoneBit clear (the
+      // bit is reserved for the worker's stamp), so this equality holds whenever we reach this
+      // branch (i.e. the phase changed).
+      const std::uint64_t doneVal = mailbox | PoolControl::kDoneBit;
       self.mailbox.store(doneVal, std::memory_order_release);
       lastSeenMailbox = doneVal;
       mailbox = self.mailbox.load(std::memory_order_acquire);
@@ -213,7 +217,7 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
     const std::uint64_t startTsc = lowLatencyActive ? 0ULL : readTsc();
     bool parkRequired = true;
     // Tight-first-N spin on the worker's own mailbox line. The producer's release-store on
-    // mailbox propagates intra-CCD in tens of nanoseconds. PAUSE adds back-off slack which means each
+    // mailbox propagates intra-CCD in tens of nanoseconds. PAUSE on a typical Zen host is ~140 cycles which means each
     // PAUSE-load iter adds detection slack. For the first 8 iterations skip PAUSE so
     // the worker detects a "publish-already-arrived" case (cache line was prefetched on the
     // producer's store edge) within a handful of cycles of the load, before falling back to PAUSE-spin
