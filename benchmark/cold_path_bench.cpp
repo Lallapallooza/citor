@@ -1,9 +1,25 @@
 // Cold-dispatch workload for the comparative pool bench.
 //
-// Empty-fan-out variant where the producer sleeps 100 ms between iterations so
-// every pool's workers park before the next dispatch. Measures the futex
-// round-trip (or whatever the pool's park/wake mechanism is) rather than the
-// hot spin-poll path that `empty_fanout_bench.cpp` exercises.
+// Empty-fan-out variant where the producer sleeps 30 ms between iterations so
+// every pool's workers should park before the next dispatch. The cell measures
+// the futex round-trip (or whatever the pool's park/wake mechanism is) rather
+// than the hot spin-poll path that `empty_fanout_bench.cpp` exercises.
+//
+// **Apples-to-apples caveat.** `bench_main.cpp` calls `kmp_set_blocktime(0)`
+// at startup so libomp parks immediately after each parallel region instead of
+// holding workers in a 200 ms hot-spin loop. Without that override the cell
+// measured policy mismatch (libomp burning 8 cores during the cool-off vs
+// every other pool actually parking).
+//
+// **Trivial-body caveat.** Several runtimes (oneTBB, libomp) collapse a cold
+// trivial-body dispatch onto the producer thread instead of waking N workers,
+// because the work-stealing queue has no demand by the time the dispatch
+// arrives. Verified empirically: oneTBB runs all 8 iterations of an 8-iter
+// `parallel_for` on the calling thread (`distinct tids = 1`). Citor's static
+// partition fans out unconditionally and pays the full park/wake cost on every
+// participant. The numbers in this cell therefore compare different things
+// across runtimes; treat them as "what does a trivial cold call cost," not
+// "how fast is wake-from-park" specifically.
 //
 // Sample budget is small: each iteration costs ~100 ms of sleep
 // plus the dispatch under measurement, so a row at 200 samples is ~20 s. With

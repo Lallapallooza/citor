@@ -29,6 +29,11 @@
 
 #ifdef CITOR_BENCH_HAS_OPENMP
 #include <omp.h>
+// LLVM libomp's Intel-compatibility extension: lets the runtime's "blocktime"
+// (the duration worker threads spin after completing a parallel region before
+// parking) be set programmatically. Declared as a free C function so we don't
+// pull in `omp-tools.h` for one symbol.
+extern "C" void kmp_set_blocktime(int milliseconds);
 #endif
 
 namespace {
@@ -142,6 +147,18 @@ int main(int argc, char **argv) {
   // largest expected participant count once at startup so the OpenMP runtime
   // pre-spawns enough idle workers for every workload's `j` value.
   omp_set_num_threads(16);
+  // libomp's default `KMP_BLOCKTIME=200000us` keeps worker threads spinning
+  // for 200 ms after every parallel region before parking. The cold-fan-out
+  // cell's 30 ms cool-off is shorter than that default, so by default libomp
+  // workers NEVER park during the bench's cool-off window: they stay pinned
+  // at 100 % CPU between dispatches and the cell measures hot dispatch on
+  // libomp while measuring cold (park-then-wake) dispatch on every other
+  // pool. That's a policy mismatch, not a fairness comparison. Force
+  // `kmp_set_blocktime(0)` so libomp parks promptly between dispatches and
+  // every pool's cold-cell number is comparable. Hot-path cells are not
+  // affected by parking choice (workers see the next dispatch before any
+  // park budget can fire).
+  kmp_set_blocktime(0);
 #endif
 
   // Inter-cell cool-off. After a 100 ms-budget cell that pegged 16 cores, the package
