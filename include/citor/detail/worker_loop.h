@@ -183,9 +183,11 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
           // Pass kReuseBit-aware mailbox to the runner: when set, runner uses TLS cache
           // and skips reading desc fields, eliminating the producer's TLS desc cache-line
           // transit on steady-state repeated calls.
+          // Branchless kReuseBit (bit 2) -> high bit (bit 31): shift left by 29 instead of
+          // ternary cmov. Same observable result, one fewer dependency in the call's arg.
+          static_assert(PoolControl::kReuseBit == (1ULL << 2));
           desc->workerEntry(desc, workerId | static_cast<std::uint32_t>(
-                                                  (mailbox & PoolControl::kReuseBit) ? 0x80000000U
-                                                                                     : 0U));
+                                                  (mailbox & PoolControl::kReuseBit) << 29));
         } else {
           runActiveJob(*desc, workerId);
         }
@@ -217,7 +219,7 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
     const std::uint64_t startTsc = lowLatencyActive ? 0ULL : readTsc();
     bool parkRequired = true;
     // Tight-first-N spin on the worker's own mailbox line. The producer's release-store on
-    // mailbox propagates intra-CCD in tens of nanoseconds. PAUSE on a typical Zen host is ~140 cycles which means each
+    // mailbox propagates intra-CCD in tens of nanoseconds. PAUSE adds back-off slack which means each
     // PAUSE-load iter adds detection slack. For the first 8 iterations skip PAUSE so
     // the worker detects a "publish-already-arrived" case (cache line was prefetched on the
     // producer's store edge) within a handful of cycles of the load, before falling back to PAUSE-spin
@@ -233,7 +235,7 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
     }
     if (parkRequired) {
       // `rdtscp` serializes the pipeline and costs roughly the same as a small batch of
-      // pause-load-compare iterations on Zen, so reading the TSC every iter doubled the spin
+      // pause-load-compare iterations, so reading the TSC every iter doubled the spin
       // loop body. Sample it every 64 iters instead.
       for (std::uint32_t iter = 0; iter < kSpinAfterBulkJob.maxIters; ++iter) {
         cpuRelax();
