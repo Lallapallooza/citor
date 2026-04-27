@@ -314,6 +314,19 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
     self.wakes.store(self.wakes.load(std::memory_order_relaxed) + 1U,
                      std::memory_order_relaxed);
     mailbox = self.mailbox.load(std::memory_order_acquire);
+    // Chain-wake propagation (oneTBB private_server.cpp wake_some / propagate_chain_reaction
+    // pattern). When this worker's futex_wait returns and the mailbox phase has advanced past
+    // `lastSeenMailbox`, the producer dispatched a new generation while we were parked. Wake up
+    // to two more parked workers via futex_wake(N=2) so the chain doubles each hop and reaches
+    // every parked worker in log2(N) syscalls instead of forcing the producer to issue one
+    // INT_MAX broadcast on its critical path. Skip on shutdown -- shutdownAndJoin already does
+    // a single INT_MAX broadcast that's sequenced-after the descriptor cleanup, and we don't
+    // want a parked worker waking on shutdown to spawn an INT_MAX-equivalent chain.
+    const std::uint64_t newPhase = mailbox & ~PoolControl::kDoneBit;
+    const std::uint64_t oldPhase = lastSeenMailbox & ~PoolControl::kDoneBit;
+    if (newPhase != oldPhase && (mailbox & PoolControl::kShutdownBit) == 0) {
+      (void)futexWakePrivate(&control.futexWord, 2);
+    }
   }
 }
 
