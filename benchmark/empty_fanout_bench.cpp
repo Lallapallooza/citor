@@ -31,10 +31,10 @@ namespace {
 /// p25 of per-dispatch ns across `kIterations` brackets.
 constexpr std::size_t kIterations = 2'000;
 
-/// Inner-batch size. Empty fan-out dispatch spans roughly two orders of magnitude across the
+/// Inner-batch size. Empty fan-out dispatch is several orders of magnitude across the
 /// surveyed pools; batching 64 dispatches per bracket pushes the slowest pool
 /// safely above the timer-tick floor and amortizes the `__rdtscp` overhead
-/// below the noise floor for the fastest pool.
+///  below the noise floor for the fastest pool.
 constexpr std::size_t kBatchSize = 64;
 
 /// Warmup iterations dropped from the sample window. Hot dispatch numbers are
@@ -89,8 +89,7 @@ template <class PoolT>
       Traits::submitBlocksAndWait(*pool, 0, participants, body);
     }
     const std::uint64_t endCycles = readCyclesEnd();
-    samples.push_back(cyclesToNs(endCycles - startCycles, cal) /
-                      static_cast<double>(kBatchSize));
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal) / static_cast<double>(kBatchSize));
   }
 
   // Touch the sink so the optimizer cannot prove the bench is dead code.
@@ -137,7 +136,7 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
 }
 
 /// Bench runner for the j=16 hot variant; the headline workload at the
-/// a representative dominant workload shape on AMD Zen 5.
+/// a representative dominant workload shape on multi-CCD AMD chips.
 BenchTable runEmptyFanoutJ16Hot(const CyclesPerNanosecond &cal) {
   return buildTable(/*participants=*/16, "j16_hot", cal);
 }

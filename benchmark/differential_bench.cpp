@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <future>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -76,7 +77,7 @@ struct Samples {
 }
 
 [[nodiscard]] inline std::int64_t partialSum(const std::vector<std::int64_t> &in, std::size_t lo,
-                                              std::size_t hi) noexcept {
+                                             std::size_t hi) noexcept {
   std::int64_t s = 0;
   for (std::size_t i = lo; i < hi; ++i) {
     s += in[i];
@@ -92,8 +93,7 @@ inline std::pair<std::size_t, std::size_t> blockRange(std::size_t blockIdx,
   return {lo, hi};
 }
 
-template <class RunFn>
-[[nodiscard]] Samples runSamples(const CyclesPerNanosecond &cal, RunFn run) {
+template <class RunFn> [[nodiscard]] Samples runSamples(const CyclesPerNanosecond &cal, RunFn run) {
   Samples out;
   out.times.reserve(kRuns);
   out.bits.reserve(kRuns);
@@ -130,12 +130,12 @@ template <class RunFn>
       .nsPerOp = medianNs,
       .opsPerSec = opsPerSec,
       .errPercent = divergencePct,
+      .tailNs = std::nullopt,
   };
 }
 
 [[nodiscard]] std::int64_t runBsReduce(BS::light_thread_pool &pool,
-                                        const std::vector<std::int64_t> &in,
-                                        std::size_t blocks) {
+                                       const std::vector<std::int64_t> &in, std::size_t blocks) {
   std::vector<std::int64_t> partials(blocks, 0);
   const std::size_t blockSize = (kN + blocks - 1) / blocks;
   pool.submit_blocks(
@@ -155,7 +155,7 @@ template <class RunFn>
 
 template <class Pool, class EnqueueFn>
 [[nodiscard]] std::int64_t runFutureReduce(Pool &pool, const std::vector<std::int64_t> &in,
-                                            std::size_t blocks, EnqueueFn enqueue) {
+                                           std::size_t blocks, EnqueueFn enqueue) {
   std::vector<std::future<std::int64_t>> futs;
   futs.reserve(blocks);
   for (std::size_t b = 0; b < blocks; ++b) {
@@ -202,10 +202,9 @@ template <class Pool, class EnqueueFn>
   ::task_thread_pool::task_thread_pool pool(static_cast<unsigned int>(participants));
   const auto in = buildInputInt64();
   return runSamples(cal, [&] {
-    return runFutureReduce(pool, in, participants,
-                           [](::task_thread_pool::task_thread_pool &p, auto fn) {
-                             return p.submit(std::move(fn));
-                           });
+    return runFutureReduce(
+        pool, in, participants,
+        [](::task_thread_pool::task_thread_pool &p, auto fn) { return p.submit(std::move(fn)); });
   });
 }
 
@@ -213,9 +212,8 @@ template <class Pool, class EnqueueFn>
   riften::Thiefpool pool(participants);
   const auto in = buildInputInt64();
   return runSamples(cal, [&] {
-    return runFutureReduce(
-        pool, in, participants,
-        [](riften::Thiefpool &p, auto fn) { return p.enqueue(std::move(fn)); });
+    return runFutureReduce(pool, in, participants,
+                           [](riften::Thiefpool &p, auto fn) { return p.enqueue(std::move(fn)); });
   });
 }
 
@@ -299,7 +297,7 @@ template <class Pool, class EnqueueFn>
 #endif
 
 BenchTable buildTable(std::size_t participants, const char *suffix,
-                       const CyclesPerNanosecond &cal) {
+                      const CyclesPerNanosecond &cal) {
   BenchTable table;
   table.workload = std::string{"differential_reduce_int64_"} + suffix;
 

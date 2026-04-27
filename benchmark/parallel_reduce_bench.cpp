@@ -129,8 +129,8 @@ inline std::pair<std::size_t, std::size_t> blockRange(std::size_t blockIdx,
 }
 
 /// Per-block plain partial-sum kernel; competitor emulations reuse it.
-template <class T> [[nodiscard]] T partialSumPlain(const std::vector<T> &in, std::size_t lo,
-                                                   std::size_t hi) noexcept {
+template <class T>
+[[nodiscard]] T partialSumPlain(const std::vector<T> &in, std::size_t lo, std::size_t hi) noexcept {
   T s{0};
   for (std::size_t i = lo; i < hi; ++i) {
     s += in[i];
@@ -156,8 +156,7 @@ template <class T> [[nodiscard]] T partialSumPlain(const std::vector<T> &in, std
 // citor pool
 // =============================================================================
 
-[[nodiscard]] BenchRow measureCitorPlain(std::size_t participants,
-                                          const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureCitorPlain(std::size_t participants, const CyclesPerNanosecond &cal) {
   ThreadPool pool(participants);
   ReduceData<std::int64_t> d = buildData<std::int64_t>();
   return measureLoop<std::int64_t>("citor::ThreadPool::parallelReduce", cal, [&] {
@@ -168,8 +167,7 @@ template <class T> [[nodiscard]] T partialSumPlain(const std::vector<T> &in, std
   });
 }
 
-[[nodiscard]] BenchRow measureCitorKahan(std::size_t participants,
-                                          const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureCitorKahan(std::size_t participants, const CyclesPerNanosecond &cal) {
   ThreadPool pool(participants);
   ReduceData<double> d = buildData<double>();
   return measureLoop<double>("citor::ThreadPool::parallelReduce_kahan", cal, [&] {
@@ -186,7 +184,7 @@ template <class T> [[nodiscard]] T partialSumPlain(const std::vector<T> &in, std
 
 template <class T, class Kernel>
 [[nodiscard]] T runBsTwoWave(BS::light_thread_pool &pool, const std::vector<T> &in,
-                              std::size_t blocks, Kernel kernel) {
+                             std::size_t blocks, Kernel kernel) {
   std::vector<T> partials(blocks, T{0});
   const std::size_t blockSize = (kN + blocks - 1) / blocks;
   pool.submit_blocks(
@@ -287,7 +285,7 @@ template <class T, class Pool, class EnqueueFn, class Kernel>
 }
 
 [[nodiscard]] BenchRow measureRiftenPlain(std::size_t participants,
-                                            const CyclesPerNanosecond &cal) {
+                                          const CyclesPerNanosecond &cal) {
   riften::Thiefpool pool(participants);
   ReduceData<std::int64_t> d = buildData<std::int64_t>();
   return measureLoop<std::int64_t>("riften::Thiefpool::reduce_two_wave", cal, [&] {
@@ -299,7 +297,7 @@ template <class T, class Pool, class EnqueueFn, class Kernel>
 }
 
 [[nodiscard]] BenchRow measureRiftenKahan(std::size_t participants,
-                                            const CyclesPerNanosecond &cal) {
+                                          const CyclesPerNanosecond &cal) {
   riften::Thiefpool pool(participants);
   ReduceData<double> d = buildData<double>();
   return measureLoop<double>("riften::Thiefpool::reduce_kahan_two_wave", cal, [&] {
@@ -348,7 +346,7 @@ template <class T, class Pool, class EnqueueFn, class Kernel>
 #ifdef CITOR_BENCH_HAS_TASKFLOW
 template <class T, class Kernel>
 [[nodiscard]] T runTaskflowTwoWave(::tf::Executor &exec, const std::vector<T> &in,
-                                    std::size_t blocks, Kernel kernel) {
+                                   std::size_t blocks, Kernel kernel) {
   std::vector<T> partials(blocks, T{0});
   ::tf::Taskflow flow;
   flow.for_each_index(std::size_t{0}, blocks, std::size_t{1},
@@ -369,17 +367,17 @@ template <class T, class Kernel>
 }
 
 [[nodiscard]] BenchRow measureTaskflowPlain(std::size_t participants,
-                                              const CyclesPerNanosecond &cal) {
+                                            const CyclesPerNanosecond &cal) {
   auto exec = CompetitorTraits<::tf::Executor>::make(participants);
   ReduceData<std::int64_t> d = buildData<std::int64_t>();
   return measureLoop<std::int64_t>("Taskflow::reduce_two_wave", cal, [&] {
     return runTaskflowTwoWave<std::int64_t>(*exec, d.in, participants,
-                                              partialSumPlain<std::int64_t>);
+                                            partialSumPlain<std::int64_t>);
   });
 }
 
 [[nodiscard]] BenchRow measureTaskflowKahan(std::size_t participants,
-                                              const CyclesPerNanosecond &cal) {
+                                            const CyclesPerNanosecond &cal) {
   auto exec = CompetitorTraits<::tf::Executor>::make(participants);
   ReduceData<double> d = buildData<double>();
   return measureLoop<double>("Taskflow::reduce_kahan_two_wave", cal, [&] {
@@ -395,7 +393,7 @@ template <class T, class Kernel>
 #ifdef CITOR_BENCH_HAS_EIGEN_THREADPOOL
 template <class T, class Kernel>
 [[nodiscard]] T runEigenTwoWave(::Eigen::ThreadPool &pool, const std::vector<T> &in,
-                                  std::size_t blocks, Kernel kernel) {
+                                std::size_t blocks, Kernel kernel) {
   std::vector<T> partials(blocks, T{0});
   const std::size_t blockSize = (kN + blocks - 1) / blocks;
   CompetitorTraits<::Eigen::ThreadPool>::parallelFor(
@@ -411,18 +409,15 @@ template <class T, class Kernel>
   return total;
 }
 
-[[nodiscard]] BenchRow measureEigenPlain(std::size_t participants,
-                                          const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureEigenPlain(std::size_t participants, const CyclesPerNanosecond &cal) {
   auto pool = CompetitorTraits<::Eigen::ThreadPool>::make(participants);
   ReduceData<std::int64_t> d = buildData<std::int64_t>();
   return measureLoop<std::int64_t>("Eigen::ThreadPool::reduce_two_wave", cal, [&] {
-    return runEigenTwoWave<std::int64_t>(*pool, d.in, participants,
-                                          partialSumPlain<std::int64_t>);
+    return runEigenTwoWave<std::int64_t>(*pool, d.in, participants, partialSumPlain<std::int64_t>);
   });
 }
 
-[[nodiscard]] BenchRow measureEigenKahan(std::size_t participants,
-                                          const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureEigenKahan(std::size_t participants, const CyclesPerNanosecond &cal) {
   auto pool = CompetitorTraits<::Eigen::ThreadPool>::make(participants);
   ReduceData<double> d = buildData<double>();
   return measureLoop<double>("Eigen::ThreadPool::reduce_kahan_two_wave", cal, [&] {
@@ -437,7 +432,7 @@ template <class T, class Kernel>
 
 #ifdef CITOR_BENCH_HAS_OPENMP
 [[nodiscard]] BenchRow measureOpenMpPlain(std::size_t participants,
-                                            const CyclesPerNanosecond &cal) {
+                                          const CyclesPerNanosecond &cal) {
   ReduceData<std::int64_t> d = buildData<std::int64_t>();
   const auto threads = static_cast<int>(participants);
   return measureLoop<std::int64_t>("OpenMP::reduce_plus", cal, [&] {
@@ -452,7 +447,7 @@ template <class T, class Kernel>
 }
 
 [[nodiscard]] BenchRow measureOpenMpKahan(std::size_t participants,
-                                            const CyclesPerNanosecond &cal) {
+                                          const CyclesPerNanosecond &cal) {
   // OpenMP's `reduction(+:)` on `double` is not Kahan-compensated; emulate by
   // computing per-thread Kahan sums into a per-thread partials array and merging
   // serially, matching the shape of the other emulations.
@@ -464,8 +459,8 @@ template <class T, class Kernel>
 #pragma omp parallel for num_threads(threads) schedule(static)
     for (std::ptrdiff_t b = 0; b < blocks; ++b) {
       const auto blockIdx = static_cast<std::size_t>(b);
-      const std::size_t blockSize = (kN + static_cast<std::size_t>(threads) - 1) /
-                                    static_cast<std::size_t>(threads);
+      const std::size_t blockSize =
+          (kN + static_cast<std::size_t>(threads) - 1) / static_cast<std::size_t>(threads);
       const std::size_t lo = std::min(kN, blockIdx * blockSize);
       const std::size_t hi = std::min(kN, (blockIdx + 1) * blockSize);
       if (lo < hi) {

@@ -86,8 +86,7 @@ template <class RunFn>
       run();
     }
     const std::uint64_t endCycles = readCyclesEnd();
-    samples.push_back(cyclesToNs(endCycles - startCycles, cal) /
-                      static_cast<double>(kBatchSize));
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal) / static_cast<double>(kBatchSize));
   }
   return finalizeRow(name, samples);
 }

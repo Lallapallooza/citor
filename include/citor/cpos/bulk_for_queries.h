@@ -43,7 +43,8 @@ struct BulkForQueriesFn {
   /// fn      Callable invoked over each chunk of the query range.
   /// tok     Cancellation token observed at chunk boundaries.
   template <class HintsT, class Pool, class QueryFn>
-  void operator()(Pool &pool, std::size_t q, QueryFn &&fn, CancellationToken tok = CancellationToken{}) const {
+  void operator()(Pool &pool, std::size_t q, QueryFn &&fn,
+                  CancellationToken tok = CancellationToken{}) const {
     tag_invoke(*this, pool, q, std::forward<QueryFn>(fn), HintsT{}, std::move(tok));
   }
 };

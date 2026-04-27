@@ -42,6 +42,23 @@
 #include "bench_registry.h"
 #include "competitor_traits.h"
 #include "cycle_clock.h"
+#include "recursive_forkjoin_helper.h"
+
+namespace citor::bench {
+
+// Compile-time gate confirming the recursive-spawn trait specializations
+// match the fork-join eligibility list documented at the top of this file.
+// Recursive workloads (cilksort, Strassen) consume these specializations
+// directly; keeping the asserts in the bench TU that already pulls the
+// header keeps the gate close to the contract it enforces.
+static_assert(RecursiveForkJoinTraits<::citor::ThreadPool>::supportsRecursiveSpawn,
+              "citor::ThreadPool must support recursive spawn for the fork-join bench");
+#ifdef CITOR_BENCH_HAS_TBB
+static_assert(RecursiveForkJoinTraits<::tbb::task_arena>::supportsRecursiveSpawn,
+              "oneTBB task_arena must support recursive spawn for the fork-join bench");
+#endif
+
+} // namespace citor::bench
 
 #ifdef CITOR_BENCH_HAS_TBB
 #include <oneapi/tbb/task_arena.h>
@@ -78,8 +95,7 @@ constexpr int kQueensRootDepth = 2;
   return b;
 }
 
-template <class Spawn>
-[[nodiscard]] std::int64_t parFib(int n, Spawn spawn) {
+template <class Spawn> [[nodiscard]] std::int64_t parFib(int n, Spawn spawn) {
   if (n <= kFibCutoff) {
     return seqFib(n);
   }
@@ -115,8 +131,7 @@ void seqQueensRec(int n, int row, std::uint64_t cols, std::uint64_t diag1, std::
 /// Parallel N-queens: enumerate the first `kQueensRootDepth` rows in parallel
 /// (each a separate fork-join task), then drop into the sequential walker for
 /// the remaining rows.
-template <class Spawn>
-[[nodiscard]] std::int64_t parQueens(int n, Spawn spawn) {
+template <class Spawn> [[nodiscard]] std::int64_t parQueens(int n, Spawn spawn) {
   // Generate root states by enumerating the first `kQueensRootDepth` rows
   // sequentially; each root is then a parallel task.
   struct State {
@@ -131,8 +146,8 @@ template <class Spawn>
     std::vector<State> next;
     next.reserve(frontier.size() * static_cast<std::size_t>(n));
     for (const State &s : frontier) {
-      std::uint64_t bits = ~(s.cols | s.diag1 | s.diag2) &
-                           ((std::uint64_t{1} << static_cast<unsigned>(n)) - 1);
+      std::uint64_t bits =
+          ~(s.cols | s.diag1 | s.diag2) & ((std::uint64_t{1} << static_cast<unsigned>(n)) - 1);
       while (bits != 0U) {
         const std::uint64_t pick = bits & (~bits + 1U);
         bits ^= pick;
@@ -193,12 +208,12 @@ template <class RunFn>
 
 template <class Workload>
 [[nodiscard]] BenchRow measureCitor(const char *name, std::size_t participants,
-                                     const CyclesPerNanosecond &cal, Workload workload) {
+                                    const CyclesPerNanosecond &cal, Workload workload) {
   ThreadPool pool(participants);
   return measureLoop(name, cal, [&] {
-    return workload(
-        [&](auto &&a, auto &&b) { pool.forkJoin<ForkJoinHints>(std::forward<decltype(a)>(a),
-                                                                 std::forward<decltype(b)>(b)); });
+    return workload([&](auto &&a, auto &&b) {
+      pool.forkJoin<ForkJoinHints>(std::forward<decltype(a)>(a), std::forward<decltype(b)>(b));
+    });
   });
 }
 
@@ -209,7 +224,7 @@ template <class Workload>
 #ifdef CITOR_BENCH_HAS_TBB
 template <class Workload>
 [[nodiscard]] BenchRow measureTbb(const char *name, std::size_t participants,
-                                    const CyclesPerNanosecond &cal, Workload workload) {
+                                  const CyclesPerNanosecond &cal, Workload workload) {
   auto arena = CompetitorTraits<::tbb::task_arena>::make(participants);
   return measureLoop(name, cal, [&] {
     std::int64_t result = 0;
@@ -265,7 +280,7 @@ auto queensWorkload() {
 // =============================================================================
 
 BenchTable buildFibTable(std::size_t participants, const char *suffix,
-                          const CyclesPerNanosecond &cal) {
+                         const CyclesPerNanosecond &cal) {
   BenchTable table;
   table.workload = std::string{"forkjoin_fib28_"} + suffix;
   table.rows.push_back(measureCitor("citor::ThreadPool", participants, cal, fibWorkload()));
@@ -277,7 +292,7 @@ BenchTable buildFibTable(std::size_t participants, const char *suffix,
 }
 
 BenchTable buildQueensTable(std::size_t participants, const char *suffix,
-                              const CyclesPerNanosecond &cal) {
+                            const CyclesPerNanosecond &cal) {
   BenchTable table;
   table.workload = std::string{"forkjoin_nqueens12_"} + suffix;
   table.rows.push_back(measureCitor("citor::ThreadPool", participants, cal, queensWorkload()));

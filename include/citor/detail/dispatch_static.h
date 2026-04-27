@@ -23,12 +23,11 @@ namespace citor::detail {
 /// doing work. The contract is symmetric -- whichever side wins is responsible for stamping
 /// `mailbox = doneSentinel` so the producer's join can rendezvous.
 [[gnu::always_inline]] inline bool tryClaimRank(WorkerState &slot,
-                                                 std::uint64_t currentGen) noexcept {
+                                                std::uint64_t currentGen) noexcept {
   std::uint64_t expected = slot.claimedAt.load(std::memory_order_acquire);
   while (expected < currentGen) {
-    if (slot.claimedAt.compare_exchange_weak(expected, currentGen,
-                                              std::memory_order_acq_rel,
-                                              std::memory_order_acquire)) {
+    if (slot.claimedAt.compare_exchange_weak(expected, currentGen, std::memory_order_acq_rel,
+                                             std::memory_order_acquire)) {
       return true;
     }
   }
@@ -158,8 +157,7 @@ struct alignas(kCacheLine) CachedStaticForJob {
   bool primed{false};
 };
 
-template <class HintsT, class F>
-inline CachedStaticForJob &cachedStaticForSlot() noexcept {
+template <class HintsT, class F> inline CachedStaticForJob &cachedStaticForSlot() noexcept {
   static thread_local CachedStaticForJob cache;
   return cache;
 }
@@ -234,8 +232,8 @@ inline void typedStaticUniformWorkerEntry(JobDescriptor *desc, std::uint32_t ran
           std::terminate();
         }
         std::exception_ptr *expected = nullptr; // NOLINT(misc-const-correctness)
-        if (!desc->firstException.compare_exchange_strong(
-                expected, eptr, std::memory_order_release, std::memory_order_acquire)) {
+        if (!desc->firstException.compare_exchange_strong(expected, eptr, std::memory_order_release,
+                                                          std::memory_order_acquire)) {
           delete eptr;
         } else {
           desc->exceptionWorkerId.store(rank, std::memory_order_release);

@@ -33,8 +33,7 @@ struct LifecycleHotHints {
       citor::Determinism::FixedBlockOrder;
   [[maybe_unused]] static constexpr citor::Affinity affinity = citor::Affinity::PhysicalCores;
   static constexpr citor::Priority priority = citor::Priority::Throughput;
-  [[maybe_unused]] static constexpr citor::Partition partition =
-      citor::Partition::ContiguousRanges;
+  [[maybe_unused]] static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
   static constexpr double estimatedItemNs = 0.0;
   [[maybe_unused]] static constexpr double minTaskUs = 0.0;
   static constexpr std::size_t chunk = 1;

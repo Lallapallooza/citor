@@ -189,7 +189,7 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
           // ternary cmov. Same observable result, one fewer dependency in the call's arg.
           static_assert(PoolControl::kReuseBit == (1ULL << 2));
           desc->workerEntry(desc, workerId | static_cast<std::uint32_t>(
-                                                  (mailbox & PoolControl::kReuseBit) << 29));
+                                                 (mailbox & PoolControl::kReuseBit) << 29));
         } else {
           runActiveJob(*desc, workerId);
         }
@@ -210,17 +210,16 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
         // to process that next dispatch. The CAS overhead is gated on the rare path -- only
         // primitives that wired `workerStateBase` (currently parallelFor) pay it.
         std::uint64_t expected = mailbox;
-        if (self.mailbox.compare_exchange_strong(expected, doneVal,
-                                                  std::memory_order_release,
-                                                  std::memory_order_acquire)) {
+        if (self.mailbox.compare_exchange_strong(expected, doneVal, std::memory_order_release,
+                                                 std::memory_order_acquire)) {
           lastSeenMailbox = doneVal;
           mailbox = doneVal;
         } else {
           // The producer overtook us with a newer dispatch (or stamped done itself and a
-          // later dispatch ran). Adopt the observed value so we can drive its phase compare
+          // later dispatch ran). Adopt the observed value so we can drive its epoch compare
           // on the next loop iteration.
           mailbox = expected;
-          // lastSeenMailbox stays at its prior value; the next iteration's phase compare
+          // lastSeenMailbox stays at its prior value; the next iteration's epoch compare
           // will detect the new dispatch and run it.
         }
       } else {
@@ -315,7 +314,7 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
                      std::memory_order_relaxed);
     mailbox = self.mailbox.load(std::memory_order_acquire);
     // Chain-wake propagation (oneTBB private_server.cpp wake_some / propagate_chain_reaction
-    // pattern). When this worker's futex_wait returns and the mailbox phase has advanced past
+    // pattern). When this worker's futex_wait returns and the mailbox epoch has advanced past
     // `lastSeenMailbox`, the producer dispatched a new generation while we were parked. Wake up
     // to two more parked workers via futex_wake(N=2) so the chain doubles each hop and reaches
     // every parked worker in log2(N) syscalls instead of forcing the producer to issue one

@@ -76,8 +76,7 @@ constexpr std::chrono::milliseconds kCoolOff{30};
 /// cal     Calibration constant for converting cycles to ns.
 /// A populated `BenchRow` ready for the comparison table.
 template <class PoolT>
-[[nodiscard]] BenchRow measureColdFanout(std::size_t participants,
-                                         const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureColdFanout(std::size_t participants, const CyclesPerNanosecond &cal) {
   using Traits = CompetitorTraits<PoolT>;
   auto pool = Traits::make(participants);
 
