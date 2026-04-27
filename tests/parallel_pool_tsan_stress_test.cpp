@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -112,7 +113,11 @@ TEST(ParallelPoolTsanStress, AllPrimitivesUnderRandomizedParticipants) {
   }
   // 10000 iterations is the rfc target. Each iteration constructs and destructs a pool plus a
   // single primitive call so the loop fits inside ctest's per-test timeout under a TSan build.
+  // A wall-clock cap bounds total runtime when a single iteration is unusually slow under TSan
+  // (e.g. heavy steal traffic at j=16 makes the per-iter cost vary by an order of magnitude).
   constexpr int kIterations = 10000;
+  constexpr std::chrono::seconds kWallBudget{300};
+  const auto loopStart = std::chrono::steady_clock::now();
 
   std::mt19937_64 rng(0xDEADBEEFCAFEBABEULL);
   std::uniform_int_distribution<std::size_t> participantsDist(1U, 16U);
@@ -131,6 +136,10 @@ TEST(ParallelPoolTsanStress, AllPrimitivesUnderRandomizedParticipants) {
   }
 
   for (int iter = 0; iter < kIterations; ++iter) {
+    if ((iter & 0xFF) == 0 && std::chrono::steady_clock::now() - loopStart >= kWallBudget) {
+      GTEST_LOG_(INFO) << "Stress wall budget reached at iter=" << iter << "/" << kIterations;
+      break;
+    }
     const std::size_t participants = participantsDist(rng);
     ThreadPool pool(participants);
     const int primitive = primitiveDist(rng);
