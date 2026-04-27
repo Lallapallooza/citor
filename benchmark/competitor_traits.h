@@ -124,6 +124,18 @@ template <> struct CompetitorTraits<citor::ThreadPool> {
                                   Fn fn) {
     pool.parallelFor<EmptyFanoutHints>(first, last, fn);
   }
+
+  /// Range-partitioned `parallelFor` mirroring the future-pool shims'
+  /// signature: the `participantCount` argument is consumed as a chunk hint
+  /// at the static-uniform balance level. citor's hint type carries the
+  /// dispatch policy at compile time, so the participant count maps to
+  /// `chunk = 0` (auto-partition by `n / participants`) and the empty-fan-
+  /// out hint preset is reused.
+  template <class Fn>
+  static void parallelFor(citor::ThreadPool &pool, std::size_t first, std::size_t last,
+                          std::size_t /*participantCount*/, Fn fn) {
+    pool.parallelFor<EmptyFanoutHints>(first, last, fn);
+  }
 };
 
 /// Trait for `BS::light_thread_pool` (BS::thread_pool with no flags).
@@ -164,6 +176,78 @@ template <> struct CompetitorTraits<BS::light_thread_pool> {
       return;
     }
     pool.submit_blocks(first, last, fn, blocks).wait();
+  }
+
+  /// Range-partitioned for using `submit_blocks` with |participantCount| blocks.
+  /// The future barrier (BS's `multi_future::wait`) is the blocking point;
+  /// per-stage rendezvous costs are bounded by that future's mutex/cv path,
+  /// not a decentralized done-epoch scan.
+  template <class Fn>
+  static void parallelFor(BS::light_thread_pool &pool, std::size_t first, std::size_t last,
+                          std::size_t participantCount, Fn fn) {
+    if (last <= first || participantCount == 0U) {
+      return;
+    }
+    pool.submit_blocks(first, last, fn, participantCount).wait();
+  }
+
+  /// Reduction emulated as N back-to-back `submit_blocks` waves with per-block
+  /// partials merged serially after the future barrier resolves. The shape is
+  /// honest: BS has no first-class reduce primitive, so the bench measures
+  /// dispatch + barrier-wait per block, not a decentralized reduce tree.
+  template <class T, class Map, class Combine>
+  static T parallelReduce(BS::light_thread_pool &pool, std::size_t first, std::size_t last,
+                          T identity, Map map, Combine combine) {
+    const std::size_t blocks =
+        pool.get_thread_count() == 0 ? std::size_t{1} : pool.get_thread_count();
+    std::vector<T> partials(blocks, identity);
+    pool.submit_blocks(
+            first, last,
+            [&partials, &map, identity, blocks, first, last](std::size_t bf, std::size_t bl) {
+              const std::size_t span = last - first;
+              const std::size_t block = (span + blocks - 1U) / blocks;
+              const std::size_t idx = block == 0U ? std::size_t{0} : (bf - first) / block;
+              partials[idx < blocks ? idx : blocks - 1U] = map(bf, bl, identity);
+            },
+            blocks)
+        .wait();
+    T result = identity;
+    for (auto &p : partials) {
+      result = combine(result, p);
+    }
+    return result;
+  }
+
+  /// Scan: serial fallback. BS has no scan primitive; emulating with N waves
+  /// over the future-mutex path would not converge to a sub-millisecond
+  /// per-stage cost the bench could measure honestly.
+  template <class T, class Body>
+  static T parallelScan(BS::light_thread_pool &pool, std::size_t first, std::size_t last,
+                        T identity, Body body) {
+    (void)pool;
+    return body(first, last, identity);
+  }
+
+  /// Fan-out: single closure dispatched via `submit_task`; `multi_future::wait`
+  /// is the rendezvous.
+  template <class Fn> static void fanout(BS::light_thread_pool &pool, Fn fn) {
+    pool.submit_task(std::move(fn)).wait();
+  }
+
+  /// Chain emulated as |stageCount| back-to-back `submit_blocks` waves. Each
+  /// stage pays the future-barrier mutex/cv path; BS has no shared rendezvous
+  /// chain primitive.
+  template <class Fn>
+  static void parallelChain(BS::light_thread_pool &pool, std::size_t first, std::size_t last,
+                            std::size_t stageCount, Fn fn) {
+    const std::size_t blocks =
+        pool.get_thread_count() == 0 ? std::size_t{1} : pool.get_thread_count();
+    for (std::size_t stage = 0; stage < stageCount; ++stage) {
+      pool.submit_blocks(
+              first, last, [stage, &fn](std::size_t bf, std::size_t bl) { fn(stage, bf, bl); },
+              blocks)
+          .wait();
+    }
   }
 };
 
@@ -216,6 +300,87 @@ template <> struct CompetitorTraits<dp::thread_pool<>> {
       f.get();
     }
   }
+
+  /// Range-partitioned for: split `[first, last)` into |participantCount|
+  /// blocks, enqueue each as a future, wait on all of them. The future-mutex
+  /// path is the rendezvous bound; per-stage costs are not a decentralized
+  /// done-epoch scan.
+  template <class Fn>
+  static void parallelFor(dp::thread_pool<> &pool, std::size_t first, std::size_t last,
+                          std::size_t participantCount, Fn fn) {
+    if (last <= first || participantCount == 0U) {
+      return;
+    }
+    const std::size_t span = last - first;
+    const std::size_t block = (span + participantCount - 1U) / participantCount;
+    std::vector<std::future<void>> futures;
+    futures.reserve(participantCount);
+    for (std::size_t b = 0; b < participantCount; ++b) {
+      const std::size_t bf = first + std::min(span, b * block);
+      const std::size_t bl = first + std::min(span, (b + 1) * block);
+      if (bf == bl) {
+        continue;
+      }
+      futures.emplace_back(pool.enqueue([bf, bl, &fn]() { fn(bf, bl); }));
+    }
+    for (auto &f : futures) {
+      f.get();
+    }
+  }
+
+  /// Reduction emulated as N enqueue + per-block partials + serial merge.
+  /// dp has no reduce primitive; the bench measures fan-out + future-wait.
+  template <class T, class Map, class Combine>
+  static T parallelReduce(dp::thread_pool<> &pool, std::size_t first, std::size_t last, T identity,
+                          Map map, Combine combine) {
+    const std::size_t blocks = pool.size() == 0U ? std::size_t{1} : pool.size();
+    std::vector<T> partials(blocks, identity);
+    const std::size_t span = last - first;
+    const std::size_t block = (span + blocks - 1U) / blocks;
+    std::vector<std::future<void>> futures;
+    futures.reserve(blocks);
+    for (std::size_t b = 0; b < blocks; ++b) {
+      const std::size_t bf = first + std::min(span, b * block);
+      const std::size_t bl = first + std::min(span, (b + 1) * block);
+      if (bf == bl) {
+        continue;
+      }
+      futures.emplace_back(pool.enqueue(
+          [bf, bl, b, &partials, &map, identity]() { partials[b] = map(bf, bl, identity); }));
+    }
+    for (auto &f : futures) {
+      f.get();
+    }
+    T result = identity;
+    for (auto &p : partials) {
+      result = combine(result, p);
+    }
+    return result;
+  }
+
+  /// Scan: serial fallback; dp has no scan primitive.
+  template <class T, class Body>
+  static T parallelScan(dp::thread_pool<> &pool, std::size_t first, std::size_t last, T identity,
+                        Body body) {
+    (void)pool;
+    return body(first, last, identity);
+  }
+
+  /// Fan-out: enqueue one closure, wait on its future.
+  template <class Fn> static void fanout(dp::thread_pool<> &pool, Fn fn) {
+    pool.enqueue(std::move(fn)).get();
+  }
+
+  /// Chain emulated as |stageCount| back-to-back parallelFor waves. Each
+  /// stage pays the future-mutex barrier; dp has no shared rendezvous chain.
+  template <class Fn>
+  static void parallelChain(dp::thread_pool<> &pool, std::size_t first, std::size_t last,
+                            std::size_t stageCount, Fn fn) {
+    for (std::size_t stage = 0; stage < stageCount; ++stage) {
+      parallelFor(pool, first, last, pool.size() == 0U ? std::size_t{1} : pool.size(),
+                  [stage, &fn](std::size_t bf, std::size_t bl) { fn(stage, bf, bl); });
+    }
+  }
 };
 
 /// Trait for `task_thread_pool::task_thread_pool`.
@@ -259,6 +424,84 @@ template <> struct CompetitorTraits<::task_thread_pool::task_thread_pool> {
       f.get();
     }
   }
+
+  /// Range-partitioned for. Future-mutex barrier is the rendezvous.
+  template <class Fn>
+  static void parallelFor(::task_thread_pool::task_thread_pool &pool, std::size_t first,
+                          std::size_t last, std::size_t participantCount, Fn fn) {
+    if (last <= first || participantCount == 0U) {
+      return;
+    }
+    const std::size_t span = last - first;
+    const std::size_t block = (span + participantCount - 1U) / participantCount;
+    std::vector<std::future<void>> futures;
+    futures.reserve(participantCount);
+    for (std::size_t b = 0; b < participantCount; ++b) {
+      const std::size_t bf = first + std::min(span, b * block);
+      const std::size_t bl = first + std::min(span, (b + 1) * block);
+      if (bf == bl) {
+        continue;
+      }
+      futures.emplace_back(pool.submit([bf, bl, &fn]() { fn(bf, bl); }));
+    }
+    for (auto &f : futures) {
+      f.get();
+    }
+  }
+
+  /// Reduction emulated as N submit + per-block partials + serial merge.
+  template <class T, class Map, class Combine>
+  static T parallelReduce(::task_thread_pool::task_thread_pool &pool, std::size_t first,
+                          std::size_t last, T identity, Map map, Combine combine) {
+    const std::size_t blocks =
+        pool.get_num_threads() == 0U ? std::size_t{1} : pool.get_num_threads();
+    std::vector<T> partials(blocks, identity);
+    const std::size_t span = last - first;
+    const std::size_t block = (span + blocks - 1U) / blocks;
+    std::vector<std::future<void>> futures;
+    futures.reserve(blocks);
+    for (std::size_t b = 0; b < blocks; ++b) {
+      const std::size_t bf = first + std::min(span, b * block);
+      const std::size_t bl = first + std::min(span, (b + 1) * block);
+      if (bf == bl) {
+        continue;
+      }
+      futures.emplace_back(pool.submit(
+          [bf, bl, b, &partials, &map, identity]() { partials[b] = map(bf, bl, identity); }));
+    }
+    for (auto &f : futures) {
+      f.get();
+    }
+    T result = identity;
+    for (auto &p : partials) {
+      result = combine(result, p);
+    }
+    return result;
+  }
+
+  /// Scan: serial fallback; task_thread_pool has no scan primitive.
+  template <class T, class Body>
+  static T parallelScan(::task_thread_pool::task_thread_pool &pool, std::size_t first,
+                        std::size_t last, T identity, Body body) {
+    (void)pool;
+    return body(first, last, identity);
+  }
+
+  /// Fan-out: submit one closure, wait on its future.
+  template <class Fn> static void fanout(::task_thread_pool::task_thread_pool &pool, Fn fn) {
+    pool.submit(std::move(fn)).get();
+  }
+
+  /// Chain emulated as |stageCount| back-to-back parallelFor waves.
+  template <class Fn>
+  static void parallelChain(::task_thread_pool::task_thread_pool &pool, std::size_t first,
+                            std::size_t last, std::size_t stageCount, Fn fn) {
+    for (std::size_t stage = 0; stage < stageCount; ++stage) {
+      parallelFor(pool, first, last,
+                  pool.get_num_threads() == 0U ? std::size_t{1} : pool.get_num_threads(),
+                  [stage, &fn](std::size_t bf, std::size_t bl) { fn(stage, bf, bl); });
+    }
+  }
 };
 
 /// Trait for `riften::Thiefpool` (ConorWilliams/Threadpool).
@@ -298,6 +541,91 @@ template <> struct CompetitorTraits<riften::Thiefpool> {
     }
     for (auto &f : futures) {
       f.get();
+    }
+  }
+
+  /// Range-partitioned for. Riften has no public worker-count query; the
+  /// caller supplies |participantCount| (it is the same value the bench used
+  /// to construct the pool via `make()`). The future-mutex barrier is the
+  /// rendezvous bound; per-stage costs are not a decentralized done-epoch
+  /// scan, so this adapter is honestly slower than the same workload through
+  /// citor's first-class `parallelFor`.
+  template <class Fn>
+  static void parallelFor(riften::Thiefpool &pool, std::size_t first, std::size_t last,
+                          std::size_t participantCount, Fn fn) {
+    if (last <= first || participantCount == 0U) {
+      return;
+    }
+    const std::size_t span = last - first;
+    const std::size_t block = (span + participantCount - 1U) / participantCount;
+    std::vector<std::future<void>> futures;
+    futures.reserve(participantCount);
+    for (std::size_t b = 0; b < participantCount; ++b) {
+      const std::size_t bf = first + std::min(span, b * block);
+      const std::size_t bl = first + std::min(span, (b + 1) * block);
+      if (bf == bl) {
+        continue;
+      }
+      futures.emplace_back(pool.enqueue([bf, bl, &fn]() { fn(bf, bl); }));
+    }
+    for (auto &f : futures) {
+      f.get();
+    }
+  }
+
+  /// Reduction emulated as N enqueue + per-block partials + serial merge. The
+  /// caller supplies the participant count for the partition (riften has no
+  /// public worker-count query; see `parallelFor`).
+  template <class T, class Map, class Combine>
+  static T parallelReduce(riften::Thiefpool &pool, std::size_t first, std::size_t last,
+                          std::size_t participantCount, T identity, Map map, Combine combine) {
+    const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
+    std::vector<T> partials(blocks, identity);
+    const std::size_t span = last - first;
+    const std::size_t block = (span + blocks - 1U) / blocks;
+    std::vector<std::future<void>> futures;
+    futures.reserve(blocks);
+    for (std::size_t b = 0; b < blocks; ++b) {
+      const std::size_t bf = first + std::min(span, b * block);
+      const std::size_t bl = first + std::min(span, (b + 1) * block);
+      if (bf == bl) {
+        continue;
+      }
+      futures.emplace_back(pool.enqueue(
+          [bf, bl, b, &partials, &map, identity]() { partials[b] = map(bf, bl, identity); }));
+    }
+    for (auto &f : futures) {
+      f.get();
+    }
+    T result = identity;
+    for (auto &p : partials) {
+      result = combine(result, p);
+    }
+    return result;
+  }
+
+  /// Scan: serial fallback; riften has no scan primitive.
+  template <class T, class Body>
+  static T parallelScan(riften::Thiefpool &pool, std::size_t first, std::size_t last, T identity,
+                        Body body) {
+    (void)pool;
+    return body(first, last, identity);
+  }
+
+  /// Fan-out: enqueue one closure, wait on its future.
+  template <class Fn> static void fanout(riften::Thiefpool &pool, Fn fn) {
+    pool.enqueue(std::move(fn)).get();
+  }
+
+  /// Chain emulated as |stageCount| back-to-back parallelFor waves. Each
+  /// stage pays the future-mutex barrier; riften has no shared rendezvous
+  /// chain primitive.
+  template <class Fn>
+  static void parallelChain(riften::Thiefpool &pool, std::size_t first, std::size_t last,
+                            std::size_t participantCount, std::size_t stageCount, Fn fn) {
+    for (std::size_t stage = 0; stage < stageCount; ++stage) {
+      parallelFor(pool, first, last, participantCount,
+                  [stage, &fn](std::size_t bf, std::size_t bl) { fn(stage, bf, bl); });
     }
   }
 };
