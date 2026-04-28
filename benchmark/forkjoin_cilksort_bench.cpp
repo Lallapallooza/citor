@@ -356,6 +356,171 @@ void parallelMerge(Pool &pool, std::int32_t *src, std::size_t aLo, std::size_t a
 /// destination is `tmp`; at depth d even, the opposite. The driver below
 /// detects the parity and copies if needed.
 template <class Pool>
+void cilksortRec(Pool &pool, std::int32_t *data, std::int32_t *tmp, std::size_t lo,
+                 std::size_t hi) {
+  const std::size_t n = hi - lo;
+  if (n <= kSeqCutoff) {
+    std::sort(data + lo, data + hi);
+    return;
+  }
+  const std::size_t mid = lo + (n / 2U);
+  recursiveSpawn2(
+      pool, [&](Pool &p) { cilksortRec(p, data, tmp, lo, mid); },
+      [&](Pool &p) { cilksortRec(p, data, tmp, mid, hi); });
+  // Merge the two sorted halves of `data[lo..hi)` into `tmp[lo..hi)`, then
+  // copy back. The copy keeps the algorithm in-place from the caller's
+  // perspective at the cost of one extra pass per merge level. The pure
+  // alternative -- ping-ponging between `data` and `tmp` across recursion
+  // levels -- doubles the splitter logic without adding measurable speed,
+  // so the explicit copy keeps the bucket-merge code straightforward.
+  parallelMerge(pool, data, lo, mid, mid, hi, tmp, lo);
+  std::copy(tmp + lo, tmp + hi, data + lo);
+}
+
+template <class PoolT>
+[[nodiscard]] BenchRow measureCilksort(const char *name, std::size_t participants, std::size_t n,
+                                       const CyclesPerNanosecond &cal) {
+  static_assert(RecursiveForkJoinTraits<PoolT>::supportsRecursiveSpawn,
+                "cilksort bench requires recursive-spawn-capable pool; the trait gate excludes "
+                "BS / dp / task_thread_pool / riften / Eigen / Taskflow Executor at compile time.");
+  using Traits = CompetitorTraits<PoolT>;
+  auto pool = Traits::make(participants);
+
+  const std::vector<std::int32_t> input = buildInput(n);
+  std::vector<std::int32_t> reference = input;
+  std::sort(reference.begin(), reference.end());
+
+  // Per-iteration scratch: a fresh copy of `input` lands in `data`, the
+  // cilksort runs in place, and the result is verified against `reference`.
+  std::vector<std::int32_t> data = input;
+  std::vector<std::int32_t> tmp(n, std::int32_t{0});
+
+  // Warmup + correctness gate. Run the sort once and verify the output
+  // matches `std::sort` element-wise before any timing iteration.
+  for (std::size_t i = 0; i < kWarmupIterations; ++i) {
+    data = input;
+    cilksortRec(*pool, data.data(), tmp.data(), std::size_t{0}, n);
+    CITOR_ALWAYS_ASSERT(data == reference);
+  }
+
+  std::vector<double> samples;
+  samples.reserve(kIterations);
+  for (std::size_t i = 0; i < kIterations; ++i) {
+    data = input;
+    const std::uint64_t startCycles = readCyclesStart();
+    cilksortRec(*pool, data.data(), tmp.data(), std::size_t{0}, n);
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    CITOR_ALWAYS_ASSERT(data == reference);
+  }
+
+  return finalizeRow(name, samples);
+}
+
+[[nodiscard]] BenchRow measureCitor(std::size_t participants, std::size_t n,
+                                    const CyclesPerNanosecond &cal) {
+  return measureCilksort<citor::ThreadPool>("citor::ThreadPool", participants, n, cal);
+}
+
+#ifdef CITOR_BENCH_HAS_TBB
+[[nodiscard]] BenchRow measureTbb(std::size_t participants, std::size_t n,
+                                  const CyclesPerNanosecond &cal) {
+  return measureCilksort<::tbb::task_arena>("oneTBB", participants, n, cal);
+}
+#endif
+
+#ifdef CITOR_BENCH_HAS_OPENMP
+[[nodiscard]] BenchRow measureOmp(std::size_t participants, std::size_t n,
+                                  const CyclesPerNanosecond &cal) {
+  static_assert(RecursiveForkJoinTraits<OpenMpRunner>::supportsRecursiveSpawn,
+                "OpenMP runner must opt into recursive spawn for the cilksort bench");
+  // OpenMP `task` requires an enclosing `parallel` region. Open the region
+  // once per iteration, then funnel into the recursion via a `single`
+  // construct so only one thread enters the root.
+  OpenMpRunner runner{participants};
+  const std::vector<std::int32_t> input = buildInput(n);
+  std::vector<std::int32_t> reference = input;
+  std::sort(reference.begin(), reference.end());
+  std::vector<std::int32_t> data(n, std::int32_t{0});
+  std::vector<std::int32_t> tmp(n, std::int32_t{0});
+
+  auto runOnce = [&]() {
+    data = input;
+#pragma omp parallel num_threads(static_cast<int>(participants))
+    {
+#pragma omp single
+      {
+        cilksortRec(runner, data.data(), tmp.data(), std::size_t{0}, n);
+      }
+    }
+  };
+
+  for (std::size_t i = 0; i < kWarmupIterations; ++i) {
+    runOnce();
+    CITOR_ALWAYS_ASSERT(data == reference);
+  }
+
+  std::vector<double> samples;
+  samples.reserve(kIterations);
+  for (std::size_t i = 0; i < kIterations; ++i) {
+    data = input;
+    const std::uint64_t startCycles = readCyclesStart();
+#pragma omp parallel num_threads(static_cast<int>(participants))
+    {
+#pragma omp single
+      {
+        cilksortRec(runner, data.data(), tmp.data(), std::size_t{0}, n);
+      }
+    }
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    CITOR_ALWAYS_ASSERT(data == reference);
+  }
+
+  return finalizeRow("OpenMP", samples);
+}
+#endif
+
+struct CilksortCell {
+  std::size_t n;
+  const char *suffix;
+};
+
+constexpr std::array<CilksortCell, 2> kCells{{
+    {.n = 1U << 20U, .suffix = "n1m"},
+    {.n = 1U << 24U, .suffix = "n16m"},
+}};
+
+BenchTable buildTable(std::size_t participants, CilksortCell cell, const CyclesPerNanosecond &cal) {
+  BenchTable table;
+  table.workload =
+      std::string{"forkjoin_cilksort_j"} + std::to_string(participants) + "_" + cell.suffix;
+  table.rows.push_back(measureCitor(participants, cell.n, cal));
+#ifdef CITOR_BENCH_HAS_TBB
+  table.rows.push_back(measureTbb(participants, cell.n, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_OPENMP
+  table.rows.push_back(measureOmp(participants, cell.n, cal));
+#endif
+  return table;
+}
+
+template <std::size_t CellIdx, std::size_t Participants>
+BenchTable runCilksortCell(const CyclesPerNanosecond &cal) {
+  constexpr CilksortCell cell = kCells[CellIdx];
+  return buildTable(Participants, cell, cal);
+}
+
+struct CilksortRegistrar {
+  CilksortRegistrar() {
+    registerWorkload({.name = "forkjoin_cilksort_j8_n1m", .run = &runCilksortCell<0, 8>});
+    registerWorkload({.name = "forkjoin_cilksort_j16_n1m", .run = &runCilksortCell<0, 16>});
+    registerWorkload({.name = "forkjoin_cilksort_j8_n16m", .run = &runCilksortCell<1, 8>});
+    registerWorkload({.name = "forkjoin_cilksort_j16_n16m", .run = &runCilksortCell<1, 16>});
+  }
+};
+
+const CilksortRegistrar kRegistrar;
 
 } // namespace
 } // namespace citor::bench
