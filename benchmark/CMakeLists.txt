@@ -172,6 +172,7 @@ set(_citor_bench_sources
     differential_bench.cpp
     empty_fanout_bench.cpp
     parallel_reduce_pareto_bench.cpp
+    runplex_stencil_bench.cpp
     forkjoin_knapsack_cancel_bench.cpp
     parallel_for_cold_dispatch_bench.cpp
     runplex_heat_bench.cpp
