@@ -165,39 +165,29 @@ if(OpenMP_CXX_FOUND)
 endif()
 
 set(_citor_bench_sources
+    affinity_sweep_bench.cpp
+    balance_sweep_bench.cpp
     bench_main.cpp
     bulk_for_queries_bench.cpp
     chain_bench.cpp
     cold_path_bench.cpp
+    cross_ccd_parallel_for_bench.cpp
     differential_bench.cpp
     empty_fanout_bench.cpp
-    affinity_sweep_bench.cpp
-    cross_ccd_parallel_for_bench.cpp
-    forkjoin_cilksort_bench.cpp
-    forkjoin_strassen_bench.cpp
-    balance_sweep_bench.cpp
-    pareto_body_bench.cpp
-    parallel_reduce_pareto_bench.cpp
-    runplex_stencil_bench.cpp
-    forkjoin_knapsack_cancel_bench.cpp
-    parallel_for_cold_dispatch_bench.cpp
-    runplex_heat_bench.cpp
-    forkjoin_uts_bench.cpp
     fork_join_bench.cpp
+    forkjoin_cilksort_bench.cpp
     forkjoin_knapsack_cancel_bench.cpp
-    parallel_for_cold_dispatch_bench.cpp
-    runplex_heat_bench.cpp
-    forkjoin_knapsack_cancel_bench.cpp
-    parallel_for_cold_dispatch_bench.cpp
-    runplex_heat_bench.cpp
+    forkjoin_strassen_bench.cpp
     forkjoin_uts_bench.cpp
     granularity_bench.cpp
     matmul_bench.cpp
     parallel_for_cold_dispatch_bench.cpp
-    runplex_heat_bench.cpp
     parallel_reduce_bench.cpp
+    parallel_reduce_pareto_bench.cpp
+    pareto_body_bench.cpp
     plex_bench.cpp
     runplex_heat_bench.cpp
+    runplex_stencil_bench.cpp
     scan_bench.cpp
 )
 
@@ -262,3 +252,34 @@ if(UNIX AND NOT APPLE)
 endif()
 
 citor_enable_tidy(parallel_bench)
+
+# Two-pool BLAS-coexistence bench. Lives in a SEPARATE executable target
+# because libomp's `KMP_BLOCKTIME` and `omp_set_num_threads(...)` are
+# process-wide globals; sharing a process with the standard `parallel_bench`
+# cells would let the two-pool cells' blocktime overrides leak into other
+# workloads' timing windows. The target only builds when OpenMP is available
+# (the workload itself depends on `omp.h` plus the libomp `kmp_set_blocktime`
+# extension).
+if(TARGET parallel_bench_openmp)
+    set(_citor_bench_two_pool_sources
+        two_pool/bench_main_two_pool.cpp
+        two_pool/blas_coexistence_bench.cpp
+    )
+    add_executable(parallel_bench_two_pool ${_citor_bench_two_pool_sources})
+    target_include_directories(
+        parallel_bench_two_pool
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_link_libraries(
+        parallel_bench_two_pool
+        PRIVATE citor::citor nanobench parallel_bench_openmp
+    )
+    target_compile_definitions(
+        parallel_bench_two_pool
+        PRIVATE CITOR_BENCH_HAS_OPENMP
+    )
+    if(CITOR_IS_TOP_LEVEL)
+        target_link_libraries(parallel_bench_two_pool PRIVATE citor_warnings)
+    endif()
+    citor_enable_tidy(parallel_bench_two_pool)
+endif()
