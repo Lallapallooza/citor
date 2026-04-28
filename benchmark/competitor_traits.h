@@ -195,11 +195,15 @@ template <> struct CompetitorTraits<BS::light_thread_pool> {
   /// partials merged serially after the future barrier resolves. The shape is
   /// honest: BS has no first-class reduce primitive, so the bench measures
   /// dispatch + barrier-wait per block, not a decentralized reduce tree.
+  ///
+  /// |participantCount| is the caller-supplied block count: BS exposes
+  /// `get_thread_count()` but the shim takes the participant count uniformly
+  /// across all four future-pool adapters so call sites do not need
+  /// per-pool branching to derive it.
   template <class T, class Map, class Combine>
   static T parallelReduce(BS::light_thread_pool &pool, std::size_t first, std::size_t last,
-                          T identity, Map map, Combine combine) {
-    const std::size_t blocks =
-        pool.get_thread_count() == 0 ? std::size_t{1} : pool.get_thread_count();
+                          std::size_t participantCount, T identity, Map map, Combine combine) {
+    const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
     std::vector<T> partials(blocks, identity);
     pool.submit_blocks(
             first, last,
@@ -237,11 +241,14 @@ template <> struct CompetitorTraits<BS::light_thread_pool> {
   /// Chain emulated as |stageCount| back-to-back `submit_blocks` waves. Each
   /// stage pays the future-barrier mutex/cv path; BS has no shared rendezvous
   /// chain primitive.
+  ///
+  /// |participantCount| is the caller-supplied block count, threaded
+  /// uniformly across BS / dp / task / riften so call sites can use the same
+  /// signature regardless of which future-pool adapter is the row's subject.
   template <class Fn>
   static void parallelChain(BS::light_thread_pool &pool, std::size_t first, std::size_t last,
-                            std::size_t stageCount, Fn fn) {
-    const std::size_t blocks =
-        pool.get_thread_count() == 0 ? std::size_t{1} : pool.get_thread_count();
+                            std::size_t participantCount, std::size_t stageCount, Fn fn) {
+    const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
     for (std::size_t stage = 0; stage < stageCount; ++stage) {
       pool.submit_blocks(
               first, last, [stage, &fn](std::size_t bf, std::size_t bl) { fn(stage, bf, bl); },
@@ -330,10 +337,14 @@ template <> struct CompetitorTraits<dp::thread_pool<>> {
 
   /// Reduction emulated as N enqueue + per-block partials + serial merge.
   /// dp has no reduce primitive; the bench measures fan-out + future-wait.
+  ///
+  /// |participantCount| is the caller-supplied block count, threaded
+  /// uniformly across BS / dp / task / riften so call sites can use the same
+  /// signature regardless of which future-pool adapter is the row's subject.
   template <class T, class Map, class Combine>
-  static T parallelReduce(dp::thread_pool<> &pool, std::size_t first, std::size_t last, T identity,
-                          Map map, Combine combine) {
-    const std::size_t blocks = pool.size() == 0U ? std::size_t{1} : pool.size();
+  static T parallelReduce(dp::thread_pool<> &pool, std::size_t first, std::size_t last,
+                          std::size_t participantCount, T identity, Map map, Combine combine) {
+    const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
     std::vector<T> partials(blocks, identity);
     const std::size_t span = last - first;
     const std::size_t block = (span + blocks - 1U) / blocks;
@@ -373,11 +384,16 @@ template <> struct CompetitorTraits<dp::thread_pool<>> {
 
   /// Chain emulated as |stageCount| back-to-back parallelFor waves. Each
   /// stage pays the future-mutex barrier; dp has no shared rendezvous chain.
+  ///
+  /// |participantCount| is the caller-supplied block count, threaded
+  /// uniformly across BS / dp / task / riften so call sites can use the same
+  /// signature regardless of which future-pool adapter is the row's subject.
   template <class Fn>
   static void parallelChain(dp::thread_pool<> &pool, std::size_t first, std::size_t last,
-                            std::size_t stageCount, Fn fn) {
+                            std::size_t participantCount, std::size_t stageCount, Fn fn) {
+    const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
     for (std::size_t stage = 0; stage < stageCount; ++stage) {
-      parallelFor(pool, first, last, pool.size() == 0U ? std::size_t{1} : pool.size(),
+      parallelFor(pool, first, last, blocks,
                   [stage, &fn](std::size_t bf, std::size_t bl) { fn(stage, bf, bl); });
     }
   }
@@ -450,11 +466,15 @@ template <> struct CompetitorTraits<::task_thread_pool::task_thread_pool> {
   }
 
   /// Reduction emulated as N submit + per-block partials + serial merge.
+  ///
+  /// |participantCount| is the caller-supplied block count, threaded
+  /// uniformly across BS / dp / task / riften so call sites can use the same
+  /// signature regardless of which future-pool adapter is the row's subject.
   template <class T, class Map, class Combine>
   static T parallelReduce(::task_thread_pool::task_thread_pool &pool, std::size_t first,
-                          std::size_t last, T identity, Map map, Combine combine) {
-    const std::size_t blocks =
-        pool.get_num_threads() == 0U ? std::size_t{1} : pool.get_num_threads();
+                          std::size_t last, std::size_t participantCount, T identity, Map map,
+                          Combine combine) {
+    const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
     std::vector<T> partials(blocks, identity);
     const std::size_t span = last - first;
     const std::size_t block = (span + blocks - 1U) / blocks;
@@ -493,12 +513,17 @@ template <> struct CompetitorTraits<::task_thread_pool::task_thread_pool> {
   }
 
   /// Chain emulated as |stageCount| back-to-back parallelFor waves.
+  ///
+  /// |participantCount| is the caller-supplied block count, threaded
+  /// uniformly across BS / dp / task / riften so call sites can use the same
+  /// signature regardless of which future-pool adapter is the row's subject.
   template <class Fn>
   static void parallelChain(::task_thread_pool::task_thread_pool &pool, std::size_t first,
-                            std::size_t last, std::size_t stageCount, Fn fn) {
+                            std::size_t last, std::size_t participantCount, std::size_t stageCount,
+                            Fn fn) {
+    const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
     for (std::size_t stage = 0; stage < stageCount; ++stage) {
-      parallelFor(pool, first, last,
-                  pool.get_num_threads() == 0U ? std::size_t{1} : pool.get_num_threads(),
+      parallelFor(pool, first, last, blocks,
                   [stage, &fn](std::size_t bf, std::size_t bl) { fn(stage, bf, bl); });
     }
   }
@@ -734,20 +759,31 @@ template <> struct CompetitorTraits<::tbb::task_arena> {
   /// dispatch + join overhead per stage. This shape is the honest comparison
   /// baseline for our `parallelChain` primitive.
   ///
-  /// arena      Arena to dispatch into.
-  /// first      Inclusive lower bound of the stage range.
-  /// last       Exclusive upper bound of the stage range.
-  /// stageCount Number of sequential stages.
-  /// fn         Body invoked as `fn(stageIdx, blockFirst, blockAfterLast)`.
+  /// |participantCount| is the grain hint passed through to the inner
+  /// `parallel_for`. The argument exists so call sites can template over the
+  /// same `Traits::parallelChain` signature for every adapter; the future-pool
+  /// shims need it as a block count, the native shims accept it as a chunk
+  /// hint.
+  ///
+  /// arena            Arena to dispatch into.
+  /// first            Inclusive lower bound of the stage range.
+  /// last             Exclusive upper bound of the stage range.
+  /// participantCount Per-stage block count (used as `parallel_for` grain hint).
+  /// stageCount       Number of sequential stages.
+  /// fn               Body invoked as `fn(stageIdx, blockFirst, blockAfterLast)`.
   template <class Fn>
   static void parallelChain(::tbb::task_arena &arena, std::size_t first, std::size_t last,
-                            std::size_t stageCount, Fn fn) {
+                            std::size_t participantCount, std::size_t stageCount, Fn fn) {
+    const std::size_t span = last - first;
+    const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
+    const std::size_t grain = (span + blocks - 1U) / blocks;
     for (std::size_t stage = 0; stage < stageCount; ++stage) {
       arena.execute([&] {
-        ::tbb::parallel_for(::tbb::blocked_range<std::size_t>{first, last},
-                            [&, stage](const ::tbb::blocked_range<std::size_t> &r) {
-                              fn(stage, r.begin(), r.end());
-                            });
+        ::tbb::parallel_for(
+            ::tbb::blocked_range<std::size_t>{first, last, grain == 0U ? std::size_t{1} : grain},
+            [&, stage](const ::tbb::blocked_range<std::size_t> &r) {
+              fn(stage, r.begin(), r.end());
+            });
       });
     }
   }
@@ -867,13 +903,15 @@ template <> struct CompetitorTraits<::tf::Executor> {
 
   /// Chain emulated as |stageCount| sequential taskflow runs. Documents the
   /// substitution: Taskflow has no shared-rendezvous chain primitive.
+  ///
+  /// |participantCount| is the per-stage block count (caller-supplied so
+  /// every adapter's `parallelChain` shares the same signature).
   template <class Fn>
   static void parallelChain(::tf::Executor &exec, std::size_t first, std::size_t last,
-                            std::size_t stageCount, Fn fn) {
-    const std::size_t participantCount = exec.num_workers();
-    const std::size_t blocks = participantCount == 0 ? std::size_t{1} : participantCount;
+                            std::size_t participantCount, std::size_t stageCount, Fn fn) {
+    const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
     const std::size_t span = last - first;
-    const std::size_t block = (span + blocks - 1) / blocks;
+    const std::size_t block = (span + blocks - 1U) / blocks;
     for (std::size_t stage = 0; stage < stageCount; ++stage) {
       ::tf::Taskflow flow;
       for (std::size_t b = 0; b < blocks; ++b) {
@@ -1025,11 +1063,15 @@ template <> struct CompetitorTraits<::Eigen::ThreadPool> {
   }
 
   /// Chain: emulated as `stageCount` back-to-back `parallelFor` waves.
+  ///
+  /// |participantCount| is the per-stage block count (caller-supplied so
+  /// every adapter's `parallelChain` shares the same signature).
   template <class Fn>
   static void parallelChain(::Eigen::ThreadPool &pool, std::size_t first, std::size_t last,
-                            std::size_t stageCount, Fn fn) {
+                            std::size_t participantCount, std::size_t stageCount, Fn fn) {
+    const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
     for (std::size_t stage = 0; stage < stageCount; ++stage) {
-      parallelFor(pool, first, last, static_cast<std::size_t>(pool.NumThreads()),
+      parallelFor(pool, first, last, blocks,
                   [&fn, stage](std::size_t bf, std::size_t bl) { fn(stage, bf, bl); });
     }
   }
@@ -1151,9 +1193,13 @@ template <> struct CompetitorTraits<OpenMpRunner> {
   }
 
   /// Chain: back-to-back `parallel for` regions. OpenMP has no chain primitive.
+  ///
+  /// |participantCount| is unused on this adapter (the runner's thread count
+  /// drives `num_threads`); the argument exists so call sites can use the
+  /// same `parallelChain` signature across every adapter.
   template <class Fn>
   static void parallelChain(OpenMpRunner &runner, std::size_t first, std::size_t last,
-                            std::size_t stageCount, Fn fn) {
+                            std::size_t /*participantCount*/, std::size_t stageCount, Fn fn) {
     const int threads = static_cast<int>(runner.threads);
     const auto firstSigned = static_cast<std::ptrdiff_t>(first);
     const auto lastSigned = static_cast<std::ptrdiff_t>(last);

@@ -31,15 +31,19 @@
 
 #include <BS_thread_pool.hpp>
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <future>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "citor/always_assert.h"
 #include "citor/chain.h"
 #include "citor/hints.h"
 #include "citor/thread_pool.h"
@@ -347,11 +351,211 @@ BenchTable runChainJ8(const CyclesPerNanosecond &cal) {
   return buildTable(/*participants=*/8, "j8_7stages_empty", cal);
 }
 
+// =============================================================================
+// Pareto-body chain workload
+// =============================================================================
+//
+// 7 stages, each running a body whose per-iteration cost is drawn from a
+// Pareto distribution with shape alpha = 1.16 and median ~1 us. Each chain
+// call sums the per-iteration costs across all stages; the parallel sum must
+// match the precomputed sequential total before timing fires.
+//
+// Cost array: kPRangeN per-stage; indexed `(stage, i)` so every stage sees a
+// different draw. The shared accumulator is a per-iteration `int64`
+// running-sum accumulated atomically (one fetch_add per iteration); the
+// chain's correctness gate compares the accumulator to the precomputed total.
+
+constexpr std::size_t kPRangeN = 2'048;
+constexpr double kPAlpha = 1.16;
+constexpr double kPParetoXmNs = 540.0;
+constexpr double kPSpinCapNs = 200'000.0;
+
+[[nodiscard]] inline double pParetoDrawNs(double u) noexcept {
+  const double denom = std::pow(1.0 - u, 1.0 / kPAlpha);
+  if (denom <= 0.0) {
+    return kPSpinCapNs;
+  }
+  const double draw = kPParetoXmNs / denom;
+  if (draw > kPSpinCapNs) {
+    return kPSpinCapNs;
+  }
+  return draw;
+}
+
+inline void pSpinForNs(double targetNs, const CyclesPerNanosecond &cal) noexcept {
+  if (targetNs <= 0.0) {
+    return;
+  }
+  const std::uint64_t cycles =
+      cal.value > 0.0 ? static_cast<std::uint64_t>(targetNs * cal.value) : 0ULL;
+  const std::uint64_t start = readCyclesStart();
+  while ((readCyclesEnd() - start) < cycles) {
+    // Tight spin; empty body.
+  }
+}
+
+struct ChainParetoData {
+  /// Per-stage spin costs in ns; row-major `[stage * kPRangeN + i]`.
+  std::vector<std::int64_t> costs;
+  /// Sum across all stages and all iterations; the parallel run must match.
+  std::int64_t referenceTotal = 0;
+};
+
+[[nodiscard]] ChainParetoData buildChainParetoData() {
+  ChainParetoData d;
+  d.costs.assign(kStageCount * kPRangeN, 0);
+  std::mt19937_64 rng(0x4A1701C2E2DULL);
+  std::uniform_real_distribution<double> uni(0.0, 1.0);
+  std::int64_t total = 0;
+  for (std::size_t s = 0; s < kStageCount; ++s) {
+    for (std::size_t i = 0; i < kPRangeN; ++i) {
+      const auto cost = static_cast<std::int64_t>(pParetoDrawNs(uni(rng)));
+      d.costs[s * kPRangeN + i] = cost;
+      total += cost;
+    }
+  }
+  d.referenceTotal = total;
+  return d;
+}
+
+/// Per-stage body invoked across the chain stages and the future-pool
+/// emulations. Spins for `costs[stage * kPRangeN + i]` ns and adds the cost
+/// to the shared accumulator atomically.
+inline void chainParetoBody(const ChainParetoData &d, std::size_t stage, std::size_t lo,
+                            std::size_t hi, std::atomic<std::int64_t> &accum,
+                            const CyclesPerNanosecond &cal) noexcept {
+  std::int64_t local = 0;
+  for (std::size_t i = lo; i < hi; ++i) {
+    const std::int64_t cost = d.costs[stage * kPRangeN + i];
+    pSpinForNs(static_cast<double>(cost), cal);
+    local += cost;
+  }
+  accum.fetch_add(local, std::memory_order_relaxed);
+}
+
+template <class RunFn>
+[[nodiscard]] BenchRow measureParetoLoop(const char *name, const CyclesPerNanosecond &cal,
+                                         RunFn run, std::int64_t referenceTotal) {
+  // No batching: each iteration's wall time is already in the millisecond
+  // range due to the Pareto bodies, well above the timer-tick floor.
+  for (std::size_t i = 0; i < 2; ++i) {
+    const std::int64_t v = run();
+    CITOR_ALWAYS_ASSERT(v == referenceTotal);
+  }
+  std::vector<double> samples;
+  constexpr std::size_t kParetoIterations = 20;
+  samples.reserve(kParetoIterations);
+  for (std::size_t i = 0; i < kParetoIterations; ++i) {
+    const std::uint64_t startCycles = readCyclesStart();
+    const std::int64_t value = run();
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    CITOR_ALWAYS_ASSERT(value == referenceTotal);
+  }
+  return finalizeRow(name, samples);
+}
+
+[[nodiscard]] BenchRow measureCitorChainPareto(std::size_t participants, const ChainParetoData &d,
+                                               const CyclesPerNanosecond &cal) {
+  ThreadPool pool(participants);
+  if (pool.participants() <= 1U) {
+    throw std::runtime_error(
+        "chain_bench: pool.participants() <= 1 (likely run under taskset -c 0); "
+        "rerun unpinned or with taskset -c 0-N where N >= requested participants.");
+  }
+  std::atomic<std::int64_t> accum{0};
+  auto stageBody = [&accum, &d, &cal](std::size_t stageIdx, std::uint32_t /*slot*/, std::size_t lo,
+                                      std::size_t hi) noexcept {
+    chainParetoBody(d, stageIdx, lo, hi, accum, cal);
+  };
+  return measureParetoLoop(
+      "citor::ThreadPool::parallelChain", cal,
+      [&] {
+        accum.store(0, std::memory_order_relaxed);
+        pool.parallelChain<ChainBenchHints>(
+            kPRangeN, globalStage("p0", stageBody), globalStage("p1", stageBody),
+            globalStage("p2", stageBody), globalStage("p3", stageBody),
+            globalStage("p4", stageBody), globalStage("p5", stageBody),
+            globalStage("p6", stageBody));
+        return accum.load(std::memory_order_relaxed);
+      },
+      d.referenceTotal);
+}
+
+/// Generic per-stage emulation via the trait's `parallelChain` shim. Used by
+/// every adapter (BS / dp / task / riften / oneTBB / Taskflow / Eigen / OpenMP).
+/// Each adapter's emulation pays its own per-stage barrier cost; the body
+/// shape is identical across adapters so the comparison measures dispatch +
+/// barrier-wait per stage with the same Pareto-distributed work load.
+template <class PoolT>
+[[nodiscard]] BenchRow measureChainParetoAdapter(const char *name, std::size_t participants,
+                                                 const ChainParetoData &d,
+                                                 const CyclesPerNanosecond &cal) {
+  using Traits = CompetitorTraits<PoolT>;
+  auto pool = Traits::make(participants);
+  std::atomic<std::int64_t> accum{0};
+  return measureParetoLoop(
+      name, cal,
+      [&] {
+        accum.store(0, std::memory_order_relaxed);
+        Traits::parallelChain(
+            *pool, std::size_t{0}, kPRangeN, participants, kStageCount,
+            [&accum, &d, &cal](std::size_t stage, std::size_t lo, std::size_t hi) {
+              chainParetoBody(d, stage, lo, hi, accum, cal);
+            });
+        return accum.load(std::memory_order_relaxed);
+      },
+      d.referenceTotal);
+}
+
+BenchTable buildParetoTable(std::size_t participants, const char *suffix,
+                            const CyclesPerNanosecond &cal) {
+  BenchTable table;
+  table.workload = std::string{"chain_pareto_"} + suffix;
+  ChainParetoData d = buildChainParetoData();
+  table.rows.push_back(measureCitorChainPareto(participants, d, cal));
+  table.rows.push_back(measureChainParetoAdapter<BS::light_thread_pool>(
+      "BS::thread_pool[chainAdapter]", participants, d, cal));
+  table.rows.push_back(measureChainParetoAdapter<dp::thread_pool<>>("dp::thread_pool[chainAdapter]",
+                                                                    participants, d, cal));
+  table.rows.push_back(measureChainParetoAdapter<::task_thread_pool::task_thread_pool>(
+      "task_thread_pool[chainAdapter]", participants, d, cal));
+  table.rows.push_back(measureChainParetoAdapter<riften::Thiefpool>(
+      "riften::Thiefpool[chainAdapter]", participants, d, cal));
+#ifdef CITOR_BENCH_HAS_TBB
+  table.rows.push_back(measureChainParetoAdapter<::tbb::task_arena>("oneTBB::parallel_for x7",
+                                                                    participants, d, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_TASKFLOW
+  table.rows.push_back(
+      measureChainParetoAdapter<::tf::Executor>("Taskflow::run x7", participants, d, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_EIGEN_THREADPOOL
+  table.rows.push_back(measureChainParetoAdapter<::Eigen::ThreadPool>(
+      "Eigen::ThreadPool::Schedule x7", participants, d, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_OPENMP
+  table.rows.push_back(
+      measureChainParetoAdapter<OpenMpRunner>("OpenMP::parallel_for x7", participants, d, cal));
+#endif
+  return table;
+}
+
+BenchTable runChainParetoJ8(const CyclesPerNanosecond &cal) {
+  return buildParetoTable(/*participants=*/8, "j8_7stages_pareto_body", cal);
+}
+
+BenchTable runChainParetoJ16(const CyclesPerNanosecond &cal) {
+  return buildParetoTable(/*participants=*/16, "j16_7stages_pareto_body", cal);
+}
+
 /// File-scope registrar.
 struct ChainRegistrar {
   ChainRegistrar() {
     registerWorkload({.name = "chain_dispatch_j8_7stages_empty", .run = &runChainJ8});
     registerWorkload({.name = "chain_dispatch_j16_7stages_empty", .run = &runChainJ16});
+    registerWorkload({.name = "chain_pareto_j8_7stages_pareto_body", .run = &runChainParetoJ8});
+    registerWorkload({.name = "chain_pareto_j16_7stages_pareto_body", .run = &runChainParetoJ16});
   }
 };
 
