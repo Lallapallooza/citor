@@ -258,6 +258,27 @@ void parallelMatmul(Pool & /*pool*/, const Sub &c, const Sub &a, const Sub &b) {
   return levelSize + childMul * scratchBudget(half, depth + 1U);
 }
 
+/// Componentwise roundoff tolerance for Strassen's NxN multiply on float32.
+///
+/// Higham (2002), "Accuracy and Stability of Numerical Algorithms", Section
+/// 23.2 derives the worst-case bound for Strassen's recursive multiply as
+/// approximately `1.5 * N^log2(7) * eps_float * max_input_magnitude`, where
+/// `N^log2(7)` is roughly `N^2.81`. For float32 (`eps ~ 1.19e-7`) on
+/// operands in [-1, 1] this is far above the empirically observed max
+/// absolute diff (sub-1e-3 at the `kCells` sizes); the gate fires only on
+/// gross bugs (indexing errors, missing sub-products, broken merges), not
+/// on legitimate roundoff. The exact bound is conservative; the derivation
+/// is what matters for "did the algorithm compute the right thing".
+[[nodiscard]] inline float strassenTolerance(std::size_t n) noexcept {
+  constexpr double kEpsFloat = 1.1920929e-7;
+  constexpr double kHighamScale = 1.5;
+  // log2(7) is irrational; std::pow at runtime is fine since this runs
+  // once per verify() call, well outside the timing window.
+  const double bound =
+      kHighamScale * std::pow(static_cast<double>(n), 2.8073549220576041) * kEpsFloat;
+  return static_cast<float>(bound);
+}
+
 /// Recursive Strassen body. Allocates 17 sub-buffers in the caller-supplied
 /// `scratch` arena and dispatches the 7 sub-products either in parallel
 /// via `recursiveSpawn2` (while `depth < kParallelDepth`) or serially
@@ -446,9 +467,11 @@ template <class PoolT>
   const std::size_t scratchN = scratchBudget(n, 0U);
   std::vector<float> scratch(scratchN, 0.0F);
 
-  // Verify Strassen output against the reference. The per-element absolute
-  // diff is bounded by `1e-3 * N`; Strassen's recursive add/subtract steps
-  // accumulate roundoff error proportional to depth and operand magnitude.
+  // Verify Strassen output against the reference. The tolerance is derived
+  // from the Higham worst-case Strassen roundoff bound (see
+  // `strassenTolerance` for the derivation); the gate catches gross bugs
+  // (indexing errors, missing sub-products, broken merges) without firing
+  // on legitimate fp32 roundoff.
   auto verify = [&]() {
     float maxDiff = 0.0F;
     const std::size_t total = n * n;
@@ -458,7 +481,7 @@ template <class PoolT>
         maxDiff = diff;
       }
     }
-    const float tolerance = 1.0e-3F * static_cast<float>(n);
+    const float tolerance = strassenTolerance(n);
     CITOR_ALWAYS_ASSERT(maxDiff <= tolerance);
   };
 
@@ -529,7 +552,7 @@ template <class PoolT>
         maxDiff = diff;
       }
     }
-    const float tolerance = 1.0e-3F * static_cast<float>(n);
+    const float tolerance = strassenTolerance(n);
     CITOR_ALWAYS_ASSERT(maxDiff <= tolerance);
   };
 

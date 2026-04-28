@@ -9,11 +9,11 @@
 // park before the next dispatch. Each iteration submits a single trivial
 // closure spanning `[0, participants)`; the cycle bracket covers the
 // dispatch + wake + body + join sequence. The measurement is closed-loop
-// (the producer waits for completion) but the per-iteration sample is fed
-// into HdrHistogram via `hdr_record_corrected_value` so the recorded
-// histogram is corrected for coordinated omission against an expected
-// inter-arrival interval of `kCoolOff` plus the median dispatch latency
-// observed on the row's first half-window.
+// p25/p50/p99 with explicit 30ms cool-off between iterations; not
+// coordinated-omission-corrected, by design -- the closed-loop sampler
+// controls inter-arrival explicitly via cool-off, so the recorded
+// histogram represents real per-iteration dispatch latency rather than
+// CO-synthesized phantom samples.
 //
 // Output: each row carries `tailNs = {p25, p50, p99}` extracted from the
 // per-row HdrHistogram. The columns render only when the bench is invoked
@@ -99,19 +99,17 @@ private:
 
 /// Sample one pool's cold-dispatch latency over `kIterations` rounds,
 ///        feeding each sample into both the median sample vector AND the
-///        coordinated-omission-corrected HdrHistogram.
+///        per-row HdrHistogram.
 ///
 /// Each iteration sleeps `kCoolOff` to let workers park, then dispatches an
 /// empty closure over `[0, participants)`. The cycle delta covers the
 /// dispatch + wake + body + join sequence; the sleep is outside the bracket.
 ///
-/// The HdrHistogram is fed via `hdr_record_corrected_value`. The expected
-/// interval is the kCoolOff plus the row's median uncorrected sample,
-/// computed from the first half of the warmup window so the corrector has
-/// a stable baseline before the timing window starts. If a single iteration
-/// stalls (e.g., THP defrag pause) the corrector synthesizes additional
-/// samples at the expected pace so the percentile tail reflects the stall
-/// the production load would have observed.
+/// The HdrHistogram is fed via `hdr_record_value`. The measurement is
+/// closed-loop and the producer controls inter-arrival explicitly via the
+/// `kCoolOff` sleep; coordinated-omission correction would synthesize
+/// phantom samples that misrepresent what each iteration actually observed,
+/// so it is not applied here.
 ///
 /// PoolT   Concrete pool type (the trait's specialization key).
 /// participants Total worker count to construct the pool with.
@@ -132,16 +130,11 @@ template <class PoolT>
     sink.fetch_add(hi - lo, std::memory_order_relaxed);
   };
 
-  // Warmup. Discarded from the cycle samples; first half informs the
-  // expected-interval estimator below.
-  std::vector<double> warmupSamples;
-  warmupSamples.reserve(kWarmupIterations);
+  // Warmup. Discarded from the cycle samples; runs to ensure each pool's
+  // workers have been spawned at least once before the timing window opens.
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     std::this_thread::sleep_for(kCoolOff);
-    const std::uint64_t startCycles = readCyclesStart();
     Traits::submitBlocksAndWait(*pool, 0, participants, body);
-    const std::uint64_t endCycles = readCyclesEnd();
-    warmupSamples.push_back(cyclesToNs(endCycles - startCycles, cal));
   }
 
   // Correctness gate: the warmup alone must have driven the sink to
@@ -151,24 +144,12 @@ template <class PoolT>
                       static_cast<std::uint64_t>(kWarmupIterations) *
                           static_cast<std::uint64_t>(participants));
 
-  // Expected interval: `kCoolOff + median(first-half warmup samples)`. The
-  // first half is used so workers' steady-state park-wake cost has been
-  // observed at least once before the estimator is taken. Uncorrected
-  // samples drive the headline median in the BenchRow; the corrected
-  // histogram drives the tailNs percentiles.
-  const std::size_t halfWarmup = kWarmupIterations / 2U;
-  std::vector<double> half(warmupSamples.begin(), warmupSamples.begin() + halfWarmup);
-  std::sort(half.begin(), half.end());
-  const double medianWarmupNs = half.empty() ? 0.0 : half[half.size() / 2U];
-  const std::int64_t expectedIntervalNs =
-      static_cast<std::int64_t>(
-          std::chrono::duration_cast<std::chrono::nanoseconds>(kCoolOff).count()) +
-      static_cast<std::int64_t>(medianWarmupNs);
-
   HdrHistogramHandle hist;
 
   // Timing window. Samples are pushed into both the sample vector (for the
-  // headline p25 + err%) and the HdrHistogram (for the corrected tail).
+  // headline p25 + err%) and the HdrHistogram (for the per-row tail). The
+  // measurement is closed-loop and inter-arrival is controlled by the
+  // explicit `kCoolOff` sleep; samples are recorded as-is.
   std::vector<double> samples;
   samples.reserve(kIterations);
   for (std::size_t i = 0; i < kIterations; ++i) {
@@ -182,7 +163,7 @@ template <class PoolT>
     // a multi-second stall and is recorded at the ceiling so the p99 still
     // reflects "outside the trackable range" rather than silently dropping.
     const std::int64_t recorded = std::min<std::int64_t>(static_cast<std::int64_t>(ns), kHdrMaxNs);
-    (void)::hdr_record_corrected_value(hist.get(), recorded, expectedIntervalNs);
+    (void)::hdr_record_value(hist.get(), recorded);
   }
 
   // Final correctness gate. Each iteration (warmup + timing) increments the

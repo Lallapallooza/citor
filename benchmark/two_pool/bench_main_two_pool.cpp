@@ -138,9 +138,10 @@ int main(int argc, char **argv) {
   // reports the value at checklist time, NOT each cell's per-cell override;
   // the per-cell value is captured inside the workload TU and reflected in
   // the cell's row name.
-  std::cout << "[NOTE] parallel_bench_two_pool tests both KMP_BLOCKTIME values per cell.\n"
-            << "[NOTE] The libomp_blocktime=0 checklist gate below reads FAIL by design; each cell\n"
-            << "[NOTE] sets blocktime explicitly. See row labels for the per-cell value.\n";
+  std::cout
+      << "[NOTE] parallel_bench_two_pool tests both KMP_BLOCKTIME values per cell.\n"
+      << "[NOTE] The libomp_blocktime=0 checklist gate below reads FAIL by design; each cell\n"
+      << "[NOTE] sets blocktime explicitly. See row labels for the per-cell value.\n";
   printChecklist(std::cout);
   std::cout << '\n';
 

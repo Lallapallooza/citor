@@ -12,7 +12,6 @@
 // registrar to avoid silently mismatching the bench's intent.
 
 #include <cstddef>
-#include <iostream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -67,16 +66,35 @@ class MultiArenaHarness {
 public:
   /// Acquire a view over the process-wide `PoolGroup::global()` arenas.
   ///
-  /// The constructor verifies that every arena reports `PoolKind::Arena`; a
-  /// mismatch indicates the singleton has been mis-initialized and the bench
-  /// cannot trust later cross-CCD assertions, so the constructor aborts via
-  /// the bench's standard `CITOR_ALWAYS_ASSERT` mechanism.
-  MultiArenaHarness() : m_group(&citor::PoolGroup::global()) {
+  /// The constructor verifies that every arena reports `PoolKind::Arena` and,
+  /// when |requiredCcds| is non-zero, that the singleton enumerated at least
+  /// that many CCDs. The latter check is structural protection against the
+  /// construction-order trap where `PoolGroup::global()` is first touched
+  /// AFTER the producer has been pinned to a single-CCD subset of cores; the
+  /// topology probe would then collapse to one synthetic CCD and the harness
+  /// would silently report same-CCD numbers under cross-CCD row labels.
+  /// Cross-CCD bench TUs MUST pass `requiredCcds=2U` (or higher) so the
+  /// constructor catches the dynamic-affinity case alongside the static
+  /// `requireMultipleCcds(...)` check at registrar time.
+  ///
+  /// Both failure modes throw `std::runtime_error`; the registrar's catch
+  /// path turns the exception into a `SKIPPED:` row in the bench output.
+  ///
+  /// requiredCcds Minimum CCD count the calling TU needs (0 disables
+  ///                     the topology check).
+  explicit MultiArenaHarness(std::size_t requiredCcds = 0U) : m_group(&citor::PoolGroup::global()) {
+    if (requiredCcds > 0U && m_group->ccdCount() < requiredCcds) {
+      throw std::runtime_error{"MultiArenaHarness constructed with degraded topology; constructed "
+                               "under affinity mask that collapsed PoolGroup::global() to fewer "
+                               "CCDs than required (need " +
+                               std::to_string(requiredCcds) + ", got " +
+                               std::to_string(m_group->ccdCount()) +
+                               "). Construct harness BEFORE pinning the producer thread."};
+    }
     for (std::size_t ccd = 0; ccd < m_group->ccdCount(); ++ccd) {
       if (m_group->arena(ccd).kind() != citor::PoolKind::Arena) {
-        std::cerr << "[multi_arena_harness] arena " << ccd
-                  << " kind() != PoolKind::Arena; PoolGroup state is corrupt\n";
-        std::abort();
+        throw std::runtime_error{"MultiArenaHarness: arena " + std::to_string(ccd) +
+                                 " kind() != PoolKind::Arena; PoolGroup state is corrupt"};
       }
     }
   }

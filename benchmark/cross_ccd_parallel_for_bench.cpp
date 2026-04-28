@@ -147,7 +147,7 @@ private:
 
 /// Float comparison reference: every element in the buffer should equal `1.0`
 /// after the body runs (each body slot writes `1.0` into its range), so the
-/// expected sum is exactly `kElementCount`. The body writes a
+/// expected sum is exactly `kElementCount`. The body intentionally writes a
 /// constant rather than reading the input; this keeps cross-CCD coherence
 /// traffic on the *dispatch* path the bench wants to measure, instead of
 /// pulling the reading-side cache lines into a different CCD's L3.
@@ -164,7 +164,7 @@ private:
 /// constructions reuse the singleton.
 [[nodiscard]] BenchRow measureRow(const char *name, unsigned producerCpu, std::size_t arenaCcd,
                                   const CyclesPerNanosecond &cal) {
-  MultiArenaHarness harness;
+  MultiArenaHarness harness{/*requiredCcds=*/2U};
   CITOR_ALWAYS_ASSERT(arenaCcd < harness.arenaCount());
   citor::ThreadPool &pool = harness.arena(arenaCcd);
   CITOR_ALWAYS_ASSERT(pool.kind() == citor::PoolKind::Arena);

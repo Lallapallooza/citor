@@ -32,6 +32,7 @@
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "citor/always_assert.h"
@@ -270,6 +271,10 @@ BenchTable runBlasCoexistence(const CyclesPerNanosecond &cal) {
   // call the API explicitly so the cell's policy is reproducible.
   table.rows.push_back(measureCell("citor::ThreadPool kmp_blocktime=default",
                                    /*blocktimeMs=*/200, cal));
+  // Cool-off between cells covers libomp's 200ms default blocktime so the
+  // second cell starts with a fully-parked libomp pool, not residual spin
+  // from the first cell.
+  std::this_thread::sleep_for(std::chrono::milliseconds{300});
   table.rows.push_back(measureCell("citor::ThreadPool kmp_blocktime=0",
                                    /*blocktimeMs=*/0, cal));
   return table;

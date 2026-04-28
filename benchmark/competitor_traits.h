@@ -203,15 +203,21 @@ template <> struct CompetitorTraits<BS::light_thread_pool> {
   template <class T, class Map, class Combine>
   static T parallelReduce(BS::light_thread_pool &pool, std::size_t first, std::size_t last,
                           std::size_t participantCount, T identity, Map map, Combine combine) {
+    if (last <= first) {
+      return identity;
+    }
     const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
     std::vector<T> partials(blocks, identity);
+    // Per-block fetch_add gives each block a unique partials slot without
+    // inferring the index from `bf`. BS partitions with floor-division plus
+    // remainder distribution, so the previous ceiling-division reverse-mapping
+    // collided indices when `(last - first) % blocks != 0`.
+    std::atomic<std::size_t> nextIdx{0};
     pool.submit_blocks(
             first, last,
-            [&partials, &map, identity, blocks, first, last](std::size_t bf, std::size_t bl) {
-              const std::size_t span = last - first;
-              const std::size_t block = (span + blocks - 1U) / blocks;
-              const std::size_t idx = block == 0U ? std::size_t{0} : (bf - first) / block;
-              partials[idx < blocks ? idx : blocks - 1U] = map(bf, bl, identity);
+            [&partials, &map, identity, &nextIdx](std::size_t bf, std::size_t bl) {
+              const std::size_t idx = nextIdx.fetch_add(1U, std::memory_order_relaxed);
+              partials[idx] = map(bf, bl, identity);
             },
             blocks)
         .wait();
