@@ -308,6 +308,300 @@ void strassenRec(Pool &pool, const Sub &c, const Sub &a, const Sub &b, float *sc
   const Sub a12 = quadrant(a, 0, 1);
   const Sub a21 = quadrant(a, 1, 0);
   const Sub a22 = quadrant(a, 1, 1);
+  const Sub b11 = quadrant(b, 0, 0);
+  const Sub b12 = quadrant(b, 0, 1);
+  const Sub b21 = quadrant(b, 1, 0);
+  const Sub b22 = quadrant(b, 1, 1);
+  const Sub c11 = quadrant(c, 0, 0);
+  const Sub c12 = quadrant(c, 0, 1);
+  const Sub c21 = quadrant(c, 1, 0);
+  const Sub c22 = quadrant(c, 1, 1);
+
+  // Stamp out the operand temporaries (sequential adds; cheap relative to
+  // the recursive multiplications below).
+  addInto(t1A, a11, a22);
+  addInto(t1B, b11, b22);
+  addInto(t2A, a21, a22);
+  subInto(t3B, b12, b22);
+  subInto(t4B, b21, b11);
+  addInto(t5A, a11, a12);
+  subInto(t6A, a21, a11);
+  addInto(t6B, b11, b12);
+  subInto(t7A, a12, a22);
+  addInto(t7B, b21, b22);
+
+  // Compute the 7 sub-products. Each Mi is a recursive Strassen call on
+  // half-sized inputs. Above `kParallelDepth` the seven sub-products run
+  // concurrently and need disjoint scratch slices (partitioned via
+  // `childBudget` offsets); deeper levels run them serially and reuse a
+  // single scratch slice.
+  const std::size_t childBudget = scratchBudget(half, depth + 1U);
+
+  if (depth < kParallelDepth) {
+    // Parallel sub-product dispatch via recursiveSpawn2. The four groups
+    // are paired so each invocation spawns two independent leaves.
+    recursiveSpawn2(
+        pool,
+        [&](Pool &p) {
+          // Group 1: M1, M2.
+          recursiveSpawn2(
+              p, [&](Pool &pp) { strassenRec(pp, mBufs[0], t1A, t1B, childScratch, depth + 1U); },
+              [&](Pool &pp) {
+                strassenRec(pp, mBufs[1], t2A, b11, childScratch + childBudget, depth + 1U);
+              });
+        },
+        [&](Pool &p) {
+          // Group 2: M3, M4.
+          recursiveSpawn2(
+              p,
+              [&](Pool &pp) {
+                strassenRec(pp, mBufs[2], a11, t3B, childScratch + (2U * childBudget), depth + 1U);
+              },
+              [&](Pool &pp) {
+                strassenRec(pp, mBufs[3], a22, t4B, childScratch + (3U * childBudget), depth + 1U);
+              });
+        });
+
+    recursiveSpawn2(
+        pool,
+        [&](Pool &p) {
+          // Group 3: M5, M6.
+          recursiveSpawn2(
+              p,
+              [&](Pool &pp) {
+                strassenRec(pp, mBufs[4], t5A, b22, childScratch + (4U * childBudget), depth + 1U);
+              },
+              [&](Pool &pp) {
+                strassenRec(pp, mBufs[5], t6A, t6B, childScratch + (5U * childBudget), depth + 1U);
+              });
+        },
+        [&](Pool &p) {
+          // Group 4: M7 alone (no sibling, runs in this branch directly).
+          strassenRec(p, mBufs[6], t7A, t7B, childScratch + (6U * childBudget), depth + 1U);
+        });
+  } else {
+    // Serial sub-product dispatch. All seven mults reuse the same child
+    // scratch slice, since they don't run concurrently. This keeps the
+    // total scratch arena bounded by the parallel-region depth.
+    strassenRec(pool, mBufs[0], t1A, t1B, childScratch, depth + 1U);
+    strassenRec(pool, mBufs[1], t2A, b11, childScratch, depth + 1U);
+    strassenRec(pool, mBufs[2], a11, t3B, childScratch, depth + 1U);
+    strassenRec(pool, mBufs[3], a22, t4B, childScratch, depth + 1U);
+    strassenRec(pool, mBufs[4], t5A, b22, childScratch, depth + 1U);
+    strassenRec(pool, mBufs[5], t6A, t6B, childScratch, depth + 1U);
+    strassenRec(pool, mBufs[6], t7A, t7B, childScratch, depth + 1U);
+  }
+
+  // Combine sub-products into the output quadrants:
+  //   C11 = M1 + M4 - M5 + M7
+  //   C12 = M3 + M5
+  //   C21 = M2 + M4
+  //   C22 = M1 - M2 + M3 + M6
+  addInto(c11, mBufs[0], mBufs[3]);
+  subEq(c11, mBufs[4]);
+  addEq(c11, mBufs[6]);
+
+  addInto(c12, mBufs[2], mBufs[4]);
+
+  addInto(c21, mBufs[1], mBufs[3]);
+
+  subInto(c22, mBufs[0], mBufs[1]);
+  addEq(c22, mBufs[2]);
+  addEq(c22, mBufs[5]);
+}
+
+template <class PoolT>
+[[nodiscard]] BenchRow measureStrassen(const char *name, std::size_t participants, std::size_t n,
+                                       const CyclesPerNanosecond &cal) {
+  static_assert(RecursiveForkJoinTraits<PoolT>::supportsRecursiveSpawn,
+                "strassen bench requires recursive-spawn-capable pool; the trait gate excludes "
+                "BS / dp / task_thread_pool / riften / Eigen / Taskflow Executor at compile time.");
+  using Traits = CompetitorTraits<PoolT>;
+  auto pool = Traits::make(participants);
+
+  AlignedFloatBuffer aBuf = allocateAlignedFloats(n * n);
+  AlignedFloatBuffer bBuf = allocateAlignedFloats(n * n);
+  AlignedFloatBuffer cBuf = allocateAlignedFloats(n * n);
+  AlignedFloatBuffer refBuf = allocateAlignedFloats(n * n);
+
+  deterministicFill(aBuf.get(), n * n, 0xc1701U);
+  deterministicFill(bBuf.get(), n * n, 0xc1701U + 1U);
+
+  const Sub aSub = Sub{.data = aBuf.get(), .stride = n, .n = n};
+  const Sub bSub = Sub{.data = bBuf.get(), .stride = n, .n = n};
+  const Sub cSub = Sub{.data = cBuf.get(), .stride = n, .n = n};
+  const Sub refSub = Sub{.data = refBuf.get(), .stride = n, .n = n};
+
+  // Reference: naive ijk matmul on the same input.
+  seqMatmul(refSub, aSub, bSub);
+
+  // Scratch arena: each Strassen level holds 21 sub-buffers; scrach space
+  // is sized to the cumulative recursive budget. Recursive children
+  // partition the arena via pointer offsets; each spawned sibling owns a
+  // disjoint slice.
+  // The recursive sub-product calls require disjoint scratch slices while
+  // depth < `kParallelDepth`; below that depth the seven mults reuse a
+  // single slice. `scratchBudget` returns the exact recursive footprint
+  // for the (n, depth=0) entry point.
+  const std::size_t scratchN = scratchBudget(n, 0U);
+  std::vector<float> scratch(scratchN, 0.0F);
+
+  // Verify Strassen output against the reference. The per-element absolute
+  // diff is bounded by `1e-3 * N`; Strassen's recursive add/subtract steps
+  // accumulate roundoff error proportional to depth and operand magnitude.
+  auto verify = [&]() {
+    float maxDiff = 0.0F;
+    const std::size_t total = n * n;
+    for (std::size_t i = 0; i < total; ++i) {
+      const float diff = std::fabs(cBuf.get()[i] - refBuf.get()[i]);
+      if (diff > maxDiff) {
+        maxDiff = diff;
+      }
+    }
+    const float tolerance = 1.0e-3F * static_cast<float>(n);
+    CITOR_ALWAYS_ASSERT(maxDiff <= tolerance);
+  };
+
+  // Warmup + correctness gate.
+  for (std::size_t i = 0; i < kWarmupIterations; ++i) {
+    strassenRec(*pool, cSub, aSub, bSub, scratch.data(), std::size_t{0});
+    verify();
+  }
+
+  std::vector<double> samples;
+  samples.reserve(kIterations);
+  for (std::size_t i = 0; i < kIterations; ++i) {
+    const std::uint64_t startCycles = readCyclesStart();
+    strassenRec(*pool, cSub, aSub, bSub, scratch.data(), std::size_t{0});
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    verify();
+  }
+
+  return finalizeRow(name, samples);
+}
+
+[[nodiscard]] BenchRow measureCitor(std::size_t participants, std::size_t n,
+                                    const CyclesPerNanosecond &cal) {
+  return measureStrassen<citor::ThreadPool>("citor::ThreadPool", participants, n, cal);
+}
+
+#ifdef CITOR_BENCH_HAS_TBB
+[[nodiscard]] BenchRow measureTbb(std::size_t participants, std::size_t n,
+                                  const CyclesPerNanosecond &cal) {
+  return measureStrassen<::tbb::task_arena>("oneTBB", participants, n, cal);
+}
+#endif
+
+#ifdef CITOR_BENCH_HAS_OPENMP
+[[nodiscard]] BenchRow measureOmp(std::size_t participants, std::size_t n,
+                                  const CyclesPerNanosecond &cal) {
+  static_assert(RecursiveForkJoinTraits<OpenMpRunner>::supportsRecursiveSpawn,
+                "OpenMP runner must opt into recursive spawn for the strassen bench");
+  // OpenMP `task` requires an enclosing `parallel` region. Open it once
+  // per iteration; the inner `single` directive funnels the root call.
+  OpenMpRunner runner{participants};
+
+  AlignedFloatBuffer aBuf = allocateAlignedFloats(n * n);
+  AlignedFloatBuffer bBuf = allocateAlignedFloats(n * n);
+  AlignedFloatBuffer cBuf = allocateAlignedFloats(n * n);
+  AlignedFloatBuffer refBuf = allocateAlignedFloats(n * n);
+
+  deterministicFill(aBuf.get(), n * n, 0xc1701U);
+  deterministicFill(bBuf.get(), n * n, 0xc1701U + 1U);
+
+  const Sub aSub = Sub{.data = aBuf.get(), .stride = n, .n = n};
+  const Sub bSub = Sub{.data = bBuf.get(), .stride = n, .n = n};
+  const Sub cSub = Sub{.data = cBuf.get(), .stride = n, .n = n};
+  const Sub refSub = Sub{.data = refBuf.get(), .stride = n, .n = n};
+
+  seqMatmul(refSub, aSub, bSub);
+
+  const std::size_t scratchN = scratchBudget(n, 0U);
+  std::vector<float> scratch(scratchN, 0.0F);
+
+  auto verify = [&]() {
+    float maxDiff = 0.0F;
+    const std::size_t total = n * n;
+    for (std::size_t i = 0; i < total; ++i) {
+      const float diff = std::fabs(cBuf.get()[i] - refBuf.get()[i]);
+      if (diff > maxDiff) {
+        maxDiff = diff;
+      }
+    }
+    const float tolerance = 1.0e-3F * static_cast<float>(n);
+    CITOR_ALWAYS_ASSERT(maxDiff <= tolerance);
+  };
+
+  auto runOnce = [&]() {
+#pragma omp parallel num_threads(static_cast<int>(participants))
+    {
+#pragma omp single
+      {
+        strassenRec(runner, cSub, aSub, bSub, scratch.data(), std::size_t{0});
+      }
+    }
+  };
+
+  for (std::size_t i = 0; i < kWarmupIterations; ++i) {
+    runOnce();
+    verify();
+  }
+
+  std::vector<double> samples;
+  samples.reserve(kIterations);
+  for (std::size_t i = 0; i < kIterations; ++i) {
+    const std::uint64_t startCycles = readCyclesStart();
+    runOnce();
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    verify();
+  }
+
+  return finalizeRow("OpenMP", samples);
+}
+#endif
+
+struct StrassenCell {
+  std::size_t n;
+  const char *suffix;
+};
+
+constexpr std::array<StrassenCell, 2> kCells{{
+    {.n = 1024U, .suffix = "n1024"},
+    {.n = 2048U, .suffix = "n2048"},
+}};
+
+BenchTable buildTable(std::size_t participants, StrassenCell cell, const CyclesPerNanosecond &cal) {
+  BenchTable table;
+  table.workload =
+      std::string{"forkjoin_strassen_j"} + std::to_string(participants) + "_" + cell.suffix;
+  table.rows.push_back(measureCitor(participants, cell.n, cal));
+#ifdef CITOR_BENCH_HAS_TBB
+  table.rows.push_back(measureTbb(participants, cell.n, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_OPENMP
+  table.rows.push_back(measureOmp(participants, cell.n, cal));
+#endif
+  return table;
+}
+
+template <std::size_t CellIdx, std::size_t Participants>
+BenchTable runStrassenCell(const CyclesPerNanosecond &cal) {
+  constexpr StrassenCell cell = kCells[CellIdx];
+  return buildTable(Participants, cell, cal);
+}
+
+struct StrassenRegistrar {
+  StrassenRegistrar() {
+    registerWorkload({.name = "forkjoin_strassen_j8_n1024", .run = &runStrassenCell<0, 8>});
+    registerWorkload({.name = "forkjoin_strassen_j16_n1024", .run = &runStrassenCell<0, 16>});
+    registerWorkload({.name = "forkjoin_strassen_j8_n2048", .run = &runStrassenCell<1, 8>});
+    registerWorkload({.name = "forkjoin_strassen_j16_n2048", .run = &runStrassenCell<1, 16>});
+  }
+};
+
+const StrassenRegistrar kRegistrar;
 
 } // namespace
 } // namespace citor::bench
