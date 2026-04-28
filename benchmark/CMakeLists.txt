@@ -173,6 +173,7 @@ set(_citor_bench_sources
     empty_fanout_bench.cpp
     affinity_sweep_bench.cpp
     forkjoin_cilksort_bench.cpp
+    forkjoin_strassen_bench.cpp
     balance_sweep_bench.cpp
     pareto_body_bench.cpp
     parallel_reduce_pareto_bench.cpp
