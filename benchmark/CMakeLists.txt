@@ -172,10 +172,13 @@ set(_citor_bench_sources
     differential_bench.cpp
     empty_fanout_bench.cpp
     forkjoin_knapsack_cancel_bench.cpp
+    parallel_for_cold_dispatch_bench.cpp
     forkjoin_uts_bench.cpp
     fork_join_bench.cpp
     forkjoin_knapsack_cancel_bench.cpp
+    parallel_for_cold_dispatch_bench.cpp
     forkjoin_knapsack_cancel_bench.cpp
+    parallel_for_cold_dispatch_bench.cpp
     forkjoin_uts_bench.cpp
     granularity_bench.cpp
     matmul_bench.cpp
