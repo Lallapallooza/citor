@@ -160,6 +160,67 @@ cpmaddpackage(
         "HDR_HISTOGRAM_BUILD_PROGRAMS OFF"
 )
 
+# Leopard (hosseinmoein) -- header-only C++20 work-stealing pool with
+# parallel_loop + dispatch. Fills a gap between BS-style submit pools and
+# full work-stealing runtimes.
+cpmaddpackage(
+    NAME Leopard
+    GITHUB_REPOSITORY hosseinmoein/Leopard
+    GIT_TAG main
+    DOWNLOAD_ONLY YES
+)
+if(Leopard_ADDED AND NOT TARGET leopard_threadpool)
+    # Leopard's `ThreadPool.tcc` defines several non-template member functions
+    # (e.g. `ThreadPool::ThreadPool`, `Conditioner::execute`) without the
+    # `inline` keyword. Including the header in multiple TUs produces ODR
+    # link errors. Patch the file post-fetch to mark those definitions
+    # `inline` so the header is genuinely header-only across TUs.
+    set(_leopard_tcc ${Leopard_SOURCE_DIR}/include/Leopard/ThreadPool.tcc)
+    if(EXISTS ${_leopard_tcc})
+        file(READ ${_leopard_tcc} _leopard_tcc_contents)
+        # Idempotent guard: only patch when our marker is absent.
+        string(
+            FIND
+            "${_leopard_tcc_contents}"
+            "// citor-patched-inline"
+            _leopard_marker_pos
+        )
+        if(_leopard_marker_pos EQUAL -1)
+            string(
+                REGEX
+                REPLACE
+                "(\nvoid Conditioner::|\nThreadPool::|\nvoid ThreadPool::|\nbool ThreadPool::|\n[A-Za-z_:]+::size_type ThreadPool::)"
+                "\ninline\\1"
+                _leopard_tcc_contents
+                "${_leopard_tcc_contents}"
+            )
+            file(
+                WRITE ${_leopard_tcc}
+                "// citor-patched-inline\n${_leopard_tcc_contents}"
+            )
+        endif()
+    endif()
+    add_library(leopard_threadpool INTERFACE)
+    target_include_directories(
+        leopard_threadpool
+        SYSTEM
+        INTERFACE ${Leopard_SOURCE_DIR}/include
+    )
+endif()
+
+# Dispenso (Meta/Facebook) -- C++17 work-stealing pool with parallel_for,
+# futures, task graphs, concurrent containers. Closest design philosophy
+# match to citor among the surveyed competitors.
+cpmaddpackage(
+    NAME dispenso
+    GITHUB_REPOSITORY facebookincubator/dispenso
+    GIT_TAG main
+    OPTIONS
+        "DISPENSO_SHARED_LIB OFF"
+        "DISPENSO_BUILD_TESTS OFF"
+        "DISPENSO_BUILD_BENCHMARKS OFF"
+)
+
 find_package(OpenMP QUIET)
 if(OpenMP_CXX_FOUND)
     add_library(parallel_bench_openmp INTERFACE)
@@ -244,6 +305,31 @@ endif()
 if(TARGET parallel_bench_openmp)
     target_link_libraries(parallel_bench PRIVATE parallel_bench_openmp)
     target_compile_definitions(parallel_bench PRIVATE CITOR_BENCH_HAS_OPENMP)
+endif()
+if(TARGET leopard_threadpool)
+    target_link_libraries(parallel_bench PRIVATE leopard_threadpool)
+    target_compile_definitions(parallel_bench PRIVATE CITOR_BENCH_HAS_LEOPARD)
+endif()
+if(TARGET dispenso)
+    # Dispenso ships its own warning surface (sign conversions, unused
+    # parameters in its template-heavy headers) that trips the bench's
+    # `-Wsign-conversion` / `-Wextra` policy. Re-export its include
+    # directories as SYSTEM to silence the third-party noise while keeping
+    # our own code under the strict policy.
+    get_target_property(
+        _dispenso_includes
+        dispenso
+        INTERFACE_INCLUDE_DIRECTORIES
+    )
+    if(_dispenso_includes)
+        target_include_directories(
+            parallel_bench
+            SYSTEM
+            PRIVATE ${_dispenso_includes}
+        )
+    endif()
+    target_link_libraries(parallel_bench PRIVATE dispenso)
+    target_compile_definitions(parallel_bench PRIVATE CITOR_BENCH_HAS_DISPENSO)
 endif()
 
 if(UNIX AND NOT APPLE)

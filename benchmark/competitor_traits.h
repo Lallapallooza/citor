@@ -44,6 +44,15 @@
 #include <atomic>
 #endif
 
+#ifdef CITOR_BENCH_HAS_LEOPARD
+#include <Leopard/ThreadPool.h>
+#endif
+
+#ifdef CITOR_BENCH_HAS_DISPENSO
+#include <dispenso/parallel_for.h>
+#include <dispenso/thread_pool.h>
+#endif
+
 namespace citor::bench {
 
 /// Adapter shim that lets every competitor pool accept the same closure.
@@ -1165,5 +1174,107 @@ template <> struct CompetitorTraits<OpenMpRunner> {
   }
 };
 #endif // CITOR_BENCH_HAS_OPENMP
+
+#ifdef CITOR_BENCH_HAS_LEOPARD
+/// Trait for `hmthrp::ThreadPool` (Leopard) -- C++20 work-stealing pool with `dispatch`
+///        and `parallel_loop`.
+///
+/// Leopard's `parallel_loop` auto-partitions into one block per worker thread and returns a
+/// vector of futures (one per chunk). The bench shim wires it through `dispatch()` directly so
+/// 1x partition would let stragglers gate the wait. `submitBlocksAndWait` on this adapter
+/// issues `last - first` per-element tasks, mirroring BS / dp / task / riften.
+template <> struct CompetitorTraits<hmthrp::ThreadPool> {
+  static constexpr const char *name = "Leopard::ThreadPool";
+
+  static auto make(std::size_t participants) {
+    return std::make_unique<hmthrp::ThreadPool>(participants);
+  }
+
+  template <class Fn>
+  static void submitBlocksAndWait(hmthrp::ThreadPool &pool, std::size_t first, std::size_t last,
+                                  Fn fn) {
+    if (last <= first) {
+      return;
+    }
+    std::vector<std::future<void>> futures;
+    futures.reserve(last - first);
+    for (std::size_t i = first; i < last; ++i) {
+      futures.emplace_back(pool.dispatch(false, [i, &fn]() { fn(i, i + 1U); }));
+    }
+    for (auto &f : futures) {
+      f.get();
+    }
+  }
+
+  template <class Fn>
+  static void parallelFor(hmthrp::ThreadPool &pool, std::size_t first, std::size_t last,
+                          std::size_t participantCount, Fn fn) {
+    if (last <= first || participantCount == 0U) {
+      return;
+    }
+    const std::size_t span = last - first;
+    const std::size_t blocks = participantCount;
+    const std::size_t block = (span + blocks - 1U) / blocks;
+    std::vector<std::future<void>> futures;
+    futures.reserve(blocks);
+    for (std::size_t b = 0; b < blocks; ++b) {
+      const std::size_t bf = first + std::min(span, b * block);
+      const std::size_t bl = first + std::min(span, (b + 1) * block);
+      if (bf == bl) {
+        continue;
+      }
+      futures.emplace_back(pool.dispatch(false, [bf, bl, &fn]() { fn(bf, bl); }));
+    }
+    for (auto &f : futures) {
+      f.get();
+    }
+  }
+};
+#endif // CITOR_BENCH_HAS_LEOPARD
+
+#ifdef CITOR_BENCH_HAS_DISPENSO
+/// Trait for `dispenso::ThreadPool` (Meta) -- work-stealing pool with native
+///        `parallel_for` over `ChunkedRange`.
+///
+/// The shim binds a per-row `dispenso::ThreadPool` to a `dispenso::TaskSet` and routes the
+/// dispatch through `dispenso::parallel_for(taskSet, ChunkedRange, body)`. The chunk size
+/// comparison's partition shape is symmetric across pools.
+template <> struct CompetitorTraits<dispenso::ThreadPool> {
+  static constexpr const char *name = "dispenso::ThreadPool";
+
+  static auto make(std::size_t participants) {
+    return std::make_unique<dispenso::ThreadPool>(participants);
+  }
+
+  template <class Fn>
+  static void submitBlocksAndWait(dispenso::ThreadPool &pool, std::size_t first, std::size_t last,
+                                  Fn fn) {
+    if (last <= first) {
+      return;
+    }
+    dispenso::TaskSet taskSet(pool);
+    dispenso::parallel_for(taskSet,
+                           dispenso::ChunkedRange<std::size_t>(first, last, std::size_t{1}),
+                           [&fn](std::size_t lo, std::size_t hi) { fn(lo, hi); });
+  }
+
+  template <class Fn>
+  static void parallelFor(dispenso::ThreadPool &pool, std::size_t first, std::size_t last,
+                          std::size_t participantCount, Fn fn) {
+    if (last <= first || participantCount == 0U) {
+      return;
+    }
+    const std::size_t span = last - first;
+    const std::size_t denom = participantCount;
+    std::size_t chunk = (span + denom - 1U) / denom;
+    if (chunk == 0U) {
+      chunk = 1U;
+    }
+    dispenso::TaskSet taskSet(pool);
+    dispenso::parallel_for(taskSet, dispenso::ChunkedRange<std::size_t>(first, last, chunk),
+                           [&fn](std::size_t lo, std::size_t hi) { fn(lo, hi); });
+  }
+};
+#endif // CITOR_BENCH_HAS_DISPENSO
 
 } // namespace citor::bench

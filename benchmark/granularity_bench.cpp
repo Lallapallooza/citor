@@ -66,7 +66,7 @@ inline void spinForNs(double targetNs, const CyclesPerNanosecond &cal) noexcept 
 /// and reports the average per-dispatch cycle delta. Two effects tighten the
 /// sample distribution:
 ///
-/// 1. The fixed per-bracket `__rdtscp` overhead (~25 ns on the host) amortizes
+/// 1. The fixed per-bracket `__rdtscp` overhead amortizes
 ///    across the batch, so on body=0 / body=100 ns cells a sub-microsecond
 ///    dispatch is no longer competing with bracket noise of comparable size.
 /// 2. Short OS jitter events (1 kHz timer tick, IRQ delivery, soft-IRQ
@@ -202,6 +202,12 @@ BenchTable buildTable(std::size_t participants, const char *jSuffix, BodyCell ce
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
   table.rows.push_back(measureGranularity<OpenMpRunner>(participants, cell.bodyNs, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_LEOPARD
+  table.rows.push_back(measureGranularity<hmthrp::ThreadPool>(participants, cell.bodyNs, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+  table.rows.push_back(measureGranularity<dispenso::ThreadPool>(participants, cell.bodyNs, cal));
 #endif
 
   return table;
