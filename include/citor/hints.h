@@ -125,19 +125,28 @@ struct Hints {
 ///
 /// User hint presets inherit from this and override only the fields that differ:
 ///
-///
+/// @code
 /// struct MyKahanReduceHints : citor::HintsDefaults {
 ///   static constexpr Determinism determinism = Determinism::KahanCompensated;
 ///   static constexpr double minTaskUs = 25.0;
 /// };
-///
+/// @endcode
 ///
 /// Fields mirror `Hints` one-for-one. The defaults are conservative: `StaticUniform` balance,
 /// `FixedBlockOrder` reductions, no affinity, `Throughput` priority, no estimated cost (the
 /// inline-fallback gate is disabled by default), 5us minimum task, derived chunk, and
 /// cancellation polls on. Override down for hot loops that have already verified the path.
 struct HintsDefaults {
-  static constexpr Balance balance = Balance::StaticUniform;
+  // DynamicChunked is the default: workers race for blocks via a shared atomic
+  // counter, so a slow or descheduled worker does not gate the join on its
+  // pre-assigned share. StaticUniform's deterministic block-id-to-rank
+  // mapping is required by the chunk-id pairwise-tree reduction in
+  // `parallelReduce`; reduce-side hint presets (`KahanReduceHints`,
+  // `FixedBlockReduceHints`) override `balance` to StaticUniform explicitly.
+  // Cold-dispatch latency is preserved: the dispatcher engages the same
+  // `workerStateBase`-driven cold-collapse short-circuit under DynamicChunked
+  // as under StaticUniform.
+  static constexpr Balance balance = Balance::DynamicChunked;
   static constexpr Determinism determinism = Determinism::FixedBlockOrder;
   static constexpr Affinity affinity = Affinity::None;
   static constexpr Priority priority = Priority::Throughput;

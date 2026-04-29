@@ -69,6 +69,22 @@ void deterministicFill(float *p, std::size_t count, std::uint32_t seed) noexcept
   }
 }
 
+/// Per-row-block fill seeded from the row index. Independent across blocks so
+/// the parallel first-touch init can run on each pool's worker partition
+/// without an order-dependent cross-block carry. Stable across participant
+/// counts because `seed ^ i` does not depend on the partition shape.
+inline void deterministicFillBlock(float *p, std::size_t n, std::size_t rowFirst,
+                                   std::size_t rowLast, std::uint32_t seed) noexcept {
+  for (std::size_t i = rowFirst; i < rowLast; ++i) {
+    std::uint32_t state = seed ^ static_cast<std::uint32_t>(i);
+    float *row = p + i * n;
+    for (std::size_t j = 0; j < n; ++j) {
+      state = state * 1664525U + 1013904223U;
+      row[j] = static_cast<float>(state >> 12U) * (1.0F / 1048576.0F);
+    }
+  }
+}
+
 /// Compute one row block of `C = A * B` with ikj loop order. `A`, `B`, `C` are
 /// row-major `N x N` buffers; the body owns rows in `[rowFirst, rowLast)`.
 inline void matmulRowBlock(std::size_t rowFirst, std::size_t rowLast, std::size_t n,
@@ -286,8 +302,26 @@ template <class PoolT>
   AlignedFloatBuffer aBuf = allocateAlignedFloats(elems);
   AlignedFloatBuffer bBuf = allocateAlignedFloats(elems);
   AlignedFloatBuffer cBuf = allocateAlignedFloats(elems);
-  deterministicFill(aBuf.get(), elems, 0xA1B2C3D4U);
-  deterministicFill(bBuf.get(), elems, 0x5E6F7081U);
+
+  // Parallel first-touch init through the same dispatch path the timed
+  // matmul uses. Each pool's worker assignment owns the rows it later
+  // computes on, so memory pages first-fault on the worker's NUMA node
+  // (CCD-local on AMD Zen multi-CCD). Symmetric across pools: the same
+  // partition shape that times the matmul also seeds the buffers.
+  float *aMut = aBuf.get();
+  float *bMut = bBuf.get();
+  float *cMut = cBuf.get();
+  const auto fillBody = [aMut, bMut, cMut, n](std::size_t lo, std::size_t hi) noexcept {
+    deterministicFillBlock(aMut, n, lo, hi, 0xA1B2C3D4U);
+    deterministicFillBlock(bMut, n, lo, hi, 0x5E6F7081U);
+    for (std::size_t i = lo; i < hi; ++i) {
+      float *row = cMut + i * n;
+      for (std::size_t j = 0; j < n; ++j) {
+        row[j] = 0.0F;
+      }
+    }
+  };
+  MatmulDispatch<PoolT>::run(*pool, n, participants, fillBody);
 
   const float *aBase = aBuf.get();
   const float *bBase = bBuf.get();

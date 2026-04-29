@@ -200,8 +200,9 @@ TEST(ParallelFor, MemberAndCpoDispatchAreEquivalent) {
   EXPECT_EQ(dataMember, dataCpo);
 }
 
-// Static partition is block-strided: with `chunk == 0` (derived) and `participants == 4`,
-// the four workers each handle one contiguous block. Verify each (lo, hi) range is touched.
+// Default chunk derivation: with `chunk == 0` and `participants == 4`, the dispatcher
+// oversubscribes to `2 * participants` blocks so dynamic balance has a tail to absorb a
+// straggling rank's share. Verify the block count and range coverage.
 TEST(ParallelFor, StaticPartitionIsBlockStrided) {
   ThreadPool pool(4);
   constexpr std::size_t kN = 4096;
@@ -213,9 +214,7 @@ TEST(ParallelFor, StaticPartitionIsBlockStrided) {
     blockCount.fetch_add(1, std::memory_order_relaxed);
   });
 
-  // The default chunk derivation produces ceil(N / participants) per block, so the block count is
-  // exactly `participants` (every worker gets one contiguous range).
-  EXPECT_EQ(blockCount.load(std::memory_order_relaxed), pool.participants());
+  EXPECT_EQ(blockCount.load(std::memory_order_relaxed), pool.participants() * 2U);
 }
 
 // Dynamic-chunked balances a skewed workload across workers so total wall time is dominated by the

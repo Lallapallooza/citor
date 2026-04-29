@@ -46,8 +46,8 @@ static_assert(std::is_trivially_destructible_v<FunctionRef<void()>>,
 
 // Bundled presets inherit the documented HintsDefaults fields and override only what differs.
 // These static_asserts pin the surviving overrides so a future edit cannot silently change them.
-static_assert(citor::HintsDefaults::balance == Balance::StaticUniform,
-              "HintsDefaults::balance must be StaticUniform");
+static_assert(citor::HintsDefaults::balance == Balance::DynamicChunked,
+              "HintsDefaults::balance must be DynamicChunked");
 static_assert(citor::KahanReduceHints::determinism == Determinism::KahanCompensated,
               "KahanReduceHints::determinism must be KahanCompensated");
 static_assert(citor::LatencyHints::priority == Priority::Latency,
@@ -105,7 +105,7 @@ TEST(ParallelFunctionRef, DefaultConstructedIsEmpty) {
 // Runtime check on top of the static_assert: the constexpr fields should be observable.
 TEST(ParallelHints, HintsDefaultsExposesDocumentedConstants) {
   using HintsT = citor::HintsDefaults;
-  EXPECT_EQ(HintsT::balance, Balance::StaticUniform);
+  EXPECT_EQ(HintsT::balance, Balance::DynamicChunked);
   EXPECT_EQ(HintsT::determinism, Determinism::FixedBlockOrder);
   EXPECT_EQ(HintsT::affinity, Affinity::None);
   EXPECT_EQ(HintsT::priority, Priority::Throughput);

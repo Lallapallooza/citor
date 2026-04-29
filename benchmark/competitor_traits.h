@@ -173,17 +173,18 @@ template <> struct CompetitorTraits<BS::light_thread_pool> {
     pool.submit_blocks(first, last, fn, blocks).wait();
   }
 
-  /// Range-partitioned for using `submit_blocks` with |participantCount| blocks.
-  /// The future barrier (BS's `multi_future::wait`) is the blocking point;
-  /// per-stage rendezvous costs are bounded by that future's mutex/cv path,
-  /// not a decentralized done-epoch scan.
+  /// blocks.
+  /// derivation so the comparison's partition shape is the same on both
+  /// sides; without it BS workers would each get exactly one strided block
+  /// and a slow worker would gate the future barrier on its assigned share.
   template <class Fn>
   static void parallelFor(BS::light_thread_pool &pool, std::size_t first, std::size_t last,
                           std::size_t participantCount, Fn fn) {
     if (last <= first || participantCount == 0U) {
       return;
     }
-    pool.submit_blocks(first, last, fn, participantCount).wait();
+    const std::size_t blocks = participantCount;
+    pool.submit_blocks(first, last, fn, blocks).wait();
   }
 
   /// Reduction emulated as N back-to-back `submit_blocks` waves with per-block
@@ -323,10 +324,14 @@ template <> struct CompetitorTraits<dp::thread_pool<>> {
       return;
     }
     const std::size_t span = last - first;
-    const std::size_t block = (span + participantCount - 1U) / participantCount;
+    //:
+    // workers race for blocks via dp's enqueue + futures, so a slow worker's
+    // unfinished tail can be picked up by faster peers.
+    const std::size_t blocks = participantCount;
+    const std::size_t block = (span + blocks - 1U) / blocks;
     std::vector<std::future<void>> futures;
-    futures.reserve(participantCount);
-    for (std::size_t b = 0; b < participantCount; ++b) {
+    futures.reserve(blocks);
+    for (std::size_t b = 0; b < blocks; ++b) {
       const std::size_t bf = first + std::min(span, b * block);
       const std::size_t bl = first + std::min(span, (b + 1) * block);
       if (bf == bl) {
@@ -446,6 +451,7 @@ template <> struct CompetitorTraits<::task_thread_pool::task_thread_pool> {
   }
 
   /// Range-partitioned for. Future-mutex barrier is the rendezvous.
+  ///.
   template <class Fn>
   static void parallelFor(::task_thread_pool::task_thread_pool &pool, std::size_t first,
                           std::size_t last, std::size_t participantCount, Fn fn) {
@@ -453,10 +459,11 @@ template <> struct CompetitorTraits<::task_thread_pool::task_thread_pool> {
       return;
     }
     const std::size_t span = last - first;
-    const std::size_t block = (span + participantCount - 1U) / participantCount;
+    const std::size_t blocks = participantCount;
+    const std::size_t block = (span + blocks - 1U) / blocks;
     std::vector<std::future<void>> futures;
-    futures.reserve(participantCount);
-    for (std::size_t b = 0; b < participantCount; ++b) {
+    futures.reserve(blocks);
+    for (std::size_t b = 0; b < blocks; ++b) {
       const std::size_t bf = first + std::min(span, b * block);
       const std::size_t bl = first + std::min(span, (b + 1) * block);
       if (bf == bl) {
@@ -586,10 +593,14 @@ template <> struct CompetitorTraits<riften::Thiefpool> {
       return;
     }
     const std::size_t span = last - first;
-    const std::size_t block = (span + participantCount - 1U) / participantCount;
+    //;
+    // riften's work-stealing scheduler picks blocks off its global queue, so
+    // a slow worker's tail can be stolen by faster peers.
+    const std::size_t blocks = participantCount;
+    const std::size_t block = (span + blocks - 1U) / blocks;
     std::vector<std::future<void>> futures;
-    futures.reserve(participantCount);
-    for (std::size_t b = 0; b < participantCount; ++b) {
+    futures.reserve(blocks);
+    for (std::size_t b = 0; b < blocks; ++b) {
       const std::size_t bf = first + std::min(span, b * block);
       const std::size_t bl = first + std::min(span, (b + 1) * block);
       if (bf == bl) {
@@ -711,14 +722,18 @@ template <> struct CompetitorTraits<::tbb::task_arena> {
     });
   }
 
-  /// Range-partitioned `parallel_for`. The chunk hint maps to `blocked_range::grainsize`.
+  /// Range-partitioned `parallel_for`. Uses TBB's `auto_partitioner` so the
+  /// runtime adaptively splits ranges in response to worker idle signals --
+  /// derivation. `participantCount` is consumed only as the construction
+  /// hint via `make()`; the partitioner picks the per-task grain itself.
   template <class Fn>
   static void parallelFor(::tbb::task_arena &arena, std::size_t first, std::size_t last,
-                          std::size_t grain, Fn fn) {
+                          std::size_t /*participantCount*/, Fn fn) {
     arena.execute([&] {
       ::tbb::parallel_for(
-          ::tbb::blocked_range<std::size_t>{first, last, grain == 0 ? std::size_t{1} : grain},
-          [&](const ::tbb::blocked_range<std::size_t> &r) { fn(r.begin(), r.end()); });
+          ::tbb::blocked_range<std::size_t>{first, last},
+          [&](const ::tbb::blocked_range<std::size_t> &r) { fn(r.begin(), r.end()); },
+          ::tbb::auto_partitioner{});
     });
   }
 
@@ -838,7 +853,8 @@ template <> struct CompetitorTraits<::tf::Executor> {
     exec.run(flow).wait();
   }
 
-  /// Range-partitioned for: split `[first, last)` into `participantCount` blocks.
+  /// derivation; Taskflow's executor work-steals between workers, so the
+  /// dynamic tail is absorbed by whichever worker is idle.
   template <class Fn>
   static void parallelFor(::tf::Executor &exec, std::size_t first, std::size_t last,
                           std::size_t participantCount, Fn fn) {
@@ -847,8 +863,9 @@ template <> struct CompetitorTraits<::tf::Executor> {
     }
     ::tf::Taskflow flow;
     const std::size_t span = last - first;
-    const std::size_t block = (span + participantCount - 1) / participantCount;
-    for (std::size_t b = 0; b < participantCount; ++b) {
+    const std::size_t blocks = participantCount;
+    const std::size_t block = (span + blocks - 1) / blocks;
+    for (std::size_t b = 0; b < blocks; ++b) {
       const std::size_t bf = first + std::min(span, b * block);
       const std::size_t bl = first + std::min(span, (b + 1) * block);
       if (bf == bl) {
@@ -961,9 +978,12 @@ template <> struct CompetitorTraits<::Eigen::ThreadPool> {
       participantCount = 1;
     }
     const std::size_t span = last - first;
-    const std::size_t block = (span + participantCount - 1) / participantCount;
+    //;
+    // Eigen's NonBlockingThreadPool runs whichever worker is free.
+    const std::size_t blocks = participantCount;
+    const std::size_t block = (span + blocks - 1) / blocks;
     std::vector<std::pair<std::size_t, std::size_t>> ranges;
-    for (std::size_t b = 0; b < participantCount; ++b) {
+    for (std::size_t b = 0; b < blocks; ++b) {
       const std::size_t bf = first + std::min(span, b * block);
       const std::size_t bl = first + std::min(span, (b + 1) * block);
       if (bf == bl) {
@@ -1079,16 +1099,27 @@ template <> struct CompetitorTraits<OpenMpRunner> {
     }
   }
 
-  /// Range-partitioned `parallel for` with static schedule.
+  /// chunk derivation; `schedule(dynamic, 1)` over the block index lets fast
+  /// libomp workers pull additional blocks past their static share when one
+  /// rank straggles.
   template <class Fn>
   static void parallelFor(OpenMpRunner &runner, std::size_t first, std::size_t last,
-                          std::size_t /*grain*/, Fn fn) {
+                          std::size_t /*participantCount*/, Fn fn) {
+    if (last <= first) {
+      return;
+    }
     const int threads = static_cast<int>(runner.threads);
-    const auto firstSigned = static_cast<std::ptrdiff_t>(first);
-    const auto lastSigned = static_cast<std::ptrdiff_t>(last);
-#pragma omp parallel for num_threads(threads) schedule(static)
-    for (std::ptrdiff_t i = firstSigned; i < lastSigned; ++i) {
-      fn(static_cast<std::size_t>(i), static_cast<std::size_t>(i + 1));
+    const std::size_t span = last - first;
+    const std::size_t blocks = static_cast<std::size_t>(threads);
+    const std::size_t block = (span + blocks - 1U) / blocks;
+    const auto blocksSigned = static_cast<std::ptrdiff_t>(blocks);
+#pragma omp parallel for num_threads(threads) schedule(dynamic, 1)
+    for (std::ptrdiff_t b = 0; b < blocksSigned; ++b) {
+      const std::size_t lo = first + std::min(span, static_cast<std::size_t>(b) * block);
+      const std::size_t hi = first + std::min(span, (static_cast<std::size_t>(b) + 1U) * block);
+      if (lo < hi) {
+        fn(lo, hi);
+      }
     }
   }
 
