@@ -292,9 +292,10 @@ template <> struct MatmulDispatch<OpenMpRunner> {
 /// n              Square dimension; matrices are `N x N` row-major.
 /// cal            Calibration constant for converting cycles to ns.
 /// A populated `BenchRow` ready for the comparison table.
-template <class PoolT>
-[[nodiscard]] BenchRow measureMatmul(std::size_t participants, std::size_t n,
-                                     const CyclesPerNanosecond &cal) {
+template <class PoolT, class Dispatch>
+[[nodiscard]] BenchRow measureMatmulWith(const char *displayName, std::size_t participants,
+                                          std::size_t n, const CyclesPerNanosecond &cal,
+                                          Dispatch dispatch) {
   using Traits = CompetitorTraits<PoolT>;
   auto pool = Traits::make(participants);
 
@@ -303,11 +304,6 @@ template <class PoolT>
   AlignedFloatBuffer bBuf = allocateAlignedFloats(elems);
   AlignedFloatBuffer cBuf = allocateAlignedFloats(elems);
 
-  // Parallel first-touch init through the same dispatch path the timed
-  // matmul uses. Each pool's worker assignment owns the rows it later
-  // computes on, so memory pages first-fault on the worker's NUMA node
-  // (CCD-local on AMD Zen multi-CCD). Symmetric across pools: the same
-  // partition shape that times the matmul also seeds the buffers.
   float *aMut = aBuf.get();
   float *bMut = bBuf.get();
   float *cMut = cBuf.get();
@@ -321,7 +317,7 @@ template <class PoolT>
       }
     }
   };
-  MatmulDispatch<PoolT>::run(*pool, n, participants, fillBody);
+  dispatch(*pool, n, participants, fillBody);
 
   const float *aBase = aBuf.get();
   const float *bBase = bBuf.get();
@@ -332,24 +328,46 @@ template <class PoolT>
   };
 
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
-    MatmulDispatch<PoolT>::run(*pool, n, participants, body);
+    dispatch(*pool, n, participants, body);
   }
 
   std::vector<double> samples;
   samples.reserve(kIterations);
   for (std::size_t i = 0; i < kIterations; ++i) {
     const std::uint64_t startCycles = readCyclesStart();
-    MatmulDispatch<PoolT>::run(*pool, n, participants, body);
+    dispatch(*pool, n, participants, body);
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
   }
 
-  // Touch the result so the optimizer keeps the kernel.
   std::atomic_signal_fence(std::memory_order_seq_cst);
   volatile float sink = cBase[0] + cBase[elems - 1];
   (void)sink;
 
-  return finalizeRow(Traits::name, samples);
+  return finalizeRow(displayName, samples);
+}
+
+template <class PoolT>
+[[nodiscard]] BenchRow measureMatmul(std::size_t participants, std::size_t n,
+                                     const CyclesPerNanosecond &cal) {
+  using Traits = CompetitorTraits<PoolT>;
+  return measureMatmulWith<PoolT>(
+      Traits::name, participants, n, cal,
+      [](PoolT &pool, std::size_t nn, std::size_t p, auto fn) {
+        MatmulDispatch<PoolT>::run(pool, nn, p, fn);
+      });
+}
+
+template <class HintsT>
+[[nodiscard]] BenchRow measureCitorMatmulWithHint(const char *displayName,
+                                                   std::size_t participants, std::size_t n,
+                                                   const CyclesPerNanosecond &cal) {
+  return measureMatmulWith<citor::ThreadPool>(
+      displayName, participants, n, cal,
+      [](citor::ThreadPool &pool, std::size_t nn, std::size_t /*p*/, auto fn) {
+        pool.parallelFor<HintsT>(std::size_t{0}, nn,
+                                  [&fn](std::size_t lo, std::size_t hi) { fn(lo, hi); });
+      });
 }
 
 /// One square-matmul cell in the sweep.
@@ -373,7 +391,10 @@ BenchTable buildTable(std::size_t participants, MatmulCell cell, const CyclesPer
   BenchTable table;
   table.workload = std::string{"matmul_j16_"} + cell.suffix;
 
-  table.rows.push_back(measureMatmul<citor::ThreadPool>(participants, cell.n, cal));
+  table.rows.push_back(measureCitorMatmulWithHint<citor::StaticHints>(
+      "citor::ThreadPool[Static]", participants, cell.n, cal));
+  table.rows.push_back(measureCitorMatmulWithHint<citor::DynamicHints>(
+      "citor::ThreadPool[Dynamic]", participants, cell.n, cal));
   table.rows.push_back(measureMatmul<BS::light_thread_pool>(participants, cell.n, cal));
   table.rows.push_back(measureMatmul<dp::thread_pool<>>(participants, cell.n, cal));
   table.rows.push_back(

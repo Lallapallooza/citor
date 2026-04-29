@@ -66,7 +66,7 @@ inline void spinForNs(double targetNs, const CyclesPerNanosecond &cal) noexcept 
 /// and reports the average per-dispatch cycle delta. Two effects tighten the
 /// sample distribution:
 ///
-/// 1. The fixed per-bracket `__rdtscp` overhead amortizes
+/// 1. The fixed per-bracket `__rdtscp` overhead (~25 ns on the host) amortizes
 ///    across the batch, so on body=0 / body=100 ns cells a sub-microsecond
 ///    dispatch is no longer competing with bracket noise of comparable size.
 /// 2. Short OS jitter events (1 kHz timer tick, IRQ delivery, soft-IRQ
@@ -103,9 +103,10 @@ inline void spinForNs(double targetNs, const CyclesPerNanosecond &cal) noexcept 
 /// bodyNs         Per-block body cost in wall-time nanoseconds.
 /// cal            Calibration constant for converting cycles to ns.
 /// A populated `BenchRow` ready for the comparison table.
-template <class PoolT>
-[[nodiscard]] BenchRow measureGranularity(std::size_t participants, double bodyNs,
-                                          const CyclesPerNanosecond &cal) {
+template <class PoolT, class Dispatch>
+[[nodiscard]] BenchRow measureGranularityWith(const char *displayName, std::size_t participants,
+                                               double bodyNs, const CyclesPerNanosecond &cal,
+                                               Dispatch dispatch) {
   using Traits = CompetitorTraits<PoolT>;
   auto pool = Traits::make(participants);
   [[maybe_unused]] MeasurementScope<PoolT> measurementScope(*pool);
@@ -116,17 +117,11 @@ template <class PoolT>
     sink.fetch_add(hi - lo, std::memory_order_relaxed);
   };
 
-  // Time-budget collection with body-cost-driven inner batching: each sample times a tight
-  // loop of `batchSize` dispatches and reports the average per-dispatch cycle delta. The
-  // batch amortizes the bracket's `__rdtscp` overhead and smooths short OS-jitter spikes
-  // (timer ticks, IRQ delivery) so the resulting RSD reflects steady-state dispatch cost
-  // rather than the bimodal envelope a single-dispatch bracket exposes on sub-microsecond
-  // cells.
   const std::size_t batchSize = pickBatchSize(bodyNs);
   auto samples = runUntilBudget(cal, kDefaultSampleBudget, [&]() noexcept {
     const std::uint64_t startCycles = readCyclesStart();
     for (std::size_t k = 0; k < batchSize; ++k) {
-      Traits::submitBlocksAndWait(*pool, 0, participants, body);
+      dispatch(*pool, std::size_t{0}, participants, body);
     }
     const std::uint64_t endCycles = readCyclesEnd();
     return (endCycles - startCycles) / batchSize;
@@ -134,7 +129,29 @@ template <class PoolT>
 
   (void)sink.load(std::memory_order_relaxed);
 
-  return finalizeRow(Traits::name, samples);
+  return finalizeRow(displayName, samples);
+}
+
+template <class PoolT>
+[[nodiscard]] BenchRow measureGranularity(std::size_t participants, double bodyNs,
+                                          const CyclesPerNanosecond &cal) {
+  using Traits = CompetitorTraits<PoolT>;
+  return measureGranularityWith<PoolT>(
+      Traits::name, participants, bodyNs, cal,
+      [](PoolT &pool, std::size_t first, std::size_t last, auto fn) {
+        Traits::submitBlocksAndWait(pool, first, last, fn);
+      });
+}
+
+template <class HintsT>
+[[nodiscard]] BenchRow measureCitorGranularityWithHint(const char *displayName,
+                                                       std::size_t participants, double bodyNs,
+                                                       const CyclesPerNanosecond &cal) {
+  return measureGranularityWith<citor::ThreadPool>(
+      displayName, participants, bodyNs, cal,
+      [](citor::ThreadPool &pool, std::size_t first, std::size_t last, auto fn) {
+        pool.parallelFor<HintsT>(first, last, fn);
+      });
 }
 
 /// One body-cost decade in the METG sweep.
@@ -165,7 +182,10 @@ BenchTable buildTable(std::size_t participants, const char *jSuffix, BodyCell ce
   BenchTable table;
   table.workload = std::string{"granularity_"} + jSuffix + "_" + cell.suffix;
 
-  table.rows.push_back(measureGranularity<citor::ThreadPool>(participants, cell.bodyNs, cal));
+  table.rows.push_back(measureCitorGranularityWithHint<citor::StaticHints>(
+      "citor::ThreadPool[Static]", participants, cell.bodyNs, cal));
+  table.rows.push_back(measureCitorGranularityWithHint<citor::DynamicHints>(
+      "citor::ThreadPool[Dynamic]", participants, cell.bodyNs, cal));
   table.rows.push_back(measureGranularity<BS::light_thread_pool>(participants, cell.bodyNs, cal));
   table.rows.push_back(measureGranularity<dp::thread_pool<>>(participants, cell.bodyNs, cal));
   table.rows.push_back(

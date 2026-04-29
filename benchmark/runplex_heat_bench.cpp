@@ -120,9 +120,10 @@ inline void jacobiRowBlock(std::size_t rowFirst, std::size_t rowLast, std::size_
 /// 4 future-pool shims (BS, dp, task, riften) configured in
 /// `competitor_traits.h`. Riften's `parallelFor` shim takes a participant
 /// count argument so its overload signature differs; we wrap that case.
-template <class PoolT>
-[[nodiscard]] BenchRow measureHeat(std::size_t participants, std::size_t n,
-                                   const CyclesPerNanosecond &cal, double referenceChecksum) {
+template <class PoolT, class Dispatch>
+[[nodiscard]] BenchRow measureHeatWith(const char *displayName, std::size_t participants,
+                                        std::size_t n, const CyclesPerNanosecond &cal,
+                                        double referenceChecksum, Dispatch dispatch) {
   using Traits = CompetitorTraits<PoolT>;
   auto pool = Traits::make(participants);
 
@@ -139,30 +140,15 @@ template <class PoolT>
       const double *uIn = u.get();
       double *uOut = uNext.get();
       const auto body = [uIn, uOut, n](std::size_t lo, std::size_t hi) noexcept {
-        // Interior rows only; clip [lo, hi) to [1, n-1).
         const std::size_t rLo = std::max<std::size_t>(lo, 1U);
         const std::size_t rHi = hi >= n - 1U ? n - 1U : hi;
         if (rLo < rHi) {
           jacobiRowBlock(rLo, rHi, n, uIn, uOut);
         }
       };
-      // Dispatch over [1, n-1) rows. The trait's `parallelFor` for the
-      // future-pool shims (BS/dp/task/riften) takes a participant count;
-      // for native-primitive pools (citor/TBB/Taskflow/Eigen/OpenMP) the
-      // last arg has different semantics (grain/participant/ignored). The
-      // bench passes `participants` uniformly so each shim's documented
-      // emulation kicks in.
-      if constexpr (std::is_same_v<PoolT, riften::Thiefpool>) {
-        // riften's `parallelFor` shim takes participantCount as a fourth arg
-        // because riften has no public worker-count query; the caller
-        // supplies the same value used in `make()`.
-        Traits::parallelFor(*pool, std::size_t{1}, n - 1U, participants, body);
-      } else {
-        Traits::parallelFor(*pool, std::size_t{1}, n - 1U, participants, body);
-      }
+      dispatch(*pool, std::size_t{1}, n - 1U, participants, body);
       std::swap(u, uNext);
     }
-    // Checksum.
     double sum = 0.0;
     for (std::size_t i = 1; i < n - 1U; ++i) {
       for (std::size_t j = 1; j < n - 1U; ++j) {
@@ -172,13 +158,8 @@ template <class PoolT>
     return sum;
   };
 
-  // Correctness gate: warmup-and-validate before the timing window opens.
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     const double sum = runOnce();
-    // Bit-identical comparison would require the row partition to be
-    // associative-commutative-identical to the sequential traversal; for
-    // this 5-point kernel each cell update is fully independent within a
-    // timestep so the result IS bit-identical to the sequential run.
     CITOR_ALWAYS_ASSERT(sum == referenceChecksum);
   }
 
@@ -192,7 +173,28 @@ template <class PoolT>
     CITOR_ALWAYS_ASSERT(sum == referenceChecksum);
   }
 
-  return finalizeRow(Traits::name, samples);
+  return finalizeRow(displayName, samples);
+}
+
+template <class PoolT>
+[[nodiscard]] BenchRow measureHeat(std::size_t participants, std::size_t n,
+                                   const CyclesPerNanosecond &cal, double referenceChecksum) {
+  using Traits = CompetitorTraits<PoolT>;
+  return measureHeatWith<PoolT>(
+      Traits::name, participants, n, cal, referenceChecksum,
+      [](PoolT &pool, std::size_t first, std::size_t last, std::size_t p, auto fn) {
+        Traits::parallelFor(pool, first, last, p, fn);
+      });
+}
+
+template <class HintsT>
+[[nodiscard]] BenchRow measureCitorHeatWithHint(const char *displayName, std::size_t participants,
+                                                 std::size_t n, const CyclesPerNanosecond &cal,
+                                                 double referenceChecksum) {
+  return measureHeatWith<citor::ThreadPool>(
+      displayName, participants, n, cal, referenceChecksum,
+      [](citor::ThreadPool &pool, std::size_t first, std::size_t last, std::size_t /*p*/,
+         auto fn) { pool.parallelFor<HintsT>(first, last, fn); });
 }
 
 struct HeatCell {
@@ -213,7 +215,10 @@ BenchTable buildTable(std::size_t participants, HeatCell cell, const CyclesPerNa
   // across pool rows.
   const double reference = seqJacobi(cell.n, kTimesteps, /*seed=*/0xC1701U);
 
-  table.rows.push_back(measureHeat<citor::ThreadPool>(participants, cell.n, cal, reference));
+  table.rows.push_back(measureCitorHeatWithHint<citor::StaticHints>(
+      "citor::ThreadPool[Static]", participants, cell.n, cal, reference));
+  table.rows.push_back(measureCitorHeatWithHint<citor::DynamicHints>(
+      "citor::ThreadPool[Dynamic]", participants, cell.n, cal, reference));
   table.rows.push_back(measureHeat<BS::light_thread_pool>(participants, cell.n, cal, reference));
   table.rows.push_back(measureHeat<dp::thread_pool<>>(participants, cell.n, cal, reference));
   table.rows.push_back(

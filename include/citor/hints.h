@@ -156,6 +156,28 @@ struct HintsDefaults {
   static constexpr bool cancellationChecks = true;
 };
 
+/// Explicit `Balance::StaticUniform` preset on top of `HintsDefaults`.
+///
+/// Use when the caller wants the deterministic rank-strided block assignment without
+/// inheriting the `DynamicChunked` default. Useful for callers whose body has zero
+/// cost variance (every block does identical work) and that benefit from
+/// cold-collapse's typed monomorphized fast path. Reduce-side presets that need
+/// deterministic chunk-id-to-rank mapping (`KahanReduceHints`, `FixedBlockReduceHints`)
+/// inherit through this preset rather than overriding the field individually.
+struct StaticHints : HintsDefaults {
+  static constexpr Balance balance = Balance::StaticUniform;
+};
+
+/// Explicit `Balance::DynamicChunked` preset on top of `HintsDefaults`.
+///
+/// Sibling of `StaticHints`. Equivalent to `HintsDefaults` today (the default balance is
+/// already DynamicChunked) but provides a stable name for callers that want the
+/// straggler-tolerant atomic-counter scheduling regardless of how `HintsDefaults` may
+/// be retuned in the future.
+struct DynamicHints : HintsDefaults {
+  static constexpr Balance balance = Balance::DynamicChunked;
+};
+
 /// Latency-biased preset: dynamic-chunked balance with `Priority::Latency`. Good first
 ///        cut for short jobs that want fast first response over peak throughput.
 struct LatencyHints : HintsDefaults {

@@ -75,8 +75,9 @@ constexpr std::chrono::milliseconds kCoolOff{30};
 /// participants Total worker count to construct the pool with.
 /// cal     Calibration constant for converting cycles to ns.
 /// A populated `BenchRow` ready for the comparison table.
-template <class PoolT>
-[[nodiscard]] BenchRow measureColdFanout(std::size_t participants, const CyclesPerNanosecond &cal) {
+template <class PoolT, class Dispatch>
+[[nodiscard]] BenchRow measureColdFanoutWith(const char *displayName, std::size_t participants,
+                                              const CyclesPerNanosecond &cal, Dispatch dispatch) {
   using Traits = CompetitorTraits<PoolT>;
   auto pool = Traits::make(participants);
 
@@ -87,7 +88,7 @@ template <class PoolT>
 
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     std::this_thread::sleep_for(kCoolOff);
-    Traits::submitBlocksAndWait(*pool, 0, participants, body);
+    dispatch(*pool, 0, participants, body);
   }
 
   std::vector<double> samples;
@@ -95,14 +96,36 @@ template <class PoolT>
   for (std::size_t i = 0; i < kIterations; ++i) {
     std::this_thread::sleep_for(kCoolOff);
     const std::uint64_t startCycles = readCyclesStart();
-    Traits::submitBlocksAndWait(*pool, 0, participants, body);
+    dispatch(*pool, 0, participants, body);
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
   }
 
   (void)sink.load(std::memory_order_relaxed);
 
-  return finalizeRow(Traits::name, samples);
+  return finalizeRow(displayName, samples);
+}
+
+template <class PoolT>
+[[nodiscard]] BenchRow measureColdFanout(std::size_t participants,
+                                          const CyclesPerNanosecond &cal) {
+  using Traits = CompetitorTraits<PoolT>;
+  return measureColdFanoutWith<PoolT>(
+      Traits::name, participants, cal,
+      [](PoolT &pool, std::size_t first, std::size_t last, auto fn) {
+        Traits::submitBlocksAndWait(pool, first, last, fn);
+      });
+}
+
+template <class HintsT>
+[[nodiscard]] BenchRow measureCitorColdFanoutWithHint(const char *displayName,
+                                                      std::size_t participants,
+                                                      const CyclesPerNanosecond &cal) {
+  return measureColdFanoutWith<citor::ThreadPool>(
+      displayName, participants, cal,
+      [](citor::ThreadPool &pool, std::size_t first, std::size_t last, auto fn) {
+        pool.parallelFor<HintsT>(first, last, fn);
+      });
 }
 
 /// Build a cold-path comparison table for a single `j` value.
@@ -116,7 +139,10 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
   BenchTable table;
   table.workload = std::string{"cold_fan_out_"} + suffix;
 
-  table.rows.push_back(measureColdFanout<citor::ThreadPool>(participants, cal));
+  table.rows.push_back(measureCitorColdFanoutWithHint<citor::StaticHints>(
+      "citor::ThreadPool[Static]", participants, cal));
+  table.rows.push_back(measureCitorColdFanoutWithHint<citor::DynamicHints>(
+      "citor::ThreadPool[Dynamic]", participants, cal));
   table.rows.push_back(measureColdFanout<BS::light_thread_pool>(participants, cal));
   table.rows.push_back(measureColdFanout<dp::thread_pool<>>(participants, cal));
   table.rows.push_back(measureColdFanout<::task_thread_pool::task_thread_pool>(participants, cal));

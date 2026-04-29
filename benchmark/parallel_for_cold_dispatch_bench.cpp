@@ -116,9 +116,10 @@ private:
 /// cal     Calibration constant for converting cycles to ns.
 /// A populated `BenchRow` with tailNs filled when the global
 ///                 `tailPercentilesEnabled()` flag is set.
-template <class PoolT>
-[[nodiscard]] BenchRow measureColdDispatch(std::size_t participants,
-                                           const CyclesPerNanosecond &cal) {
+template <class PoolT, class Dispatch>
+[[nodiscard]] BenchRow measureColdDispatchWith(const char *displayName, std::size_t participants,
+                                                const CyclesPerNanosecond &cal,
+                                                Dispatch dispatch) {
   using Traits = CompetitorTraits<PoolT>;
   auto pool = Traits::make(participants);
 
@@ -134,7 +135,7 @@ template <class PoolT>
   // workers have been spawned at least once before the timing window opens.
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     std::this_thread::sleep_for(kCoolOff);
-    Traits::submitBlocksAndWait(*pool, 0, participants, body);
+    dispatch(*pool, 0, participants, body);
   }
 
   // Correctness gate: the warmup alone must have driven the sink to
@@ -172,7 +173,7 @@ template <class PoolT>
                       static_cast<std::uint64_t>(kWarmupIterations + kIterations) *
                           static_cast<std::uint64_t>(participants));
 
-  BenchRow row = finalizeRow(Traits::name, samples);
+  BenchRow row = finalizeRow(displayName, samples);
   if (tailPercentilesEnabled()) {
     const std::int64_t p25Ns = ::hdr_value_at_percentile(hist.get(), 25.0);
     const std::int64_t p50Ns = ::hdr_value_at_percentile(hist.get(), 50.0);
@@ -186,13 +187,44 @@ template <class PoolT>
   return row;
 }
 
+/// Drives a peer pool through its `submitBlocksAndWait` shim with the existing
+/// trait-supplied dispatch. Used for every non-citor row.
+template <class PoolT>
+[[nodiscard]] BenchRow measureColdDispatch(std::size_t participants,
+                                            const CyclesPerNanosecond &cal) {
+  using Traits = CompetitorTraits<PoolT>;
+  return measureColdDispatchWith<PoolT>(
+      Traits::name, participants, cal,
+      [](PoolT &pool, std::size_t first, std::size_t last, auto fn) {
+        Traits::submitBlocksAndWait(pool, first, last, fn);
+      });
+}
+
+/// Citor's dispatch-floor row driven by an explicit hint type so the bench can
+/// surface Static-vs-Dynamic balance side-by-side. The hint must inherit from
+/// `EmptyFanoutHints` (chunk=1, no cancellation polls) so the per-block cost is
+/// identical across the two rows; only the balance differs.
+template <class HintsT>
+[[nodiscard]] BenchRow measureCitorColdDispatchWithHint(const char *displayName,
+                                                        std::size_t participants,
+                                                        const CyclesPerNanosecond &cal) {
+  return measureColdDispatchWith<citor::ThreadPool>(
+      displayName, participants, cal,
+      [](citor::ThreadPool &pool, std::size_t first, std::size_t last, auto fn) {
+        pool.parallelFor<HintsT>(first, last, fn);
+      });
+}
+
 /// Build a cold-dispatch comparison table for a single `j` value.
 BenchTable buildTable(std::size_t participants, const char *suffix,
                       const CyclesPerNanosecond &cal) {
   BenchTable table;
   table.workload = std::string{"parallel_for_cold_dispatch_"} + suffix;
 
-  table.rows.push_back(measureColdDispatch<citor::ThreadPool>(participants, cal));
+  table.rows.push_back(measureCitorColdDispatchWithHint<citor::StaticHints>(
+      "citor::ThreadPool[Static]", participants, cal));
+  table.rows.push_back(measureCitorColdDispatchWithHint<citor::DynamicHints>(
+      "citor::ThreadPool[Dynamic]", participants, cal));
   table.rows.push_back(measureColdDispatch<BS::light_thread_pool>(participants, cal));
   table.rows.push_back(measureColdDispatch<dp::thread_pool<>>(participants, cal));
   table.rows.push_back(

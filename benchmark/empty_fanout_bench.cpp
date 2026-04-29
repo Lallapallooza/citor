@@ -31,10 +31,10 @@ namespace {
 /// p25 of per-dispatch ns across `kIterations` brackets.
 constexpr std::size_t kIterations = 2'000;
 
-/// Inner-batch size. Empty fan-out dispatch is several orders of magnitude across the
+/// Inner-batch size. Empty fan-out dispatch is ~150 ns - 15 us across the
 /// surveyed pools; batching 64 dispatches per bracket pushes the slowest pool
 /// safely above the timer-tick floor and amortizes the `__rdtscp` overhead
-///  below the noise floor for the fastest pool.
+/// (~25 ns) below the noise floor for the fastest pool.
 constexpr std::size_t kBatchSize = 64;
 
 /// Warmup iterations dropped from the sample window. Hot dispatch numbers are
@@ -56,28 +56,20 @@ constexpr std::size_t kWarmupIterations = 50;
 /// participants Total worker count to construct the pool with.
 /// cal     Calibration constant for converting cycles to ns.
 /// A populated `BenchRow` ready for the comparison table.
-template <class PoolT>
-[[nodiscard]] BenchRow measureEmptyFanout(std::size_t participants,
-                                          const CyclesPerNanosecond &cal) {
+template <class PoolT, class Dispatch>
+[[nodiscard]] BenchRow measureEmptyFanoutWith(const char *displayName, std::size_t participants,
+                                               const CyclesPerNanosecond &cal, Dispatch dispatch) {
   using Traits = CompetitorTraits<PoolT>;
   auto pool = Traits::make(participants);
 
-  // Per-block sink prevents body elision under LTO. The body increments the
-  // sink for each iteration in its slot's range; the dispatcher hands every
-  // pool the same `[0, participants)` work shape so no pool's partitioner can
-  // collapse the call into a single inline iteration.
   std::atomic<std::uint64_t> sink{0};
   const auto body = [&sink](std::size_t lo, std::size_t hi) noexcept {
     sink.fetch_add(hi - lo, std::memory_order_relaxed);
   };
 
-  // Warmup: each pool may amortize first-time setup across the first handful
-  // of dispatches (worker spin-up, queue allocation, futex-counter
-  // observation). The warmup runs `kBatchSize` dispatches per iteration to
-  // mirror the steady-state shape.
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     for (std::size_t k = 0; k < kBatchSize; ++k) {
-      Traits::submitBlocksAndWait(*pool, 0, participants, body);
+      dispatch(*pool, 0, participants, body);
     }
   }
 
@@ -86,16 +78,37 @@ template <class PoolT>
   for (std::size_t i = 0; i < kIterations; ++i) {
     const std::uint64_t startCycles = readCyclesStart();
     for (std::size_t k = 0; k < kBatchSize; ++k) {
-      Traits::submitBlocksAndWait(*pool, 0, participants, body);
+      dispatch(*pool, 0, participants, body);
     }
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal) / static_cast<double>(kBatchSize));
   }
 
-  // Touch the sink so the optimizer cannot prove the bench is dead code.
   (void)sink.load(std::memory_order_relaxed);
 
-  return finalizeRow(Traits::name, samples);
+  return finalizeRow(displayName, samples);
+}
+
+template <class PoolT>
+[[nodiscard]] BenchRow measureEmptyFanout(std::size_t participants,
+                                          const CyclesPerNanosecond &cal) {
+  using Traits = CompetitorTraits<PoolT>;
+  return measureEmptyFanoutWith<PoolT>(
+      Traits::name, participants, cal,
+      [](PoolT &pool, std::size_t first, std::size_t last, auto fn) {
+        Traits::submitBlocksAndWait(pool, first, last, fn);
+      });
+}
+
+template <class HintsT>
+[[nodiscard]] BenchRow measureCitorEmptyFanoutWithHint(const char *displayName,
+                                                       std::size_t participants,
+                                                       const CyclesPerNanosecond &cal) {
+  return measureEmptyFanoutWith<citor::ThreadPool>(
+      displayName, participants, cal,
+      [](citor::ThreadPool &pool, std::size_t first, std::size_t last, auto fn) {
+        pool.parallelFor<HintsT>(first, last, fn);
+      });
 }
 
 /// Build an empty-fan-out comparison table for a single `j` value.
@@ -114,7 +127,10 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
   BenchTable table;
   table.workload = std::string{"empty_fan_out_"} + suffix;
 
-  table.rows.push_back(measureEmptyFanout<citor::ThreadPool>(participants, cal));
+  table.rows.push_back(measureCitorEmptyFanoutWithHint<citor::StaticHints>(
+      "citor::ThreadPool[Static]", participants, cal));
+  table.rows.push_back(measureCitorEmptyFanoutWithHint<citor::DynamicHints>(
+      "citor::ThreadPool[Dynamic]", participants, cal));
   table.rows.push_back(measureEmptyFanout<BS::light_thread_pool>(participants, cal));
   table.rows.push_back(measureEmptyFanout<dp::thread_pool<>>(participants, cal));
   table.rows.push_back(measureEmptyFanout<::task_thread_pool::task_thread_pool>(participants, cal));
@@ -136,7 +152,7 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
 }
 
 /// Bench runner for the j=16 hot variant; the headline workload at the
-/// a representative dominant workload shape on multi-CCD AMD chips.
+/// a representative dominant workload shape on AMD Zen 5.
 BenchTable runEmptyFanoutJ16Hot(const CyclesPerNanosecond &cal) {
   return buildTable(/*participants=*/16, "j16_hot", cal);
 }

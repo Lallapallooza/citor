@@ -178,6 +178,23 @@ template <class RunFn>
 // citor pool -- native parallelFor, default Balance::StaticUniform
 // =============================================================================
 
+template <class HintsT>
+[[nodiscard]] BenchRow measureCitorWithHint(const char *displayName, std::size_t participants,
+                                             const ParetoData &d, const CyclesPerNanosecond &cal) {
+  ThreadPool pool(participants);
+  return measureLoop(
+      displayName, cal,
+      [&] {
+        std::atomic<std::int64_t> sink{0};
+        pool.parallelFor<HintsT>(std::size_t{0}, kN,
+                                  [&d, &cal, &sink](std::size_t lo, std::size_t hi) {
+                                    paretoBlockBody(d, lo, hi, cal, sink);
+                                  });
+        return sink.load(std::memory_order_relaxed);
+      },
+      d.totalCostNs);
+}
+
 [[nodiscard]] BenchRow measureCitor(std::size_t participants, const ParetoData &d,
                                     const CyclesPerNanosecond &cal) {
   ThreadPool pool(participants);
@@ -390,7 +407,10 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
   BenchTable table;
   table.workload = std::string{"pareto_body_for_"} + suffix;
   ParetoData d = buildData();
-  table.rows.push_back(measureCitor(participants, d, cal));
+  table.rows.push_back(measureCitorWithHint<citor::StaticHints>(
+      "citor::ThreadPool[Static]", participants, d, cal));
+  table.rows.push_back(measureCitorWithHint<citor::DynamicHints>(
+      "citor::ThreadPool[Dynamic]", participants, d, cal));
   table.rows.push_back(measureBs(participants, d, cal));
   table.rows.push_back(measureDp(participants, d, cal));
   table.rows.push_back(measureTask(participants, d, cal));
