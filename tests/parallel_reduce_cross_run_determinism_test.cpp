@@ -7,23 +7,11 @@
 #include <vector>
 
 #include "citor/hints.h"
-#include "citor/example_hints.h"
 #include "citor/thread_pool.h"
 
+using citor::HintsDefaults;
 using citor::KahanReduceHints;
-using citor::Balance;
-using citor::Determinism;
-using citor::Priority;
 using citor::ThreadPool;
-
-struct CrossRunFixedHints {
-  static constexpr Balance balance = Balance::StaticUniform;
-  static constexpr Determinism determinism = Determinism::FixedBlockOrder;
-  static constexpr Priority priority = Priority::Throughput;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-};
 
 namespace {
 
@@ -43,7 +31,7 @@ std::vector<double> seededData(std::size_t n, std::uint64_t seed) {
 
 // Drive one parallelReduce<FixedBlockHints> over `data`. The combine identity is `+`.
 double driveFixedBlockReduce(ThreadPool &pool, const std::vector<double> &data) {
-  return pool.parallelReduce<CrossRunFixedHints>(
+  return pool.parallelReduce<HintsDefaults>(
       0, data.size(), 0.0,
       [&data](std::size_t lo, std::size_t hi) {
         double s = 0.0;

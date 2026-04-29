@@ -62,18 +62,6 @@
 #include <omp.h>
 #endif
 
-// Hint preset at TU scope so clang-tidy treats every static-constexpr member
-// as a public field of a named type rather than an unused constant.
-struct ReduceParetoHints {
-  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
-  static constexpr citor::Determinism determinism = citor::Determinism::FixedBlockOrder;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-};
-
 namespace citor::bench {
 namespace {
 
@@ -85,10 +73,10 @@ constexpr std::size_t kN = 1'000'000;
 /// outcomes contribute 80 % of the mass.
 constexpr double kAlpha = 1.16;
 
-/// Pareto minimum (xm) chosen so the distribution's median lands on ~1 us.
+/// Pareto minimum (xm) chosen so the distribution's median is tuned to a microsecond.
 /// Median = xm * 2^(1/alpha); solving for xm at median = 1000 ns gives
 /// xm ~ 549 ns. Rounded down to keep the smallest spin above the TSC noise
-/// floor of ~25 ns.
+/// noise floor.
 constexpr double kParetoXmNs = 540.0;
 
 /// Cap the per-iteration spin so a single sample's tail does not dominate the
@@ -200,7 +188,7 @@ template <class RunFn>
   return measureLoop(
       "citor::ThreadPool::parallelReduce", cal,
       [&] {
-        return pool.parallelReduce<ReduceParetoHints>(
+        return pool.parallelReduce<citor::HintsDefaults>(
             std::size_t{0}, kN, std::int64_t{0},
             [&d, &cal](std::size_t lo, std::size_t hi) { return paretoBlockSum(d, lo, hi, cal); },
             std::plus<std::int64_t>{});

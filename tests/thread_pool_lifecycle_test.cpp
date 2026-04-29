@@ -11,39 +11,22 @@
 #include <sys/time.h>
 #endif
 
+#include "citor/hints.h"
 #include "citor/thread_pool.h"
 
+using citor::HintsDefaults;
 using citor::ThreadPool;
 
 namespace {
 
-struct LifecycleAutoPinHints {
-  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
+struct LifecycleAutoPinHints : HintsDefaults {
   // chunk == 0 is the gate that fires auto-pin on the producer.
-  static constexpr std::size_t chunk = 0;
   static constexpr bool cancellationChecks = false;
 };
 
-struct LifecycleHotHints {
-  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
-  [[maybe_unused]] static constexpr citor::Determinism determinism =
-      citor::Determinism::FixedBlockOrder;
-  [[maybe_unused]] static constexpr citor::Affinity affinity = citor::Affinity::PhysicalCores;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  [[maybe_unused]] static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
-  static constexpr double estimatedItemNs = 0.0;
-  [[maybe_unused]] static constexpr double minTaskUs = 0.0;
+struct LifecycleHotHints : HintsDefaults {
   static constexpr std::size_t chunk = 1;
-  [[maybe_unused]] static constexpr bool tlsRequired = false;
-  [[maybe_unused]] static constexpr bool allowProducer = true;
-  [[maybe_unused]] static constexpr bool allowWorkerSteal = false;
-  [[maybe_unused]] static constexpr bool allowNestedParallelism = false;
-  [[maybe_unused]] static constexpr bool fpDeterministicTree = true;
-  [[maybe_unused]] static constexpr bool cancellationChecks = false;
-  [[maybe_unused]] static constexpr bool pipelineSameChunk = false;
+  static constexpr bool cancellationChecks = false;
 };
 
 /// Read the calling process's affinity mask; returns the count of allowed logical CPUs.

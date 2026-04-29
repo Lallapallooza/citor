@@ -54,13 +54,13 @@ namespace citor::bench {
 namespace {
 
 /// Element count for the `parallelFor` body. 64 MiB of `float` (16'777'216
-/// elements) sits well above any single CCD's L3 capacity on Zen-class hosts
+/// elements) sits well above any single CCD's L3 capacity on typical hosts
 /// (32 MiB or 64 MiB per CCD), so the body genuinely traverses DRAM-resident
 /// data and the cross-CCD coherence traffic on the dispatch path is not
 /// hidden by L3 hit rates.
 constexpr std::size_t kElementCount = 16U * 1024U * 1024U;
 
-/// Per-cell sample budget. The body takes a few milliseconds on a Zen-class
+/// Per-cell sample budget. The body takes a few milliseconds on a typical
 /// host; 30 samples keeps a row under a couple of seconds wall while still
 /// giving `finalizeRow`'s lower-quartile estimator enough samples to converge.
 constexpr std::size_t kIterations = 30;
@@ -70,15 +70,8 @@ constexpr std::size_t kWarmupIterations = 5;
 /// dispatch contract identical across rows (only the producer/arena placement
 /// changes); SplitCcd affinity is the citor default for bulk parallel-for and
 /// matches the workload's intent.
-struct CrossCcdHints {
-  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
+struct CrossCcdHints : citor::HintsDefaults {
   static constexpr citor::Affinity affinity = citor::Affinity::SplitCcd;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-  static constexpr bool tlsRequired = false;
   static constexpr bool cancellationChecks = false;
 };
 
@@ -270,7 +263,7 @@ struct CrossCcdRegistrar {
     } catch (const std::exception &) {
       // Single-CCD host: skip registration so the workload is not
       // (mis-)measured against a topology that cannot satisfy its intent.
-      // The bench output simply omits the row.
+      // The bench output omits the row.
       return;
     }
     registerWorkload({.name = "cross_ccd_parallel_for", .run = &runCrossCcd});

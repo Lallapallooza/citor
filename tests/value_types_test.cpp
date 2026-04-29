@@ -13,7 +13,6 @@
 #endif
 
 #include "citor/cancellation.h"
-#include "citor/example_hints.h"
 #include "citor/function_ref.h"
 #include "citor/hints.h"
 
@@ -30,7 +29,6 @@ using citor::FunctionRef;
 using citor::Hints;
 using citor::kCacheLine;
 using citor::makeStage;
-using citor::Partition;
 using citor::Priority;
 using citor::Stage;
 
@@ -46,15 +44,16 @@ static_assert(std::is_trivially_copyable_v<FunctionRef<void()>>,
 static_assert(std::is_trivially_destructible_v<FunctionRef<void()>>,
               "FunctionRef must be trivially destructible");
 
-// Example presets expose at minimum the `balance` and `priority` constexpr fields and route
-// through the generic `Hints` concept. Additional fields are preset-specific and not asserted
-// here; users pick a preset and tune the constants for their call site.
-static_assert(citor::BulkBalancedHints::balance == Balance::StaticUniform,
-              "BulkBalancedHints::balance must be StaticUniform at compile time");
+// Bundled presets inherit the documented HintsDefaults fields and override only what differs.
+// These static_asserts pin the surviving overrides so a future edit cannot silently change them.
+static_assert(citor::HintsDefaults::balance == Balance::StaticUniform,
+              "HintsDefaults::balance must be StaticUniform");
 static_assert(citor::KahanReduceHints::determinism == Determinism::KahanCompensated,
               "KahanReduceHints::determinism must be KahanCompensated");
-static_assert(citor::ChainBalancedHints::balance == Balance::StaticUniform,
-              "ChainBalancedHints::balance must be StaticUniform");
+static_assert(citor::LatencyHints::priority == Priority::Latency,
+              "LatencyHints::priority must be Latency");
+static_assert(citor::ChainHintsDefaults::pipelineSameChunk,
+              "ChainHintsDefaults::pipelineSameChunk must be true");
 
 // ===== Stage / ChainHints structural sanity =====
 static_assert(Stage<int (*)(std::size_t, std::size_t), BarrierKind::PerChunk>::barrier ==
@@ -103,12 +102,14 @@ TEST(ParallelFunctionRef, DefaultConstructedIsEmpty) {
   EXPECT_FALSE(static_cast<bool>(empty));
 }
 
-// Runtime check on top of the static_assert: the constexpr field should be observable.
-TEST(ParallelHints, BulkBalancedHintsBalanceIsStaticUniform) {
-  using HintsT = citor::BulkBalancedHints;
+// Runtime check on top of the static_assert: the constexpr fields should be observable.
+TEST(ParallelHints, HintsDefaultsExposesDocumentedConstants) {
+  using HintsT = citor::HintsDefaults;
   EXPECT_EQ(HintsT::balance, Balance::StaticUniform);
-  EXPECT_EQ(HintsT::affinity, Affinity::SplitCcd);
-  EXPECT_TRUE(HintsT::tlsRequired);
+  EXPECT_EQ(HintsT::determinism, Determinism::FixedBlockOrder);
+  EXPECT_EQ(HintsT::affinity, Affinity::None);
+  EXPECT_EQ(HintsT::priority, Priority::Throughput);
+  EXPECT_TRUE(HintsT::cancellationChecks);
 }
 
 // Runtime Hints POD must be default-constructible with the documented defaults.
@@ -118,12 +119,7 @@ TEST(ParallelHints, RuntimeHintsHaveDocumentedDefaults) {
   EXPECT_EQ(h.determinism, Determinism::FixedBlockOrder);
   EXPECT_EQ(h.affinity, Affinity::None);
   EXPECT_EQ(h.priority, Priority::Throughput);
-  EXPECT_EQ(h.partition, Partition::ContiguousRanges);
-  EXPECT_TRUE(h.allowProducer);
-  EXPECT_TRUE(h.fpDeterministicTree);
   EXPECT_TRUE(h.cancellationChecks);
-  EXPECT_FALSE(h.allowWorkerSteal);
-  EXPECT_FALSE(h.allowNestedParallelism);
 }
 
 // Stage helper produces a Stage<F, BarrierKind> deducing F from the lambda.
@@ -132,11 +128,11 @@ TEST(ParallelHints, StageHelperDeducesCallable) {
   EXPECT_EQ(decltype(stage)::barrier, BarrierKind::Global);
 }
 
-TEST(ParallelHints, ChainHintsDefaults) {
+TEST(ParallelHints, ChainHintsPodDefaults) {
   const ChainHints ch{};
   EXPECT_EQ(ch.balance, Balance::StaticUniform);
   EXPECT_TRUE(ch.pipelineSameChunk);
-  EXPECT_TRUE(ch.fpDeterministicTree);
+  EXPECT_TRUE(ch.cancellationChecks);
 }
 
 // CancellationToken returns false initially; after request_stop, returns true.

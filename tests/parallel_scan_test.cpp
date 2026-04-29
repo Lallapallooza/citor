@@ -18,24 +18,9 @@
 #include "citor/hints.h"
 #include "citor/thread_pool.h"
 
-using citor::Balance;
 using citor::CancellationToken;
-using citor::Determinism;
-using citor::Partition;
-using citor::Priority;
+using citor::HintsDefaults;
 using citor::ThreadPool;
-
-// Hint preset at TU scope so clang-tidy treats every static-constexpr member as a public field of
-// a named type rather than an unused constant.
-struct ScanTestHints {
-  static constexpr Balance balance = Balance::StaticUniform;
-  static constexpr Determinism determinism = Determinism::FixedBlockOrder;
-  static constexpr Priority priority = Priority::Throughput;
-  static constexpr Partition partition = Partition::ContiguousRanges;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-};
 
 namespace {
 
@@ -94,7 +79,7 @@ TEST(ParallelScan, ScanCorrectness) {
   // (Pass 1 and Pass 2), interleaved across slots, so a per-slot epoch wouldn't be safe. We rely
   // on the driver's discipline: invoke parallelScan twice, once with the body counting partials
   // ("pass 0") and once with the body writing scan output ("pass 1"). Each individual call below
-  // is its own scan; the test simply verifies the final-write invocation produces the correct
+  // is its own scan; the test verifies the final-write invocation produces the correct
   // out[]. To exercise the two-pass primitive directly, we use a pass counter that we manually
   // toggle between the two implicit body invocations the primitive performs.
   //
@@ -135,7 +120,7 @@ TEST(ParallelScan, ScanCorrectness) {
     return running - initial;
   };
 
-  const std::int64_t total = pool.parallelScan<ScanTestHints>(
+  const std::int64_t total = pool.parallelScan<HintsDefaults>(
       kN, std::int64_t{0}, body, [](std::int64_t a, std::int64_t b) { return a + b; });
 
   // Inclusive total is sum 1..N = N*(N+1)/2.
@@ -165,7 +150,7 @@ TEST(ParallelScan, ScanEmpty) {
     return initial;
   };
 
-  const std::int64_t total = pool.parallelScan<ScanTestHints>(
+  const std::int64_t total = pool.parallelScan<HintsDefaults>(
       0U, std::int64_t{0}, body, [](std::int64_t a, std::int64_t b) { return a + b; });
 
   EXPECT_EQ(total, 0);
@@ -193,7 +178,7 @@ TEST(ParallelScan, ScanSingleParticipant) {
     return s;
   };
 
-  const std::int64_t total = pool.parallelScan<ScanTestHints>(
+  const std::int64_t total = pool.parallelScan<HintsDefaults>(
       kN, std::int64_t{0}, body, [](std::int64_t a, std::int64_t b) { return a + b; });
 
   EXPECT_EQ(total, static_cast<std::int64_t>(kN) * static_cast<std::int64_t>(kN + 1) / 2);
@@ -244,7 +229,7 @@ TEST(ParallelScan, ScanDeterministic) {
       return running - initial;
     };
 
-    const std::int64_t total = pool.parallelScan<ScanTestHints>(
+    const std::int64_t total = pool.parallelScan<HintsDefaults>(
         kN, std::int64_t{0}, body, [](std::int64_t a, std::int64_t b) { return a + b; });
     totals.push_back(total);
   }
@@ -279,7 +264,7 @@ TEST(ParallelScan, ScanCancellation) {
   // The pre-stopped token doesn't abort the call (we still complete dispatch to honour
   // dispatchOne's join contract); it just makes Pass 2 skip via the wrapper's stop check. The
   // primitive must return cleanly without UB; downstream tests assert the body count is bounded.
-  const std::int64_t total = pool.parallelScan<ScanTestHints>(
+  const std::int64_t total = pool.parallelScan<HintsDefaults>(
       kN, std::int64_t{0}, body, [](std::int64_t a, std::int64_t b) { return a + b; }, tok);
 
   // After cancellation, Pass 2 may have been skipped; the producer's sequential reduce still
@@ -339,7 +324,7 @@ TEST(ParallelScan, ScanLargeRandom) {
   };
 
   const double total =
-      pool.parallelScan<ScanTestHints>(kN, 0.0, body, [](double a, double b) { return a + b; });
+      pool.parallelScan<HintsDefaults>(kN, 0.0, body, [](double a, double b) { return a + b; });
 
   // Compare per-element to reference within a relative tolerance.
   for (std::size_t i = 0; i < kN; ++i) {
@@ -378,7 +363,7 @@ TEST(ParallelScan, PrefixNotCalledAfterPass1Failure) {
   };
 
   auto fut = std::async(std::launch::async, [&] {
-    EXPECT_THROW((void)pool.parallelScan<ScanTestHints>(1024U, std::int64_t{0}, body, prefix),
+    EXPECT_THROW((void)pool.parallelScan<HintsDefaults>(1024U, std::int64_t{0}, body, prefix),
                  std::runtime_error);
   });
   ASSERT_EQ(fut.wait_for(std::chrono::seconds(2)), std::future_status::ready)
@@ -403,7 +388,7 @@ TEST(ParallelScan, PrefixThrowDoesNotDeadlock) {
   };
 
   auto fut = std::async(std::launch::async, [&] {
-    EXPECT_THROW((void)pool.parallelScan<ScanTestHints>(1024U, std::int64_t{0}, body, prefix),
+    EXPECT_THROW((void)pool.parallelScan<HintsDefaults>(1024U, std::int64_t{0}, body, prefix),
                  std::runtime_error);
   });
   ASSERT_EQ(fut.wait_for(std::chrono::seconds(2)), std::future_status::ready)

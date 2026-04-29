@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "citor/hints.h"
 #include "citor/thread_pool.h"
 
 #include "riften/thiefpool.hpp"
@@ -72,31 +73,13 @@ namespace citor::bench {
 /// agree in practice.
 template <class Pool> struct CompetitorTraits;
 
-/// Bench-only runtime hint preset that mirrors the empty-fan-out workload's expectations.
+/// Bench-only hint preset for the empty-fan-out dispatch-floor workload.
 ///
-/// Static-uniform balance, no inline-fallback gate (`estimatedItemNs == 0`), no cancellation
-/// checks. The struct is shaped like the `BulkBalancedHints` sibling but with the fields a
-/// dispatch-floor bench cares about: a single worker-strided block per participant, no extra
-/// branching on the hot path.
-struct EmptyFanoutHints {
-  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
-  static constexpr citor::Determinism determinism = citor::Determinism::FixedBlockOrder;
-  // Affinity::None -- the bench does not depend on affinity behaviour;
-  // explicitly chosen to avoid silent behaviour change if a future wiring
-  // turns Affinity::PhysicalCores into a non-decorative pin.
-  static constexpr citor::Affinity affinity = citor::Affinity::None;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
+/// Single block per participant, no inline-fallback gate, no cancellation polls; the
+/// hot-path branches collapse to the minimum so the measurement isolates dispatch latency.
+struct EmptyFanoutHints : citor::HintsDefaults {
   static constexpr std::size_t chunk = 1;
-  static constexpr bool tlsRequired = false;
-  static constexpr bool allowProducer = true;
-  static constexpr bool allowWorkerSteal = false;
-  static constexpr bool allowNestedParallelism = false;
-  static constexpr bool fpDeterministicTree = true;
   static constexpr bool cancellationChecks = false;
-  static constexpr bool pipelineSameChunk = false;
 };
 
 /// Trait for the new `citor::ThreadPool`.

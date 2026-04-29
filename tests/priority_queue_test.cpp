@@ -8,37 +8,19 @@
 #include "citor/hints.h"
 #include "citor/thread_pool.h"
 
-using citor::Balance;
+using citor::HintsDefaults;
 using citor::Priority;
 using citor::ThreadPool;
 
 // Hint presets at TU scope (not in an anonymous namespace) so clang-tidy treats every
-// static-constexpr member as a public field of a named type rather than an unused constant. The
-// presets mirror the per-call-site hint types in `site_hints/<area>.h`; only the fields the
-// dispatch engine and the priority gate inspect are listed.
+// static-constexpr member as a public field of a named type rather than an unused constant.
 
-struct GateThroughputHints {
-  static constexpr Balance balance = Balance::StaticUniform;
-  static constexpr Priority priority = Priority::Throughput;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-};
-
-struct GateLatencyHints {
-  static constexpr Balance balance = Balance::StaticUniform;
+struct GateLatencyHints : HintsDefaults {
   static constexpr Priority priority = Priority::Latency;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
 };
 
-struct GateBackgroundHints {
-  static constexpr Balance balance = Balance::StaticUniform;
+struct GateBackgroundHints : HintsDefaults {
   static constexpr Priority priority = Priority::Background;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
 };
 
 // Latency callers reach workers ahead of throughput callers when both contend on the same pool.
@@ -59,7 +41,7 @@ TEST(PriorityQueue, LatencyDispatchPreemptsThroughput) {
   // the sleep the contended-dispatch window is too narrow to observe the ordering
   // deterministically.
   std::thread firstThroughput([&]() {
-    pool.parallelFor<GateThroughputHints>(0, 8, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
+    pool.parallelFor<HintsDefaults>(0, 8, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
       firstThroughputInBody.store(true, std::memory_order_release);
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
     });
@@ -87,7 +69,7 @@ TEST(PriorityQueue, LatencyDispatchPreemptsThroughput) {
   // back off until the latency call completes. After the latency call clears the count, the late
   // throughput call may run.
   std::thread lateThroughput([&]() {
-    pool.parallelFor<GateThroughputHints>(0, 8, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
+    pool.parallelFor<HintsDefaults>(0, 8, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
       lateThroughputOrder.store(orderCounter.fetch_add(1, std::memory_order_acq_rel),
                                 std::memory_order_release);
     });
@@ -119,7 +101,7 @@ TEST(PriorityQueue, BackgroundYieldsToThroughput) {
   // background contender) plus the producer slot. Without that breadth there is no sustained
   // contention on the dispatch gate, the priority bias is invisible, and the race becomes
   // observably one-sided in the wrong direction. The yield-on-contention contract still holds; it
-  // simply has no observable surface to gate.
+  // has no observable surface to gate.
   {
     const ThreadPool probe(4);
     if (probe.participants() < 4U) {
@@ -141,7 +123,7 @@ TEST(PriorityQueue, BackgroundYieldsToThroughput) {
     // Primary throughput producer occupies the gate by sleeping inside its body so the two
     // contenders below have time to register and start spinning on the lock.
     std::thread primaryThroughput([&]() {
-      pool.parallelFor<GateThroughputHints>(0, 8, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
+      pool.parallelFor<HintsDefaults>(0, 8, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
         primaryInBody.store(true, std::memory_order_release);
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
       });
@@ -161,7 +143,7 @@ TEST(PriorityQueue, BackgroundYieldsToThroughput) {
 
     // Second throughput contender. Spins on the lock without yielding to background.
     std::thread secondThroughput([&]() {
-      pool.parallelFor<GateThroughputHints>(0, 8, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
+      pool.parallelFor<HintsDefaults>(0, 8, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
         secondThroughputOrder.store(orderCounter.fetch_add(1, std::memory_order_acq_rel),
                                     std::memory_order_release);
       });
@@ -197,7 +179,7 @@ TEST(PriorityQueue, SingleProducerHasNoOrderingConstraint) {
   pool.parallelFor<GateLatencyHints>(0, 16, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
     seen.fetch_add(1, std::memory_order_acq_rel);
   });
-  pool.parallelFor<GateThroughputHints>(0, 16, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
+  pool.parallelFor<HintsDefaults>(0, 16, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
     seen.fetch_add(1, std::memory_order_acq_rel);
   });
   pool.parallelFor<GateBackgroundHints>(0, 16, [&](std::size_t /*lo*/, std::size_t /*hi*/) {

@@ -53,26 +53,10 @@
 #include "competitor_traits.h"
 #include "cycle_clock.h"
 
-// Hint preset at TU scope (not in an anonymous namespace) so clang-tidy treats every
-// static-constexpr member as a public field of a named type rather than an unused constant.
-struct ChainBenchHints {
-  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
-  static constexpr citor::Affinity affinity = citor::Affinity::None;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
-  static constexpr bool pipelineSameChunk = true;
-  static constexpr bool fpDeterministicTree = true;
+/// Chain hint preset at TU scope (not in an anonymous namespace) so clang-tidy treats every
+/// static-constexpr member as a public field of a named type rather than an unused constant.
+struct ChainBenchHints : citor::ChainHintsDefaults {
   static constexpr bool cancellationChecks = false;
-  static constexpr std::size_t chunk = 0;
-};
-
-/// `parallelFor` site hints used for the per-stage standalone-fan-out baseline.
-struct ChainBenchPerStageHints {
-  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
 };
 
 namespace citor::bench {
@@ -158,7 +142,7 @@ template <class RunFn>
   };
   BenchRow row = measureLoop("citor::ThreadPool::parallelFor x7", cal, [&] {
     for (std::size_t s = 0; s < kStageCount; ++s) {
-      pool.parallelFor<ChainBenchPerStageHints>(0, kRangeN, emptyBody);
+      pool.parallelFor<citor::HintsDefaults>(0, kRangeN, emptyBody);
     }
   });
   (void)sink.load(std::memory_order_relaxed);
@@ -356,7 +340,7 @@ BenchTable runChainJ8(const CyclesPerNanosecond &cal) {
 // =============================================================================
 //
 // 7 stages, each running a body whose per-iteration cost is drawn from a
-// Pareto distribution with shape alpha = 1.16 and median ~1 us. Each chain
+// Pareto distribution with shape alpha = 1.16 and median tuned to a microsecond. Each chain
 // call sums the per-iteration costs across all stages; the parallel sum must
 // match the precomputed sequential total before timing fires.
 //

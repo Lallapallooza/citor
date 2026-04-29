@@ -9,6 +9,7 @@
 #include "citor/thread_pool.h"
 
 using citor::Balance;
+using citor::HintsDefaults;
 using citor::ThreadPool;
 
 namespace {
@@ -16,12 +17,8 @@ namespace {
 // Hint preset for the exception-propagation test. DynamicChunked with `chunk = 16` keeps the
 // dispatch shape small so the throwing chunk lands quickly; the cancellation-on-throw pathway
 // halts admission of further chunks via the descriptor's `firstException` slot.
-struct BulkForQueriesExceptionHints {
+struct BulkForQueriesExceptionHints : HintsDefaults {
   static constexpr Balance balance = Balance::DynamicChunked;
-  static constexpr citor::Priority priority =
-      citor::Priority::Throughput;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
   static constexpr std::size_t chunk = 16;
 };
 

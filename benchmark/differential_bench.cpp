@@ -46,16 +46,6 @@
 #include <omp.h>
 #endif
 
-struct DifferentialReduceHints {
-  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
-  static constexpr citor::Determinism determinism = citor::Determinism::FixedBlockOrder;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-};
-
 namespace citor::bench {
 namespace {
 
@@ -176,7 +166,7 @@ template <class Pool, class EnqueueFn>
   ThreadPool pool(participants);
   const auto in = buildInputInt64();
   return runSamples(cal, [&] {
-    return pool.parallelReduce<DifferentialReduceHints>(
+    return pool.parallelReduce<citor::HintsDefaults>(
         std::size_t{0}, kN, std::int64_t{0},
         [&in](std::size_t lo, std::size_t hi) { return partialSum(in, lo, hi); },
         std::plus<std::int64_t>{});

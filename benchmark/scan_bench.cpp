@@ -8,7 +8,7 @@
 // the trait's `parallelScan` method.
 //
 // Per-pool primitive mapping:
-//   - citor pool              -> `parallelScan<ScanBenchHints>` (native).
+//   - citor pool              -> `parallelScan<citor::HintsDefaults>` (native).
 //   - oneTBB                   -> `tbb::parallel_scan` (native).
 //   - BS::thread_pool          -> Pass 1: N partial sums via `submit_blocks`;
 //                                 sequential prefix; Pass 2: N writes via
@@ -39,18 +39,6 @@
 #include "bench_registry.h"
 #include "competitor_traits.h"
 #include "cycle_clock.h"
-
-// Hint preset at TU scope so clang-tidy treats every static-constexpr member
-// as a public field of a named type rather than an unused constant.
-struct ScanBenchHints {
-  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
-  static constexpr citor::Determinism determinism = citor::Determinism::FixedBlockOrder;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-};
 
 namespace citor::bench {
 namespace {
@@ -136,7 +124,8 @@ struct ScanData {
   };
   BenchRow row = measureLoop("citor::ThreadPool::parallelScan", cal, [&] {
     totalCalls.store(0, std::memory_order_release);
-    (void)pool.parallelScan<ScanBenchHints>(kN, std::int64_t{0}, body, std::plus<std::int64_t>{});
+    (void)pool.parallelScan<citor::HintsDefaults>(kN, std::int64_t{0}, body,
+                                                  std::plus<std::int64_t>{});
   });
   // Touch out so the optimizer cannot drop the writes.
   (void)d.out[kN - 1];

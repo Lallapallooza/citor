@@ -9,7 +9,6 @@
 
 #include "citor/cancellation.h"
 #include "citor/cpos/parallel_reduce.h"
-#include "citor/example_hints.h"
 #include "citor/hints.h"
 #include "citor/thread_pool.h"
 
@@ -18,29 +17,10 @@ using citor::CancellationToken;
 using citor::cancelled_value_exception;
 using citor::Determinism;
 using citor::Hints;
+using citor::HintsDefaults;
 using citor::KahanReduceHints;
 using citor::Priority;
 using citor::ThreadPool;
-
-// Hint presets at TU scope (not in an anonymous namespace) so clang-tidy treats every
-// static-constexpr member as a public field of a named type rather than an unused constant.
-struct FixedBlockTestHints {
-  static constexpr Balance balance = Balance::StaticUniform;
-  static constexpr Determinism determinism = Determinism::FixedBlockOrder;
-  static constexpr Priority priority = Priority::Throughput;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-};
-
-struct KahanTestHints {
-  static constexpr Balance balance = Balance::StaticUniform;
-  static constexpr Determinism determinism = Determinism::KahanCompensated;
-  static constexpr Priority priority = Priority::Throughput;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-};
 
 namespace {
 
@@ -76,7 +56,7 @@ TEST(ParallelReduce, BasicReductionMatchesSerial) {
   }
   const double expected = static_cast<double>(kN) * static_cast<double>(kN + 1) / 2.0;
 
-  const double got = pool.parallelReduce<FixedBlockTestHints>(
+  const double got = pool.parallelReduce<HintsDefaults>(
       0, kN, 0.0, [&](std::size_t lo, std::size_t hi) { return mapPlainSum(data, lo, hi); },
       [](double a, double b) { return a + b; });
 
@@ -95,7 +75,7 @@ TEST(ParallelReduce, FixedBlockOrderBitIdenticalAcrossJobs) {
   for (const std::size_t j :
        {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}, std::size_t{16}}) {
     ThreadPool pool(j);
-    const double r = pool.parallelReduce<FixedBlockTestHints>(
+    const double r = pool.parallelReduce<HintsDefaults>(
         0, kN, 0.0, [&](std::size_t lo, std::size_t hi) { return mapPlainSum(data, lo, hi); },
         [](double a, double b) { return a + b; });
     results.push_back(r);
@@ -131,7 +111,7 @@ TEST(ParallelReduce, KahanCompensatedAcrossJobs) {
   for (const std::size_t j :
        {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}, std::size_t{16}}) {
     ThreadPool pool(j);
-    const double r = pool.parallelReduce<KahanTestHints>(
+    const double r = pool.parallelReduce<KahanReduceHints>(
         0, kN, 0.0,
         [&](std::size_t lo, std::size_t hi) {
           double s = 0.0;
@@ -164,7 +144,7 @@ TEST(ParallelReduce, KahanCompensatedAcrossJobs) {
   std::vector<double> recoverable(kN, 1.0);
   recoverable.back() = -static_cast<double>(kN - 1);
   ThreadPool poolKahan(4);
-  const double kahanResult = poolKahan.parallelReduce<KahanTestHints>(
+  const double kahanResult = poolKahan.parallelReduce<KahanReduceHints>(
       0, kN, 0.0,
       [&](std::size_t lo, std::size_t hi) {
         double s = 0.0;
@@ -180,7 +160,7 @@ TEST(ParallelReduce, KahanCompensatedAcrossJobs) {
 // Empty range returns the init value.
 TEST(ParallelReduce, EmptyRangeReturnsInit) {
   ThreadPool pool(4);
-  const int got = pool.parallelReduce<FixedBlockTestHints>(
+  const int got = pool.parallelReduce<HintsDefaults>(
       0, 0, 42, [](std::size_t, std::size_t) { return 0; }, [](int a, int b) { return a + b; });
   EXPECT_EQ(got, 42);
 }
@@ -202,7 +182,7 @@ TEST(ParallelReduce, CancellationProducesPartial) {
 
   bool sawCancellation = false;
   try {
-    (void)pool.parallelReduce<FixedBlockTestHints>(
+    (void)pool.parallelReduce<HintsDefaults>(
         0, kN, 0.0,
         [&](std::size_t lo, std::size_t hi) {
           // Stop the token as soon as the first chunk runs so subsequent chunks are skipped at
@@ -235,7 +215,7 @@ TEST(ParallelReduce, InlinePathHonorsPreCancelledToken) {
   std::atomic<int> mapCalls{0};
   bool sawCancellation = false;
   try {
-    (void)pool.parallelReduce<FixedBlockTestHints>(
+    (void)pool.parallelReduce<HintsDefaults>(
         0, 100, 7.0,
         [&](std::size_t /*lo*/, std::size_t /*hi*/) {
           mapCalls.fetch_add(1, std::memory_order_relaxed);
@@ -264,7 +244,7 @@ TEST(ParallelReduce, AllChunksCancelledReturnsInitUnchanged) {
 
   bool sawCancellation = false;
   try {
-    (void)pool.parallelReduce<FixedBlockTestHints>(
+    (void)pool.parallelReduce<HintsDefaults>(
         0, 1024, 42.0,
         [&](std::size_t /*lo*/, std::size_t /*hi*/) {
           ADD_FAILURE() << "no chunk should run when token is pre-cancelled";
@@ -287,10 +267,10 @@ TEST(ParallelReduce, MemberCpoEquivalence) {
     data[i] = static_cast<double>(i);
   }
 
-  const double resultMember = pool.parallelReduce<FixedBlockTestHints>(
+  const double resultMember = pool.parallelReduce<HintsDefaults>(
       0, kN, 0.0, [&](std::size_t lo, std::size_t hi) { return mapPlainSum(data, lo, hi); },
       [](double a, double b) { return a + b; });
-  const double resultCpo = citor::parallelReduce.template operator()<FixedBlockTestHints>(
+  const double resultCpo = citor::parallelReduce.template operator()<HintsDefaults>(
       pool, 0, kN, 0.0, [&](std::size_t lo, std::size_t hi) { return mapPlainSum(data, lo, hi); },
       [](double a, double b) { return a + b; });
   EXPECT_EQ(std::bit_cast<std::uint64_t>(resultMember), std::bit_cast<std::uint64_t>(resultCpo));
@@ -337,7 +317,7 @@ TEST(ParallelReduce, RuntimeHintsMatchCompileTimeHints) {
     data[i] = static_cast<double>(i) * 0.5;
   }
 
-  const double compileResult = pool.parallelReduce<FixedBlockTestHints>(
+  const double compileResult = pool.parallelReduce<HintsDefaults>(
       0, kN, 0.0, [&](std::size_t lo, std::size_t hi) { return mapPlainSum(data, lo, hi); },
       [](double a, double b) { return a + b; });
 
@@ -361,7 +341,7 @@ TEST(ParallelReduce, ExceptionPropagation) {
 
   bool threwAsExpected = false;
   try {
-    (void)pool.parallelReduce<FixedBlockTestHints>(
+    (void)pool.parallelReduce<HintsDefaults>(
         0, kN, 0.0,
         [](std::size_t lo, std::size_t /*hi*/) -> double {
           if (lo == 0) {

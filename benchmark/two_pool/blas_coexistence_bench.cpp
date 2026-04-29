@@ -2,7 +2,7 @@
 //
 // Measures the wall-time cost of `citor::ThreadPool::parallelFor` when it
 // shares the host with a libomp-driven secondary worker pool. The cell pairs
-// short citor dispatches (~100us body each, repeated to fill a fixed
+// short citor dispatches with non-trivial body each, repeated to fill a fixed
 // timing window) with a small matmul-shaped libomp `parallel for` that
 // runs once just before the primary measurement so libomp's worker threads
 // are warm and sitting in their park-spin window for the duration of the
@@ -16,7 +16,7 @@
 //
 // The "did it work" gate (per the spec): primary-pool wall time at
 // `kmp_zero` should be meaningfully lower than at `kmp_default`. Both cells
-// are reported in the same binary run so reviewers can compare directly.
+// are reported in the same binary run so the reader can compare them in one run.
 //
 // This bench lives in a SEPARATE executable target (`parallel_bench_two_pool`)
 // because libomp's `KMP_BLOCKTIME` and `omp_set_num_threads(...)` global
@@ -55,20 +55,13 @@ namespace {
 /// non-trivial per slot so the inline-fallback gate is
 /// conservative: the bench never wants the primary call to silently degrade
 /// into producer-only inline execution.
-struct PrimaryForHints {
-  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
+struct PrimaryForHints : citor::HintsDefaults {
   static constexpr citor::Affinity affinity = citor::Affinity::SplitCcd;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-  static constexpr bool tlsRequired = false;
   static constexpr bool cancellationChecks = false;
 };
 
 /// Number of citor dispatches per measurement bracket. Each dispatch's body
-/// performs ~100 us of compute; 32 dispatches per bracket pushes the bracket
+/// performs non-trivial compute; 32 dispatches per bracket pushes the bracket
 /// wall time well above the OS-jitter floor.
 constexpr std::size_t kDispatchesPerBracket = 32;
 
@@ -87,14 +80,14 @@ constexpr std::size_t kIterations = 60;
 /// startup land inside the first timed bracket on cold runs.
 constexpr std::size_t kWarmupIterations = 16;
 
-/// Body work: a tight floating-point loop sized to take ~100 us per
+/// Body work: a tight floating-point loop sized to take non-trivial wall-time per
 /// `[lo, hi)` slot on a modern x86 host. The body operates over a per-call
 /// scratch buffer (passed by pointer) so the compiler cannot prove the loop
 /// is dead. Touch every element exactly once per iteration.
 inline void primaryBody(std::size_t lo, std::size_t hi, float *scratch) noexcept {
   // Each element is touched 64 times to land near 100us per slot at j=16
   // over a 16384-element range (1024 elements/slot * 64 multiply-adds = 64 K
-  // FLOPs per slot, ~ 100ns at 1 GHz scalar; modern hosts hit ~100 us at the
+  // FLOPs per slot; modern hosts hit the
   // bench-relevant inner-loop cost when memory traffic and per-element work
   // dominate over the FMA throughput).
   for (int rep = 0; rep < 64; ++rep) {
@@ -107,7 +100,7 @@ inline void primaryBody(std::size_t lo, std::size_t hi, float *scratch) noexcept
 
 /// Workload size for the primary's `parallelFor` range. 16384 elements at
 /// j=16 gives 1024 elements/slot, which puts the per-slot body at the
-/// ~100 us target after the inner repetition factor in `primaryBody`.
+/// the target after the inner repetition factor in `primaryBody`.
 constexpr std::size_t kPrimaryRange = 16384;
 
 /// 64-byte aligned `float[]` deleter; pairs with `std::unique_ptr`.

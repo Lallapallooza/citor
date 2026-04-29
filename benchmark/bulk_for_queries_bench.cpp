@@ -9,7 +9,7 @@
 // `parallelFor` dispatch alone).
 //
 // Per-pool primitive mapping:
-//   - citor pool              -> `bulkForQueries<BulkQueryHints>`.
+//   - citor pool              -> `bulkForQueries<BulkHints>`.
 //   - BS::thread_pool          -> `submit_blocks(0, q, body).wait()` (native).
 //   - dp::thread_pool          -> N back-to-back `enqueue` futures + waits;
 //                                 the pool ships no native multi-block primitive.
@@ -33,7 +33,6 @@
 #include <utility>
 #include <vector>
 
-#include "citor/example_hints.h"
 #include "citor/hints.h"
 #include "citor/thread_pool.h"
 
@@ -155,7 +154,7 @@ template <class RunFn>
     }
   };
   BenchRow row = measureLoop("citor::ThreadPool", cal,
-                             [&] { pool.bulkForQueries<BulkQueryHints>(kQueries, body); });
+                             [&] { pool.bulkForQueries<citor::BulkHints>(kQueries, body); });
   (void)out[0];
   return row;
 }

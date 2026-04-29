@@ -55,10 +55,9 @@ struct BulkForQueriesFn {
 ///
 /// Calling `bulkForQueries<HintsT>(pool, q, fn)` dispatches through unqualified `tag_invoke`; the
 /// executor's overload partitions `[0, q)` and invokes `fn(qFirst, qLast)` on each chunk so the
-/// body can run every query index in the range. The default `Balance::DynamicChunked` carried by
-/// `citor::BulkQueryHints` and friends amortizes per-query traversal-depth
-/// skew across workers; sites whose per-query cost is uniform can override the policy with a
-/// static-uniform hint.
+/// body can run every query index in the range. A `Balance::DynamicChunked` policy override on
+/// the hint amortizes per-query traversal-depth skew across workers; sites whose per-query cost
+/// is uniform can keep the `citor::HintsDefaults` static-uniform default.
 ///
 /// Output stability: per-query results MUST be written to a per-query slot (`out[q]` keyed on the
 /// query index passed into `fn`). The chunk dispatch order varies across worker counts; only

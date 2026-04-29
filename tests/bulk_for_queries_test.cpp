@@ -7,23 +7,19 @@
 
 #include "citor/cancellation.h"
 #include "citor/cpos/bulk_for_queries.h"
-#include "citor/example_hints.h"
 #include "citor/hints.h"
 #include "citor/thread_pool.h"
 
 using citor::Balance;
-using citor::BulkQueryHints;
 using citor::CancellationToken;
 using citor::Hints;
+using citor::HintsDefaults;
 using citor::ThreadPool;
 
 // Hint preset at TU scope (not in an anonymous namespace) so clang-tidy treats every
 // static-constexpr member as a public field of a named type rather than an unused constant.
-struct BulkForQueriesTestHints {
+struct BulkForQueriesTestHints : HintsDefaults {
   static constexpr Balance balance = Balance::DynamicChunked;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
   static constexpr std::size_t chunk = 16;
 };
 
@@ -141,7 +137,7 @@ TEST(BulkForQueries, CancellationAtChunkBoundary) {
   EXPECT_LT(total, kQ) << "cancellation never observed";
 }
 
-// Named hint instantiation: the `BulkQueryHints` site hint is a valid policy type and routes
+// Named hint instantiation: a HintsDefaults-derived bulk hint is a valid policy type and routes
 // through `bulkForQueries` without compile errors. This is the "realistic call site" smoke test.
 TEST(BulkForQueries, BulkQueryHintInstantiates) {
   ThreadPool pool(4);
@@ -151,7 +147,7 @@ TEST(BulkForQueries, BulkQueryHintInstantiates) {
     c.store(0, std::memory_order_relaxed);
   }
 
-  pool.bulkForQueries<BulkQueryHints>(kQ, [&](std::size_t lo, std::size_t hi) {
+  pool.bulkForQueries<BulkForQueriesTestHints>(kQ, [&](std::size_t lo, std::size_t hi) {
     for (std::size_t i = lo; i < hi; ++i) {
       counts[i].fetch_add(1, std::memory_order_relaxed);
     }

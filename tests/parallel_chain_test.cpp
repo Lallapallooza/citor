@@ -17,6 +17,7 @@
 using citor::BarrierKind;
 using citor::CancellationToken;
 using citor::ChainHints;
+using citor::ChainHintsDefaults;
 using citor::globalStage;
 using citor::makeStage;
 using citor::perChunkStage;
@@ -24,19 +25,6 @@ using citor::reduceStage;
 using citor::serialStage;
 using citor::staticStage;
 using citor::ThreadPool;
-
-// Hint preset used by the tests at TU scope (not in an anonymous namespace) so clang-tidy treats
-// every static-constexpr member as a public field of a named type rather than an unused constant.
-struct ChainTestHints {
-  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
-  static constexpr citor::Affinity affinity = citor::Affinity::None;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
-  static constexpr bool pipelineSameChunk = true;
-  static constexpr bool fpDeterministicTree = true;
-  static constexpr bool cancellationChecks = true;
-  static constexpr std::size_t chunk = 0;
-};
 
 namespace {
 
@@ -53,7 +41,7 @@ TEST(ParallelChain, BasicSequentialStages) {
     v.store(0, std::memory_order_relaxed);
   }
 
-  pool.parallelChain<ChainTestHints>(
+  pool.parallelChain<ChainHintsDefaults>(
       kN,
       staticStage(
           "a",
@@ -89,7 +77,7 @@ TEST(ParallelChain, GlobalBarrierBetweenStages) {
   std::atomic<std::uint64_t> earliestStage1Other{UINT64_MAX};
   std::atomic<std::uint64_t> tickClock{0};
 
-  pool.parallelChain<ChainTestHints>(
+  pool.parallelChain<ChainHintsDefaults>(
       kN,
       globalStage("barrier-source",
                   [&](std::size_t /*stageIdx*/, std::uint32_t slot, std::size_t /*lo*/,
@@ -149,7 +137,7 @@ TEST(ParallelChain, PerChunkBarrierAllowsPipeline) {
 
   std::atomic<std::uint32_t> overlapCount{0};
 
-  pool.parallelChain<ChainTestHints>(
+  pool.parallelChain<ChainHintsDefaults>(
       kN,
       perChunkStage("produce",
                     [&](std::size_t /*stageIdx*/, std::uint32_t slot, std::size_t /*lo*/,
@@ -195,7 +183,7 @@ TEST(ParallelChain, ProducerSerialRunsOnSlot0) {
   std::atomic<std::uint32_t> serialBodySlot{UINT32_MAX};
   std::atomic<std::uint32_t> postSerialCalls{0};
 
-  pool.parallelChain<ChainTestHints>(
+  pool.parallelChain<ChainHintsDefaults>(
       kN,
       // Stage 0: every slot runs. Post-stage barrier is ProducerSerial -> only slot 0 runs stage
       // 1.
@@ -252,7 +240,7 @@ TEST(ParallelChain, ProducerSerialNonProducersSpinUntilSerialCompletes) {
   }
   std::atomic<std::uint64_t> tickClock{0};
 
-  pool.parallelChain<ChainTestHints>(
+  pool.parallelChain<ChainHintsDefaults>(
       kN,
       // Stage 0: drives the post-stage ProducerSerial barrier so stage 1 is serial on slot 0.
       makeStage<BarrierKind::ProducerSerial>([&](std::size_t /*stageIdx*/, std::uint32_t /*slot*/,
@@ -306,7 +294,7 @@ TEST(ParallelChain, ProducerSerialBlocksLaterStageWithoutFollowingBarrier) {
   }
   std::atomic<std::uint64_t> tickClock{0};
 
-  pool.parallelChain<ChainTestHints>(
+  pool.parallelChain<ChainHintsDefaults>(
       32U,
       // Stage 0: ProducerSerial post-stage barrier turns stage 1 into a slot-0-only stage.
       makeStage<BarrierKind::ProducerSerial>([&](std::size_t /*stageIdx*/, std::uint32_t /*slot*/,
@@ -351,7 +339,7 @@ TEST(ParallelChain, ProducerSerialOnlyAffectsNextStage) {
   std::atomic<std::uint32_t> stage1Calls{0};
   std::atomic<std::uint32_t> stage2Calls{0};
 
-  pool.parallelChain<ChainTestHints>(
+  pool.parallelChain<ChainHintsDefaults>(
       kN,
       // Stage 0: ProducerSerial -> stage 1 runs only on slot 0.
       makeStage<BarrierKind::ProducerSerial>([&](std::size_t /*stageIdx*/, std::uint32_t /*slot*/,
@@ -397,11 +385,11 @@ TEST(ParallelChain, MemberCpoEquivalence) {
   };
 
   // Member call.
-  pool.parallelChain<ChainTestHints>(kN, globalStage("m0", stage0Body(memberSums)),
-                                     staticStage("m1", stage1Body(memberSums)));
+  pool.parallelChain<ChainHintsDefaults>(kN, globalStage("m0", stage0Body(memberSums)),
+                                         staticStage("m1", stage1Body(memberSums)));
 
   // CPO call.
-  citor::parallelChain.template operator()<ChainTestHints>(
+  citor::parallelChain.template operator()<ChainHintsDefaults>(
       pool, kN, globalStage("c0", stage0Body(cpoSums)), staticStage("c1", stage1Body(cpoSums)));
 
   for (std::size_t s = 0; s < participants; ++s) {
@@ -418,7 +406,7 @@ TEST(ParallelChain, EmptyStagesNoOp) {
   constexpr std::size_t kN = 32;
 
   // No stages.
-  pool.parallelChain<ChainTestHints>(kN);
+  pool.parallelChain<ChainHintsDefaults>(kN);
   // If we got here, the call returned cleanly.
   SUCCEED();
 }
@@ -433,7 +421,7 @@ TEST(ParallelChain, CancellationStopsChain) {
   std::atomic<std::uint32_t> stage1Calls{0};
   std::atomic<std::uint32_t> stage2Calls{0};
 
-  pool.parallelChainWithToken<ChainTestHints>(
+  pool.parallelChainWithToken<ChainHintsDefaults>(
       kN, tok,
       globalStage("stage0", [&](std::size_t /*stageIdx*/, std::uint32_t /*slot*/,
                                 std::size_t /*lo*/, std::size_t /*hi*/) noexcept {}),
@@ -463,7 +451,7 @@ TEST(ParallelChain, ExceptionPropagates) {
   ThreadPool pool(4);
   constexpr std::size_t kN = 32;
 
-  EXPECT_THROW(pool.parallelChain<ChainTestHints>(
+  EXPECT_THROW(pool.parallelChain<ChainHintsDefaults>(
                    kN,
                    globalStage("ok", [&](std::size_t /*stageIdx*/, std::uint32_t /*slot*/,
                                          std::size_t /*lo*/, std::size_t /*hi*/) noexcept {}),
@@ -485,7 +473,7 @@ TEST(ParallelChain, InlineFallbackForSingleParticipant) {
   std::atomic<std::uint32_t> stageCalls{0};
   std::atomic<std::size_t> observedHi{0};
 
-  pool.parallelChain<ChainTestHints>(
+  pool.parallelChain<ChainHintsDefaults>(
       kN, staticStage("inline-only", [&](std::size_t /*stageIdx*/, std::uint32_t slot,
                                          std::size_t lo, std::size_t hi) {
         EXPECT_EQ(slot, 0U);
@@ -507,7 +495,7 @@ TEST(ParallelChain, SlotRangesPartitionExactly) {
     c.store(0, std::memory_order_relaxed);
   }
 
-  pool.parallelChain<ChainTestHints>(
+  pool.parallelChain<ChainHintsDefaults>(
       kN, staticStage("cov", [&](std::size_t /*stageIdx*/, std::uint32_t /*slot*/, std::size_t lo,
                                  std::size_t hi) {
         for (std::size_t i = lo; i < hi; ++i) {
@@ -530,7 +518,7 @@ TEST(ParallelChain, ReduceStageCompilesAndRuns) {
 
   std::atomic<std::int64_t> totalCalls{0};
 
-  pool.parallelChain<ChainTestHints>(
+  pool.parallelChain<ChainHintsDefaults>(
       kN,
       reduceStage("reduce-then-global",
                   [&](std::size_t /*stageIdx*/, std::uint32_t /*slot*/, std::size_t /*lo*/,

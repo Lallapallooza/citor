@@ -10,53 +10,34 @@
 #include <vector>
 
 #include "citor/cpos/parallel_for.h"
-#include "citor/example_hints.h"
 #include "citor/hints.h"
 #include "citor/thread_pool.h"
 
 using citor::Balance;
-using citor::BulkBalancedHints;
+using citor::BulkHints;
 using citor::CancellationToken;
 using citor::Hints;
+using citor::HintsDefaults;
 using citor::ThreadPool;
 
 // Hint presets used by the tests. They live at TU scope (not in an anonymous namespace) so
 // clang-tidy treats every static-constexpr member as a public field of a named type rather than
-// an unused constant. The presets mirror the named hint types in `example_hints.h`; only the
-// fields the dispatch engine inspects are listed.
-struct StaticUniformTestHints {
-  static constexpr Balance balance = Balance::StaticUniform;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-};
-
-struct DynamicChunkedTestHints {
+// an unused constant.
+struct DynamicChunkedTestHints : HintsDefaults {
   static constexpr Balance balance = Balance::DynamicChunked;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
   static constexpr std::size_t chunk = 16;
 };
 
-struct InlineFallbackHints {
-  static constexpr Balance balance = Balance::StaticUniform;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
+struct InlineFallbackHints : HintsDefaults {
   /// One ns per item; the gate is `n * 1ns < minTaskUs * participants`. With `minTaskUs = 1000`
   /// the producer runs inline for any `n < 1000 * participants`.
   static constexpr double estimatedItemNs = 1.0;
   static constexpr double minTaskUs = 1000.0;
-  static constexpr std::size_t chunk = 0;
 };
 
 // Reuse-bit regression tests need the StaticUniform path with `cancellationChecks = false` and
 // `chunk = 1` to land on the same-command-reuse branch the producer's TLS descriptor exposes.
-struct ReuseRegressionHints {
-  static constexpr Balance balance = Balance::StaticUniform;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
+struct ReuseRegressionHints : HintsDefaults {
   static constexpr std::size_t chunk = 1;
   static constexpr bool cancellationChecks = false;
 };
@@ -70,7 +51,7 @@ TEST(ParallelFor, RangeCoverage) {
     c.store(0, std::memory_order_relaxed);
   }
 
-  pool.parallelFor<StaticUniformTestHints>(0, kN, [&](std::size_t lo, std::size_t hi) {
+  pool.parallelFor<HintsDefaults>(0, kN, [&](std::size_t lo, std::size_t hi) {
     for (std::size_t i = lo; i < hi; ++i) {
       counts[i].fetch_add(1, std::memory_order_relaxed);
     }
@@ -88,7 +69,7 @@ TEST(ParallelFor, BlockingSemantics) {
   constexpr std::size_t kN = 256;
   std::vector<int> data(kN, 0);
 
-  pool.parallelFor<StaticUniformTestHints>(0, kN, [&](std::size_t lo, std::size_t hi) {
+  pool.parallelFor<HintsDefaults>(0, kN, [&](std::size_t lo, std::size_t hi) {
     for (std::size_t i = lo; i < hi; ++i) {
       data[i] = static_cast<int>(i + 1);
     }
@@ -110,13 +91,12 @@ TEST(ParallelFor, FunctionRefLifetime) {
     // the read survives only because parallelFor blocks until every worker returns from the
     // closure, exercising the descriptor's "body alive for the call" contract end-to-end.
     std::atomic<int> local{5};
-    pool.parallelFor<StaticUniformTestHints>(
-        0, kN, [&data, &local](std::size_t lo, std::size_t hi) {
-          const int value = local.load(std::memory_order_relaxed);
-          for (std::size_t i = lo; i < hi; ++i) {
-            data[i] = value;
-          }
-        });
+    pool.parallelFor<HintsDefaults>(0, kN, [&data, &local](std::size_t lo, std::size_t hi) {
+      const int value = local.load(std::memory_order_relaxed);
+      for (std::size_t i = lo; i < hi; ++i) {
+        data[i] = value;
+      }
+    });
   }
   for (std::size_t i = 0; i < kN; ++i) {
     EXPECT_EQ(data[i], 5);
@@ -164,7 +144,7 @@ TEST(ParallelFor, ExceptionPropagation) {
 
   bool threwAsExpected = false;
   try {
-    pool.parallelFor<StaticUniformTestHints>(0, kN, [](std::size_t lo, std::size_t /*hi*/) {
+    pool.parallelFor<HintsDefaults>(0, kN, [](std::size_t lo, std::size_t /*hi*/) {
       if (lo == 0) {
         throw std::runtime_error("test exception");
       }
@@ -204,18 +184,18 @@ TEST(ParallelFor, MemberAndCpoDispatchAreEquivalent) {
   std::vector<int> dataMember(kN, 0);
   std::vector<int> dataCpo(kN, 0);
 
-  pool.parallelFor<StaticUniformTestHints>(0, kN, [&dataMember](std::size_t lo, std::size_t hi) {
+  pool.parallelFor<HintsDefaults>(0, kN, [&dataMember](std::size_t lo, std::size_t hi) {
     for (std::size_t i = lo; i < hi; ++i) {
       dataMember[i] = static_cast<int>(i);
     }
   });
 
-  citor::parallelFor.template operator()<StaticUniformTestHints>(
-      pool, 0, kN, [&dataCpo](std::size_t lo, std::size_t hi) {
-        for (std::size_t i = lo; i < hi; ++i) {
-          dataCpo[i] = static_cast<int>(i);
-        }
-      });
+  citor::parallelFor.template operator()<HintsDefaults>(pool, 0, kN,
+                                                        [&dataCpo](std::size_t lo, std::size_t hi) {
+                                                          for (std::size_t i = lo; i < hi; ++i) {
+                                                            dataCpo[i] = static_cast<int>(i);
+                                                          }
+                                                        });
 
   EXPECT_EQ(dataMember, dataCpo);
 }
@@ -227,7 +207,7 @@ TEST(ParallelFor, StaticPartitionIsBlockStrided) {
   constexpr std::size_t kN = 4096;
   std::atomic<std::size_t> blockCount{0};
 
-  pool.parallelFor<StaticUniformTestHints>(0, kN, [&](std::size_t lo, std::size_t hi) {
+  pool.parallelFor<HintsDefaults>(0, kN, [&](std::size_t lo, std::size_t hi) {
     EXPECT_LT(lo, hi);
     EXPECT_LE(hi, kN);
     blockCount.fetch_add(1, std::memory_order_relaxed);
@@ -270,7 +250,7 @@ TEST(ParallelFor, RepeatedDispatchesReuseWorkers) {
   }
 
   for (int round = 0; round < 100; ++round) {
-    pool.parallelFor<StaticUniformTestHints>(0, kN, [&](std::size_t lo, std::size_t hi) {
+    pool.parallelFor<HintsDefaults>(0, kN, [&](std::size_t lo, std::size_t hi) {
       for (std::size_t i = lo; i < hi; ++i) {
         counts[i].fetch_add(1, std::memory_order_relaxed);
       }
@@ -282,9 +262,9 @@ TEST(ParallelFor, RepeatedDispatchesReuseWorkers) {
   }
 }
 
-// BulkBalancedHints (the named site preset) is a valid policy type and routes through
+// BulkHints (a HintsDefaults-derived preset) is a valid policy type and routes through
 // parallelFor without compile errors. This is the "realistic call site" smoke test.
-TEST(ParallelFor, BulkBalancedHintCompilesAndRuns) {
+TEST(ParallelFor, BulkHintCompilesAndRuns) {
   ThreadPool pool(4);
   constexpr std::size_t kN = 1024;
   std::vector<std::atomic<std::uint32_t>> counts(kN);
@@ -292,7 +272,7 @@ TEST(ParallelFor, BulkBalancedHintCompilesAndRuns) {
     c.store(0, std::memory_order_relaxed);
   }
 
-  pool.parallelFor<BulkBalancedHints>(0, kN, [&](std::size_t lo, std::size_t hi) {
+  pool.parallelFor<BulkHints>(0, kN, [&](std::size_t lo, std::size_t hi) {
     for (std::size_t i = lo; i < hi; ++i) {
       counts[i].fetch_add(1, std::memory_order_relaxed);
     }
@@ -311,7 +291,7 @@ TEST(ParallelFor, RuntimeHintsMatchCompileTimeHints) {
   std::vector<int> dataCompile(kN, 0);
   std::vector<int> dataRuntime(kN, 0);
 
-  pool.parallelFor<StaticUniformTestHints>(0, kN, [&dataCompile](std::size_t lo, std::size_t hi) {
+  pool.parallelFor<HintsDefaults>(0, kN, [&dataCompile](std::size_t lo, std::size_t hi) {
     for (std::size_t i = lo; i < hi; ++i) {
       dataCompile[i] = static_cast<int>(i);
     }
@@ -343,8 +323,8 @@ TEST(ParallelFor, NestedSamePoolCallDoesNotDeadlock) {
   constexpr std::size_t kInner = 8;
   std::atomic<int> innerWork{0};
 
-  pool.parallelFor<StaticUniformTestHints>(0, kOuter, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
-    pool.parallelFor<StaticUniformTestHints>(0, kInner, [&](std::size_t a, std::size_t b) {
+  pool.parallelFor<HintsDefaults>(0, kOuter, [&](std::size_t /*lo*/, std::size_t /*hi*/) {
+    pool.parallelFor<HintsDefaults>(0, kInner, [&](std::size_t a, std::size_t b) {
       innerWork.fetch_add(static_cast<int>(b - a), std::memory_order_relaxed);
     });
   });
@@ -444,7 +424,7 @@ TEST(ParallelFor, InlinePathHonorsPreCancelledToken) {
   tok.request_stop();
 
   std::atomic<int> calls{0};
-  pool.parallelFor<StaticUniformTestHints>(
+  pool.parallelFor<HintsDefaults>(
       0, 100,
       [&](std::size_t /*lo*/, std::size_t /*hi*/) {
         calls.fetch_add(1, std::memory_order_relaxed);

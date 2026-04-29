@@ -7,28 +7,16 @@
 #include <vector>
 
 #include "citor/hints.h"
-#include "citor/example_hints.h"
 #include "citor/thread_pool.h"
 
+using citor::HintsDefaults;
 using citor::KahanReduceHints;
-using citor::Balance;
-using citor::Determinism;
-using citor::Priority;
 using citor::ThreadPool;
-
-struct FixedBlockHints {
-  static constexpr Balance balance = Balance::StaticUniform;
-  static constexpr Determinism determinism = Determinism::FixedBlockOrder;
-  static constexpr Priority priority = Priority::Throughput;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-};
 
 namespace {
 
 double driveOneReduction(ThreadPool &pool, const std::vector<double> &data) {
-  return pool.parallelReduce<FixedBlockHints>(
+  return pool.parallelReduce<HintsDefaults>(
       0, data.size(), 0.0,
       [&data](std::size_t lo, std::size_t hi) {
         double s = 0.0;

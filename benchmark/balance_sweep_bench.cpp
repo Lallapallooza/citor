@@ -27,42 +27,16 @@
 #include "competitor_traits.h"
 #include "cycle_clock.h"
 
-// Static-Uniform hint preset (citor's default Balance for parallelFor).
-struct BalanceSweepStaticHints {
-  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
-  static constexpr citor::Determinism determinism = citor::Determinism::FixedBlockOrder;
-  static constexpr citor::Affinity affinity = citor::Affinity::None;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-  static constexpr bool tlsRequired = false;
-  static constexpr bool allowProducer = true;
-  static constexpr bool allowWorkerSteal = false;
-  static constexpr bool allowNestedParallelism = false;
-  static constexpr bool fpDeterministicTree = true;
+// Dynamic-chunked hint preset (workers race on the relaxed nextBlock counter). The static-uniform
+// counterpart in this bench is just `citor::HintsDefaults` (with cancellation polls disabled to
+// match the dispatch-floor measurement shape).
+struct BalanceSweepStaticHints : citor::HintsDefaults {
   static constexpr bool cancellationChecks = false;
-  static constexpr bool pipelineSameChunk = false;
 };
 
-// Dynamic-chunked hint preset (workers race on the relaxed nextBlock counter).
-struct BalanceSweepDynamicHints {
+struct BalanceSweepDynamicHints : citor::HintsDefaults {
   static constexpr citor::Balance balance = citor::Balance::DynamicChunked;
-  static constexpr citor::Determinism determinism = citor::Determinism::FixedBlockOrder;
-  static constexpr citor::Affinity affinity = citor::Affinity::None;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-  static constexpr bool tlsRequired = false;
-  static constexpr bool allowProducer = true;
-  static constexpr bool allowWorkerSteal = false;
-  static constexpr bool allowNestedParallelism = false;
-  static constexpr bool fpDeterministicTree = true;
   static constexpr bool cancellationChecks = false;
-  static constexpr bool pipelineSameChunk = false;
 };
 
 namespace citor::bench {

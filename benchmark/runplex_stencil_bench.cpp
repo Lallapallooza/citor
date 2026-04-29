@@ -63,16 +63,6 @@
 #include <omp.h>
 #endif
 
-// Hint preset at TU scope so clang-tidy treats every static-constexpr member
-// as a public field of a named type rather than an unused constant.
-struct StencilPlexHints {
-  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-};
-
 namespace citor::bench {
 namespace {
 
@@ -150,7 +140,7 @@ template <class RunFn>
         for (std::size_t s = 0; s < participants; ++s) {
           slotState[s] = static_cast<std::int64_t>(s);
         }
-        pool.runPlex<StencilPlexHints>(kPhases, /*n=*/participants, phaseFn);
+        pool.runPlex<citor::HintsDefaults>(kPhases, /*n=*/participants, phaseFn);
         std::int64_t total = 0;
         for (std::int64_t v : slotState) {
           total += v;

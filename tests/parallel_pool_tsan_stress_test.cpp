@@ -12,16 +12,15 @@
 #include "citor/chain.h"
 #include "citor/cpos/fork_join.h"
 #include "citor/cpos/parallel_scan.h"
-#include "citor/example_hints.h"
 #include "citor/hints.h"
 #include "citor/thread_pool.h"
 
 using citor::Balance;
 using citor::BarrierKind;
-using citor::Determinism;
+using citor::ChainHintsDefaults;
+using citor::HintsDefaults;
 using citor::KahanReduceHints;
 using citor::makeStage;
-using citor::Priority;
 using citor::staticStage;
 using citor::ThreadPool;
 
@@ -48,59 +47,14 @@ constexpr bool kTsanActive =
 
 // Hint presets at TU scope so clang-tidy treats every static-constexpr member as a public field of
 // a named type rather than an unused constant.
-struct StressStaticHints {
-  static constexpr Balance balance = Balance::StaticUniform;
-  static constexpr Priority priority = Priority::Throughput;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-};
-
-struct StressDynamicHints {
+struct StressDynamicHints : HintsDefaults {
   static constexpr Balance balance = Balance::DynamicChunked;
-  static constexpr Priority priority = Priority::Throughput;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
   static constexpr std::size_t chunk = 16;
 };
 
-struct StressReduceHints {
-  static constexpr Balance balance = Balance::StaticUniform;
-  static constexpr Determinism determinism = Determinism::FixedBlockOrder;
-  static constexpr Priority priority = Priority::Throughput;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-};
-
-struct StressChainHints {
-  static constexpr Balance balance = Balance::StaticUniform;
-  static constexpr citor::Affinity affinity = citor::Affinity::None;
-  static constexpr Priority priority = Priority::Throughput;
-  static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
-  static constexpr bool pipelineSameChunk = true;
-  static constexpr bool fpDeterministicTree = true;
-  static constexpr bool cancellationChecks = true;
-  static constexpr std::size_t chunk = 0;
-};
-
-struct StressScanHints {
-  static constexpr Balance balance = Balance::StaticUniform;
-  static constexpr Determinism determinism = Determinism::FixedBlockOrder;
-  static constexpr Priority priority = Priority::Throughput;
-  static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-};
-
-struct StressForkJoinHints {
+struct StressForkJoinHints : HintsDefaults {
   static constexpr Balance balance = Balance::Recursive;
   static constexpr citor::Affinity affinity = citor::Affinity::CcdLocal;
-  static constexpr Priority priority = Priority::Throughput;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
 };
 
 // Cross-primitive TSan stress. Each iteration constructs a fresh pool with a randomized
@@ -148,7 +102,7 @@ TEST(ParallelPoolTsanStress, AllPrimitivesUnderRandomizedParticipants) {
     switch (primitive) {
     case 0: {
       // parallelFor with concurrent body-side state mutation; workers race on relaxed atomics.
-      pool.parallelFor<StressStaticHints>(0, n, [&sharedCounts, n](std::size_t lo, std::size_t hi) {
+      pool.parallelFor<HintsDefaults>(0, n, [&sharedCounts, n](std::size_t lo, std::size_t hi) {
         const std::size_t cap = sharedCounts.size();
         for (std::size_t i = lo; i < hi && i < n && i < cap; ++i) {
           sharedCounts[i].fetch_add(1, std::memory_order_relaxed);
@@ -186,7 +140,7 @@ TEST(ParallelPoolTsanStress, AllPrimitivesUnderRandomizedParticipants) {
         // Read the result so TSan must observe the producer's combine completed before the read.
         EXPECT_FALSE(std::isnan(total));
       } else {
-        const double total = pool.parallelReduce<StressReduceHints>(
+        const double total = pool.parallelReduce<HintsDefaults>(
             0, 0, 42.0, [](std::size_t, std::size_t) { return 0.0; },
             [](double a, double b) { return a + b; });
         EXPECT_EQ(total, 42.0);
@@ -198,7 +152,7 @@ TEST(ParallelPoolTsanStress, AllPrimitivesUnderRandomizedParticipants) {
       // the sanitizer must not flag the prePhase -> phaseFn happens-before edge.
       constexpr std::size_t kPhases = 3;
       std::int64_t phaseTarget = 0;
-      pool.runPlex<StressStaticHints>(
+      pool.runPlex<HintsDefaults>(
           kPhases, n,
           [&sharedCounts, &phaseTarget, n](std::size_t /*phaseIdx*/, std::uint32_t /*slot*/,
                                            std::size_t lo, std::size_t hi, void * /*tlsArena*/) {
@@ -232,7 +186,7 @@ TEST(ParallelPoolTsanStress, AllPrimitivesUnderRandomizedParticipants) {
       const std::size_t chainN = std::min<std::size_t>(n, 256);
       const std::size_t chainParticipants = std::min<std::size_t>(participants, 8U);
       if (chainParticipants == participants) {
-        pool.parallelChain<StressChainHints>(
+        pool.parallelChain<ChainHintsDefaults>(
             chainN,
             staticStage("chain-empty-a", [](std::size_t /*stageIdx*/, std::uint32_t /*slot*/,
                                             std::size_t /*lo*/, std::size_t /*hi*/) noexcept {}),
@@ -242,7 +196,7 @@ TEST(ParallelPoolTsanStress, AllPrimitivesUnderRandomizedParticipants) {
         // For pools larger than 8 participants, drop to a single-stage chain so the per-iteration
         // chain time stays bounded; this path still exercises construction/destruction at the
         // larger participant counts.
-        pool.parallelChain<StressChainHints>(
+        pool.parallelChain<ChainHintsDefaults>(
             chainN, staticStage("chain-empty-single",
                                 [](std::size_t /*stageIdx*/, std::uint32_t /*slot*/,
                                    std::size_t /*lo*/, std::size_t /*hi*/) noexcept {}));
@@ -257,7 +211,7 @@ TEST(ParallelPoolTsanStress, AllPrimitivesUnderRandomizedParticipants) {
       if (scanN > 0U) {
         const std::size_t scanParticipants = pool.participants();
         std::atomic<int> totalCalls{0};
-        const std::int64_t total = pool.parallelScan<StressScanHints>(
+        const std::int64_t total = pool.parallelScan<HintsDefaults>(
             scanN, std::int64_t{0},
             [&sharedCounts, &totalCalls,
              scanParticipants](std::size_t /*chunkId*/, std::size_t lo, std::size_t hi,
@@ -361,7 +315,7 @@ TEST(ParallelPoolTsanStress, ConcurrentParallelChainProducersAreSerialized) {
 
   auto run = [&pool](std::atomic<std::uint64_t> &accum) {
     for (int i = 0; i < kIters; ++i) {
-      pool.parallelChain<StressChainHints>(
+      pool.parallelChain<ChainHintsDefaults>(
           64U,
           staticStage("a",
                       [&](std::size_t /*idx*/, std::uint32_t /*slot*/, std::size_t lo,

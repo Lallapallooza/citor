@@ -21,23 +21,11 @@
 #include "citor/thread_pool.h" // IWYU pragma: keep
 
 using citor::Balance;
+using citor::HintsDefaults;
 using citor::ThreadPool;
 
-struct TsanStaticHints {
-  static constexpr Balance balance = Balance::StaticUniform;
-  static constexpr citor::Priority priority =
-      citor::Priority::Throughput;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-};
-
-struct TsanDynamicHints {
+struct TsanDynamicHints : HintsDefaults {
   static constexpr Balance balance = Balance::DynamicChunked;
-  static constexpr citor::Priority priority =
-      citor::Priority::Throughput;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
   static constexpr std::size_t chunk = 16;
 };
 
@@ -67,7 +55,7 @@ TEST(ParallelForTsan, RandomizedSubmissionsAreRaceFree) {
       }
     };
     if (balanceDist(rng) == 0) {
-      pool.parallelFor<TsanStaticHints>(0, n, body);
+      pool.parallelFor<HintsDefaults>(0, n, body);
     } else {
       pool.parallelFor<TsanDynamicHints>(0, n, body);
     }

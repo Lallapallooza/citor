@@ -7,37 +7,14 @@
 #include <limits>
 
 #include "citor/detail/topology.h"
+#include "citor/hints.h"
 #include "citor/pool_group.h"
 #include "citor/thread_pool.h"
 
+using citor::HintsDefaults;
 using citor::PoolGroup;
 using citor::PoolKind;
 using citor::ThreadPool;
-
-namespace {
-
-// Hint preset shared by every parallelFor below; the deadlock guard test cares only about whether
-// the body runs on a background worker, not about chunk shapes.
-struct PoolGroupHints {
-  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  // The dispatch engine inspects every static-constexpr member; the unused-const-variable check
-  // fires when one is omitted, so the full preset is provided even though `estimatedItemNs` and
-  // `minTaskUs` only matter for the inline-fallback gate.
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0; // NOLINT(misc-unused-using-decls)
-  static constexpr std::size_t chunk = 0;
-};
-
-// Force every member of `PoolGroupHints` to participate in odr-use so clang-tidy does not flag
-// individual fields as unused constants under `-Werror`.
-[[maybe_unused]] constexpr auto kPoolGroupHintsOdrAnchor =
-    PoolGroupHints::balance == citor::Balance::StaticUniform &&
-    PoolGroupHints::priority == citor::Priority::Throughput &&
-    PoolGroupHints::estimatedItemNs == 0.0 && PoolGroupHints::minTaskUs == 0.0 &&
-    PoolGroupHints::chunk == 0U;
-
-} // namespace
 
 TEST(PoolGroup, GlobalReturnsSingleton) {
   const PoolGroup *const first = &PoolGroup::global();
@@ -79,7 +56,7 @@ TEST(PoolGroup, ArenaIsolation) {
   // Workers on arena 0 must report `arenaIndex == 0` from inside their body. Workers on arena 1
   // must not appear in arena 0's TLS view -- a worker can only carry its own arena's token.
   std::atomic<std::uint32_t> observed{std::numeric_limits<std::uint32_t>::max()};
-  group.arena(0).parallelFor<PoolGroupHints>(
+  group.arena(0).parallelFor<HintsDefaults>(
       std::size_t{0}, std::size_t{1024}, [&observed](std::size_t /*lo*/, std::size_t /*hi*/) {
         const std::uint32_t hint = ThreadPool::currentArenaIndexHint();
         // Producer-side bodies during the inline path
@@ -110,7 +87,7 @@ TEST(PoolGroup, DeadlockGuardFallsThroughToInline) {
   std::atomic<std::uint64_t> arena1WorkerWakes{0};
   std::atomic<std::uint64_t> outerWorkerInvocations{0};
 
-  group.arena(0).parallelFor<PoolGroupHints>(
+  group.arena(0).parallelFor<HintsDefaults>(
       std::size_t{0}, std::size_t{8},
       [&arena1WorkerWakes, &outerWorkerInvocations, &group](std::size_t /*lo*/,
                                                             std::size_t /*hi*/) {
@@ -120,7 +97,7 @@ TEST(PoolGroup, DeadlockGuardFallsThroughToInline) {
           return;
         }
         outerWorkerInvocations.fetch_add(1, std::memory_order_relaxed);
-        group.arena(1).parallelFor<PoolGroupHints>(
+        group.arena(1).parallelFor<HintsDefaults>(
             std::size_t{0}, std::size_t{4096},
             [&arena1WorkerWakes](std::size_t /*ilo*/, std::size_t /*ihi*/) {
               if (ThreadPool::currentArenaIndexHint() == 1U) {
@@ -152,14 +129,14 @@ TEST(PoolGroup, ReentrancySafe) {
   }
   std::atomic<std::uint64_t> nestedBodyExecutions{0};
   std::atomic<std::uint64_t> workerInvocations{0};
-  group.arena(0).parallelFor<PoolGroupHints>(
+  group.arena(0).parallelFor<HintsDefaults>(
       std::size_t{0}, std::size_t{16},
       [&nestedBodyExecutions, &workerInvocations, &group](std::size_t /*lo*/, std::size_t /*hi*/) {
         if (!ThreadPool::insidePoolWorker()) {
           return; // Producer side; dispatching here would publish a colliding generation.
         }
         workerInvocations.fetch_add(1, std::memory_order_relaxed);
-        group.arena(0).parallelFor<PoolGroupHints>(
+        group.arena(0).parallelFor<HintsDefaults>(
             std::size_t{0}, std::size_t{32},
             [&nestedBodyExecutions](std::size_t lo, std::size_t hi) {
               nestedBodyExecutions.fetch_add(hi - lo, std::memory_order_relaxed);
@@ -180,9 +157,9 @@ TEST(PoolGroup, SingleCcdHostBehavior) {
   }
   // On a one-CCD host the only path is `arena(0)`; verify it runs work end-to-end.
   std::atomic<std::uint64_t> total{0};
-  group.arena(0).parallelFor<PoolGroupHints>(std::size_t{0}, std::size_t{1024},
-                                             [&total](std::size_t lo, std::size_t hi) {
-                                               total.fetch_add(hi - lo, std::memory_order_relaxed);
-                                             });
+  group.arena(0).parallelFor<HintsDefaults>(std::size_t{0}, std::size_t{1024},
+                                            [&total](std::size_t lo, std::size_t hi) {
+                                              total.fetch_add(hi - lo, std::memory_order_relaxed);
+                                            });
   EXPECT_EQ(total.load(std::memory_order_acquire), 1024U);
 }

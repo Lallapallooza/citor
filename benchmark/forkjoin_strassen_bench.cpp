@@ -89,24 +89,9 @@ constexpr std::size_t kSeqCutoff = 64;
 /// drift if the recurrence changes.
 constexpr std::size_t kParallelDepth = 1;
 
-/// Hint preset for the inner parallel-row matmul.
-struct StrassenForHints {
-  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
-  static constexpr citor::Determinism determinism = citor::Determinism::FixedBlockOrder;
-  static constexpr citor::Affinity affinity = citor::Affinity::PhysicalCores;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-  static constexpr bool tlsRequired = false;
-  static constexpr bool allowProducer = true;
-  static constexpr bool allowWorkerSteal = false;
-  static constexpr bool allowNestedParallelism = false;
-  static constexpr bool fpDeterministicTree = true;
-  static constexpr bool cancellationChecks = false;
-  static constexpr bool pipelineSameChunk = false;
-};
+/// Hint preset for the inner parallel-row matmul: bare `HintsDefaults` is enough today, since
+/// the inner `parallelFor` does not consume affinity or cancellation polls.
+using StrassenForHints = citor::HintsDefaults;
 
 /// 64-byte aligned `float[]` deleter; pairs with `std::unique_ptr` so the
 /// buffer is freed automatically.

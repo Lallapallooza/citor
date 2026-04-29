@@ -97,25 +97,9 @@ inline void matmulRowBlock(std::size_t rowFirst, std::size_t rowLast, std::size_
 /// through the natural primitive otherwise (citor, oneTBB, Taskflow, OpenMP).
 template <class Pool> struct MatmulDispatch;
 
-/// Hint preset for the matmul row-block dispatch: static-uniform balance with
-/// `chunk = participants` so `parallelFor` carves `n` rows into one block per
-/// participant.
-struct MatmulHints {
-  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
-  static constexpr citor::Determinism determinism = citor::Determinism::FixedBlockOrder;
-  static constexpr citor::Affinity affinity = citor::Affinity::PhysicalCores;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-  static constexpr bool tlsRequired = false;
-  static constexpr bool allowProducer = true;
-  static constexpr bool allowWorkerSteal = false;
-  static constexpr bool allowNestedParallelism = false;
-  static constexpr bool fpDeterministicTree = true;
+/// Hint preset for the matmul row-block dispatch: cancellation polls disabled.
+struct MatmulHints : citor::HintsDefaults {
   static constexpr bool cancellationChecks = false;
-  static constexpr bool pipelineSameChunk = false;
 };
 
 template <> struct MatmulDispatch<citor::ThreadPool> {

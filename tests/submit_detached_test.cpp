@@ -11,23 +11,10 @@
 #include "citor/hints.h"
 #include "citor/thread_pool.h"
 
-using citor::Affinity;
-using citor::Balance;
 using citor::CancellationToken;
-using citor::Priority;
+using citor::HintsDefaults;
 using citor::submitDetached;
 using citor::ThreadPool;
-
-// Hint preset for submitDetached tests. The submitDetached engine does not consume any of these
-// fields today; the type exists for API symmetry with the rest of the parallel-CPO family.
-struct DetachedTestHints {
-  static constexpr Balance balance = Balance::StaticUniform;
-  static constexpr Affinity affinity = Affinity::None;
-  static constexpr Priority priority = Priority::Throughput;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-};
 
 namespace {
 
@@ -42,7 +29,7 @@ TEST(SubmitDetached, SubmitDetachedSimple) {
   {
     ThreadPool pool(2);
     for (std::size_t i = 0; i < kManyTasks; ++i) {
-      pool.submitDetached<DetachedTestHints>(
+      pool.submitDetached<HintsDefaults>(
           [&counter]() { counter.fetch_add(1, std::memory_order_acq_rel); });
     }
     // Pool destructor drains the in-flight counter to zero before returning.
@@ -56,8 +43,7 @@ TEST(SubmitDetached, SubmitDetachedExceptionCaptured) {
   std::exception_ptr captured;
   {
     ThreadPool pool(2);
-    pool.submitDetached<DetachedTestHints>(
-        []() { throw std::runtime_error("detached body threw"); });
+    pool.submitDetached<HintsDefaults>([]() { throw std::runtime_error("detached body threw"); });
     // Wait for the body to complete by destroying the pool below; capture the slot afterwards.
     // Spin briefly here so the body has a chance to run before we sample (the dtor will also
     // drain, but we want to assert the slot read is safe before destruction).
@@ -87,8 +73,8 @@ TEST(SubmitDetached, SubmitDetachedCancellation) {
     ThreadPool pool(2);
     CancellationToken tok = CancellationToken::makeOwned();
     (void)tok.request_stop();
-    pool.submitDetached<DetachedTestHints>([&ran]() { ran.store(true, std::memory_order_release); },
-                                           tok);
+    pool.submitDetached<HintsDefaults>([&ran]() { ran.store(true, std::memory_order_release); },
+                                       tok);
   }
   EXPECT_FALSE(ran.load(std::memory_order_acquire));
 }
@@ -106,7 +92,7 @@ TEST(SubmitDetached, SubmitDetachedConcurrentSubmit) {
     for (std::size_t p = 0; p < kProducers; ++p) {
       producers.emplace_back([&pool, &counter]() {
         for (std::size_t i = 0; i < kPerProducer; ++i) {
-          pool.submitDetached<DetachedTestHints>(
+          pool.submitDetached<HintsDefaults>(
               [&counter]() { counter.fetch_add(1, std::memory_order_acq_rel); });
         }
       });
@@ -126,7 +112,7 @@ TEST(SubmitDetached, SubmitDetachedDestructionWaitsForInflight) {
   std::atomic<bool> bodyFinished{false};
   {
     ThreadPool pool(2);
-    pool.submitDetached<DetachedTestHints>([&bodyStarted, &bodyFinished]() {
+    pool.submitDetached<HintsDefaults>([&bodyStarted, &bodyFinished]() {
       bodyStarted.store(true, std::memory_order_release);
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
       bodyFinished.store(true, std::memory_order_release);
@@ -152,7 +138,7 @@ TEST(SubmitDetached, CpoDispatchRoutesToPool) {
   std::atomic<int> seen{0};
   {
     ThreadPool pool(2);
-    submitDetached.operator()<DetachedTestHints>(
+    submitDetached.operator()<HintsDefaults>(
         pool, [&seen]() { seen.store(7, std::memory_order_release); });
   }
   EXPECT_EQ(seen.load(std::memory_order_acquire), 7);

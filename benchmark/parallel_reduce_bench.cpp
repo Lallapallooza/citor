@@ -11,7 +11,7 @@
 //   - sum double Kahan vs plain at n=1M, j in {8, 16}
 //
 // Primitive mapping per pool:
-//   - citor pool              -> `parallelReduce<ReduceBenchHints>` (native).
+//   - citor pool              -> `parallelReduce<citor::HintsDefaults>` (native).
 //   - BS::light_thread_pool   -> two-wave: per-block partials via `submit_blocks`,
 //                                serial merge.
 //   - dp::thread_pool         -> two-wave: per-block partials via `enqueue`
@@ -56,28 +56,6 @@
 #ifdef CITOR_BENCH_HAS_OPENMP
 #include <omp.h>
 #endif
-
-// Hint preset at TU scope so clang-tidy treats every static-constexpr member
-// as a public field of a named type rather than an unused constant.
-struct ReduceBenchHints {
-  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
-  static constexpr citor::Determinism determinism = citor::Determinism::FixedBlockOrder;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-};
-
-struct ReduceBenchKahanHints {
-  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
-  static constexpr citor::Determinism determinism = citor::Determinism::KahanCompensated;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-};
 
 namespace citor::bench {
 namespace {
@@ -160,7 +138,7 @@ template <class T>
   ThreadPool pool(participants);
   ReduceData<std::int64_t> d = buildData<std::int64_t>();
   return measureLoop<std::int64_t>("citor::ThreadPool::parallelReduce", cal, [&] {
-    return pool.parallelReduce<ReduceBenchHints>(
+    return pool.parallelReduce<citor::HintsDefaults>(
         std::size_t{0}, kN, std::int64_t{0},
         [&d](std::size_t lo, std::size_t hi) { return partialSumPlain(d.in, lo, hi); },
         std::plus<std::int64_t>{});
@@ -171,7 +149,7 @@ template <class T>
   ThreadPool pool(participants);
   ReduceData<double> d = buildData<double>();
   return measureLoop<double>("citor::ThreadPool::parallelReduce_kahan", cal, [&] {
-    return pool.parallelReduce<ReduceBenchKahanHints>(
+    return pool.parallelReduce<citor::KahanReduceHints>(
         std::size_t{0}, kN, 0.0,
         [&d](std::size_t lo, std::size_t hi) { return partialSumKahan(d.in, lo, hi); },
         std::plus<double>{});

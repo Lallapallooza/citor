@@ -80,39 +80,10 @@ constexpr std::size_t kSeqCutoff = 256;
 // merge phase's parallelScan fans out instead of inline-capping.
 constexpr std::size_t kMergeBuckets = 64;
 
-/// Hint preset for the merge-phase `parallelScan`. Static-uniform balance,
-/// fixed-block determinism so the prefix is reproducible across runs, no
-/// estimated-item gate (the bucket-sizes range is small but still fan-out-
-/// worthy compared to inline-fallback's serial alternative).
-struct CilksortScanHints {
-  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
-  static constexpr citor::Determinism determinism = citor::Determinism::FixedBlockOrder;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-};
-
-/// Hint preset for the merge-phase `parallelFor`. Same shape as the scan
-/// hints; static-uniform partitioning so each participant gets one bucket
-/// range, fixed-block-order determinism, no inline gate.
-struct CilksortForHints {
-  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
-  static constexpr citor::Determinism determinism = citor::Determinism::FixedBlockOrder;
-  static constexpr citor::Affinity affinity = citor::Affinity::PhysicalCores;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-  static constexpr bool tlsRequired = false;
-  static constexpr bool allowProducer = true;
-  static constexpr bool allowWorkerSteal = false;
-  static constexpr bool allowNestedParallelism = false;
-  static constexpr bool fpDeterministicTree = true;
+/// Hint preset for the merge-phase `parallelFor`: cancellation polls disabled. The merge-phase
+/// `parallelScan` uses bare `citor::HintsDefaults`.
+struct CilksortForHints : citor::HintsDefaults {
   static constexpr bool cancellationChecks = false;
-  static constexpr bool pipelineSameChunk = false;
 };
 
 /// Build a deterministic input array of the requested length. Seeded with
@@ -264,7 +235,7 @@ void parallelMerge(Pool &pool, std::int32_t *src, std::size_t aLo, std::size_t a
       }
       return running - initial;
     };
-    const std::size_t inclusiveTotal = pool.template parallelScan<CilksortScanHints>(
+    const std::size_t inclusiveTotal = pool.template parallelScan<citor::HintsDefaults>(
         kMergeBuckets, std::size_t{0}, body, std::plus<std::size_t>{});
     CITOR_ALWAYS_ASSERT(inclusiveTotal == total);
   }

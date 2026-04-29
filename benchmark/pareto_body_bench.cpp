@@ -62,22 +62,8 @@
 
 // Hint preset at TU scope so clang-tidy treats every static-constexpr member
 // as a public field of a named type rather than an unused constant.
-struct ParetoBodyHints {
-  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
-  static constexpr citor::Determinism determinism = citor::Determinism::FixedBlockOrder;
-  static constexpr citor::Affinity affinity = citor::Affinity::None;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-  static constexpr bool tlsRequired = false;
-  static constexpr bool allowProducer = true;
-  static constexpr bool allowWorkerSteal = false;
-  static constexpr bool allowNestedParallelism = false;
-  static constexpr bool fpDeterministicTree = true;
+struct ParetoBodyHints : citor::HintsDefaults {
   static constexpr bool cancellationChecks = false;
-  static constexpr bool pipelineSameChunk = false;
 };
 
 namespace citor::bench {
@@ -91,10 +77,10 @@ constexpr std::size_t kN = 1'000'000;
 /// outcomes contribute 80% of the mass.
 constexpr double kAlpha = 1.16;
 
-/// Pareto minimum (xm) chosen so the distribution's median lands on ~1 us.
+/// Pareto minimum (xm) chosen so the distribution's median is tuned to a microsecond.
 /// Median = xm * 2^(1/alpha); solving for xm at median = 1000 ns gives
 /// xm ~ 549 ns. Rounded down to keep the smallest spin above the TSC noise
-/// floor of ~25 ns.
+/// noise floor.
 constexpr double kParetoXmNs = 540.0;
 
 /// Cap the per-iteration spin so a single sample's tail does not dominate the

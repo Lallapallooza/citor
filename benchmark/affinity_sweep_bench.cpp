@@ -35,7 +35,7 @@ constexpr std::size_t kIterations = 30;
 constexpr std::size_t kWarmupIterations = 3;
 
 /// 64 MB buffer; 2 KB stride. 64MB / 2KB = 32768 stride positions per pass.
-/// 64 MB exceeds typical L3-per-CCD on Zen 5 (32 MB), forcing cross-CCD
+/// 64 MB exceeds typical L3-per-CCD on a multi-CCD chip, forcing cross-CCD
 /// traffic when threads on different CCDs touch overlapping or adjacent
 /// stride regions.
 constexpr std::size_t kBufferBytes = 64ULL * 1024ULL * 1024ULL;
@@ -121,11 +121,7 @@ template <class RunFn>
   const std::uint64_t referenceXor = computeReferenceXor(buffer);
 
   citor::Hints hints;
-  hints.balance = citor::Balance::StaticUniform;
   hints.affinity = affinity;
-  hints.partition = citor::Partition::ContiguousRanges;
-  hints.estimatedItemNs = 0.0;
-  hints.minTaskUs = 0.0;
   hints.cancellationChecks = false;
 
   return measureLoop(

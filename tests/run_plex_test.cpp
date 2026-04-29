@@ -8,25 +8,13 @@
 
 #include "citor/cancellation.h"
 #include "citor/cpos/run_plex.h"
-#include "citor/example_hints.h"
 #include "citor/hints.h"
 #include "citor/thread_pool.h"
 
-using citor::Balance;
+using citor::BulkHints;
 using citor::CancellationToken;
-using citor::FrontierPlexHints;
-using citor::Priority;
+using citor::HintsDefaults;
 using citor::ThreadPool;
-
-// Hint preset at TU scope (not in an anonymous namespace) so clang-tidy treats every
-// static-constexpr member as a public field of a named type rather than an unused constant.
-struct PlexTestHints {
-  static constexpr Balance balance = Balance::StaticUniform;
-  static constexpr Priority priority = Priority::Throughput;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-};
 
 namespace {
 
@@ -53,7 +41,7 @@ TEST(RunPlex, BasicPhaseOrdering) {
     m.store(0, std::memory_order_relaxed);
   }
 
-  pool.runPlex<PlexTestHints>(kPhases, kN,
+  pool.runPlex<HintsDefaults>(kPhases, kN,
                               [&](std::size_t phaseIdx, std::uint32_t slot, std::size_t lo,
                                   std::size_t hi, void * /*tlsArena*/) {
                                 EXPECT_LT(phaseIdx, kPhases);
@@ -84,7 +72,7 @@ TEST(RunPlex, ProducerParticipatesAsSlot0) {
 
   std::atomic<std::size_t> slot0VisitCount{0};
 
-  pool.runPlex<PlexTestHints>(kPhases, kN,
+  pool.runPlex<HintsDefaults>(kPhases, kN,
                               [&](std::size_t /*phaseIdx*/, std::uint32_t slot, std::size_t /*lo*/,
                                   std::size_t /*hi*/, void * /*tlsArena*/) {
                                 if (slot == 0U) {
@@ -105,7 +93,7 @@ TEST(RunPlex, CancellationMidPhase) {
   CancellationToken tok = CancellationToken::makeOwned();
   std::atomic<std::size_t> phasesObserved{0};
   // Stop after the first phase completes (slot-0 hook fires inside phase 0 for slot 0).
-  pool.runPlex<PlexTestHints>(
+  pool.runPlex<HintsDefaults>(
       kPhases, kN,
       [&](std::size_t /*phaseIdx*/, std::uint32_t slot, std::size_t /*lo*/, std::size_t /*hi*/,
           void * /*tlsArena*/) {
@@ -130,7 +118,7 @@ TEST(RunPlex, ExceptionInPhaseFnPropagates) {
   constexpr std::size_t kN = 32;
 
   EXPECT_THROW(
-      pool.runPlex<PlexTestHints>(kPhases, kN,
+      pool.runPlex<HintsDefaults>(kPhases, kN,
                                   [](std::size_t phaseIdx, std::uint32_t slot, std::size_t /*lo*/,
                                      std::size_t /*hi*/, void * /*tlsArena*/) {
                                     if (phaseIdx == 3U && slot == 0U) {
@@ -150,12 +138,12 @@ TEST(RunPlex, MemberCpoEquivalence) {
   std::atomic<std::size_t> memberCalls{0};
   std::atomic<std::size_t> cpoCalls{0};
 
-  pool.runPlex<PlexTestHints>(
+  pool.runPlex<HintsDefaults>(
       kPhases, kN,
       [&](std::size_t /*phaseIdx*/, std::uint32_t /*slot*/, std::size_t /*lo*/, std::size_t /*hi*/,
           void * /*tlsArena*/) { memberCalls.fetch_add(1, std::memory_order_relaxed); });
 
-  citor::runPlex.template operator()<PlexTestHints>(
+  citor::runPlex.template operator()<HintsDefaults>(
       pool, kPhases, kN,
       [&](std::size_t /*phaseIdx*/, std::uint32_t /*slot*/, std::size_t /*lo*/, std::size_t /*hi*/,
           void * /*tlsArena*/) { cpoCalls.fetch_add(1, std::memory_order_relaxed); });
@@ -184,7 +172,7 @@ TEST(RunPlex, PrePhaseStateVisibleToWorkers) {
     }
   }
 
-  pool.runPlex<PlexTestHints>(
+  pool.runPlex<HintsDefaults>(
       kPhases, kN,
       [&](std::size_t phaseIdx, std::uint32_t slot, std::size_t /*lo*/, std::size_t /*hi*/,
           void * /*tlsArena*/) {
@@ -217,7 +205,7 @@ TEST(RunPlex, WorkerExceptionStopsLaterPhases) {
   std::atomic<int> slot0LatePhaseCalls{0};
 
   EXPECT_THROW(
-      pool.runPlex<PlexTestHints>(
+      pool.runPlex<HintsDefaults>(
           /*nPhases=*/3, /*n=*/64,
           [&](std::size_t phase, std::uint32_t slot, std::size_t /*lo*/, std::size_t /*hi*/,
               void * /*tls*/) {
@@ -243,7 +231,7 @@ TEST(RunPlex, InlineFallbackForSingleParticipant) {
   constexpr std::size_t kN = 8;
 
   std::atomic<std::size_t> calls{0};
-  pool.runPlex<PlexTestHints>(kPhases, kN,
+  pool.runPlex<HintsDefaults>(kPhases, kN,
                               [&](std::size_t phaseIdx, std::uint32_t slot, std::size_t lo,
                                   std::size_t hi, void * /*tlsArena*/) {
                                 EXPECT_EQ(slot, 0U);
@@ -259,7 +247,7 @@ TEST(RunPlex, InlineFallbackForSingleParticipant) {
 TEST(RunPlex, ZeroPhasesIsNoop) {
   ThreadPool pool(4);
   std::atomic<std::size_t> calls{0};
-  pool.runPlex<PlexTestHints>(
+  pool.runPlex<HintsDefaults>(
       0, 32,
       [&](std::size_t /*phaseIdx*/, std::uint32_t /*slot*/, std::size_t /*lo*/, std::size_t /*hi*/,
           void * /*tlsArena*/) { calls.fetch_add(1, std::memory_order_relaxed); });
@@ -277,7 +265,7 @@ TEST(RunPlex, SlotRangesPartitionExactly) {
     c.store(0, std::memory_order_relaxed);
   }
 
-  pool.runPlex<PlexTestHints>(kPhases, kN,
+  pool.runPlex<HintsDefaults>(kPhases, kN,
                               [&](std::size_t /*phaseIdx*/, std::uint32_t /*slot*/, std::size_t lo,
                                   std::size_t hi, void * /*tlsArena*/) {
                                 for (std::size_t i = lo; i < hi; ++i) {
@@ -290,11 +278,12 @@ TEST(RunPlex, SlotRangesPartitionExactly) {
   }
 }
 
-// FrontierPlexHints integration smoke test: runPlex template-instantiates with the named site hint.
-TEST(RunPlex, PrimRelaxHintsInstantiates) {
+// Bundled preset smoke test: runPlex template-instantiates with one of the presets shipped
+// alongside HintsDefaults.
+TEST(RunPlex, BulkHintsInstantiates) {
   ThreadPool pool(4);
   std::atomic<std::size_t> calls{0};
-  pool.runPlex<FrontierPlexHints>(
+  pool.runPlex<BulkHints>(
       4, 16,
       [&](std::size_t /*phaseIdx*/, std::uint32_t /*slot*/, std::size_t /*lo*/, std::size_t /*hi*/,
           void * /*tlsArena*/) { calls.fetch_add(1, std::memory_order_relaxed); });

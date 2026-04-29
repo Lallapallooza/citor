@@ -10,7 +10,7 @@
 //
 // Per-pool primitive mapping (every competitor lacks a native plex; the
 // natural shape-equivalent is "N back-to-back parallelFor waves"):
-//   - citor pool              -> `runPlex<PlexBenchHints>` (native plex).
+//   - citor pool              -> `runPlex<citor::HintsDefaults>` (native plex).
 //   - BS::thread_pool          -> N back-to-back `submit_blocks(0, j, body, j).wait()`.
 //   - dp::thread_pool          -> N back-to-back fanouts of j enqueue futures + join.
 //   - task_thread_pool         -> N back-to-back fanouts of j submit futures + join.
@@ -37,16 +37,6 @@
 #include "bench_registry.h"
 #include "competitor_traits.h"
 #include "cycle_clock.h"
-
-// Hint preset at TU scope (not in an anonymous namespace) so clang-tidy treats every
-// static-constexpr member as a public field of a named type rather than an unused constant.
-struct PlexBenchHints {
-  static constexpr citor::Balance balance = citor::Balance::StaticUniform;
-  static constexpr citor::Priority priority = citor::Priority::Throughput;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-};
 
 namespace citor::bench {
 namespace {
@@ -108,7 +98,7 @@ template <class RunFn>
     sink.fetch_add(slot, std::memory_order_relaxed);
   };
   BenchRow row = measureLoop("citor::ThreadPool::runPlex", cal, [&] {
-    pool.runPlex<PlexBenchHints>(kPlexPhases, /*n=*/participants, phaseFn);
+    pool.runPlex<citor::HintsDefaults>(kPlexPhases, /*n=*/participants, phaseFn);
   });
   (void)sink.load(std::memory_order_relaxed);
   return row;

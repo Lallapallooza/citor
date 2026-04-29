@@ -11,33 +11,17 @@
 #include "citor/hints.h"
 #include "citor/thread_pool.h"
 
-using citor::Affinity;
 using citor::Balance;
 using citor::CancellationToken;
+using citor::CcdLocalForkJoinHints;
 using citor::forkJoin;
-using citor::Priority;
+using citor::HintsDefaults;
 using citor::ThreadPool;
 
-// Hint preset for fork-join tests. Affinity defaults to None; the cross-CCD case is exercised
-// separately via `CcdLocalForkJoinHints` so the default-None case is also covered.
-struct ForkJoinTestHints {
+// Hint preset for fork-join tests. Recursive balance routes through the work-stealing path; the
+// cross-CCD case is exercised via the bundled `CcdLocalForkJoinHints` preset.
+struct ForkJoinTestHints : HintsDefaults {
   static constexpr Balance balance = Balance::Recursive;
-  static constexpr Affinity affinity = Affinity::None;
-  static constexpr Priority priority = Priority::Throughput;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
-};
-
-// Hint preset that requests CCD-local victim selection so the affinity-aware probe is also
-// exercised end-to-end.
-struct CcdLocalForkJoinHints {
-  static constexpr Balance balance = Balance::Recursive;
-  static constexpr Affinity affinity = Affinity::CcdLocal;
-  static constexpr Priority priority = Priority::Throughput;
-  static constexpr double estimatedItemNs = 0.0;
-  static constexpr double minTaskUs = 0.0;
-  static constexpr std::size_t chunk = 0;
 };
 
 // 4 root tasks, each writes to a distinct slot. Verify every slot was set exactly once.
