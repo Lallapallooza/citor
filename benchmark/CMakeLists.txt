@@ -145,6 +145,8 @@ if(Eigen_ADDED AND NOT TARGET eigen_threadpool)
     )
 endif()
 
+# HdrHistogram_c is a mandatory bench dependency. The cold-dispatch
+# tail-latency TU requires it; without it, parallel_bench cannot configure.
 cpmaddpackage(
     NAME HdrHistogram_c
     GITHUB_REPOSITORY HdrHistogram/HdrHistogram_c

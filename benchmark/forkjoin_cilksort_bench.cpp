@@ -247,12 +247,11 @@ void parallelMerge(Pool &pool, std::int32_t *src, std::size_t aLo, std::size_t a
   if constexpr (std::is_same_v<Pool, ::citor::ThreadPool>) {
     auto body = [&sizes, &offsets](std::size_t /*chunkId*/, std::size_t lo, std::size_t hi,
                                    std::size_t initial, std::size_t * /*unused*/) -> std::size_t {
-      // The scan is two-pass: the first wave receives `initial = identity`
-      // (zero) and returns the chunk's partial sum; the second wave
-      // receives the chunk's exclusive prefix in `initial` and writes the
-      // per-bucket offset. Distinguish by whether the offsets slot has
-      // been written yet -- the slot stays at its sentinel until pass 2
-      // touches it.
+      // Both passes write `offsets[i]` unconditionally. Pass 1 writes
+      // intermediate values that pass 2 overwrites with the correct
+      // exclusive prefix; correctness depends on pass 2 running strictly
+      // after pass 1 across every chunk (the bench dispatches them
+      // sequentially via two parallelScan calls).
       //
       // The two-pass body uses the `running - initial` partial-sum
       // convention: pass 1 returns the chunk's local sum, pass 2 returns

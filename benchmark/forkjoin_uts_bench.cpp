@@ -418,6 +418,20 @@ template <class PoolT>
 
 BenchTable buildTable(std::size_t participants, const char *suffix,
                       const CyclesPerNanosecond &cal) {
+  // Lazy first-call cross-check of the canonical T1 node count via the
+  // sequential walker; if T1's tree shape parameters drift, the bench
+  // aborts rather than silently publishing wrong rows. Function-local
+  // static is thread-safe in C++11+, so the 4.13M-node walk runs at most
+  // once per process and is gated to actual UTS workload invocations
+  // (not every parallel_bench startup).
+  static const bool checked = []() {
+    const RngState root = rngInit(kRootSeed);
+    const std::int64_t seq = seqWalk(root, 0);
+    CITOR_ALWAYS_ASSERT(seq == kExpectedNodes);
+    return true;
+  }();
+  (void)checked;
+
   BenchTable table;
   table.workload = std::string{"forkjoin_uts_t1_"} + suffix;
   table.rows.push_back(measureCitor(participants, cal));
@@ -440,13 +454,6 @@ BenchTable runUtsJ16(const CyclesPerNanosecond &cal) {
 
 struct UtsRegistrar {
   UtsRegistrar() {
-    // Cross-check the canonical T1 node count via the sequential walker;
-    // if T1's tree shape parameters drift, the bench fails to register
-    // rather than silently publishing wrong rows.
-    const RngState root = rngInit(kRootSeed);
-    const std::int64_t seq = seqWalk(root, 0);
-    CITOR_ALWAYS_ASSERT(seq == kExpectedNodes);
-
     registerWorkload({.name = "forkjoin_uts_t1_j8", .run = &runUtsJ8});
     registerWorkload({.name = "forkjoin_uts_t1_j16", .run = &runUtsJ16});
   }

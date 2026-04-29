@@ -61,6 +61,15 @@ namespace citor::bench {
 /// The trait does not impose a chunking policy because each competitor handles
 /// range partitioning differently; the empty-fan-out workload submits the full
 /// range as a single block, which is sufficient to measure dispatch latency.
+///
+/// Shim primitive contract: `parallelFor`, `parallelReduce`, and `parallelChain`
+/// shims early-return when `participantCount == 0` (`parallelReduce` returns
+/// |identity|, `parallelChain` is a no-op) for the BS::light_thread_pool
+/// specialization. Callers must pass at least 1. The empty-range guard
+/// (`last <= first`) is uniform across the three primitives. Other future-pool
+/// adapters (dp / task / riften) historically clamp `participantCount==0` to
+/// `blocks=1`; bench callers always pass a positive count, so the two paths
+/// agree in practice.
 template <class Pool> struct CompetitorTraits;
 
 /// Bench-only runtime hint preset that mirrors the empty-fan-out workload's expectations.
@@ -72,7 +81,10 @@ template <class Pool> struct CompetitorTraits;
 struct EmptyFanoutHints {
   static constexpr citor::Balance balance = citor::Balance::StaticUniform;
   static constexpr citor::Determinism determinism = citor::Determinism::FixedBlockOrder;
-  static constexpr citor::Affinity affinity = citor::Affinity::PhysicalCores;
+  // Affinity::None -- the bench does not depend on affinity behaviour;
+  // explicitly chosen to avoid silent behaviour change if a future wiring
+  // turns Affinity::PhysicalCores into a non-decorative pin.
+  static constexpr citor::Affinity affinity = citor::Affinity::None;
   static constexpr citor::Priority priority = citor::Priority::Throughput;
   static constexpr citor::Partition partition = citor::Partition::ContiguousRanges;
   static constexpr double estimatedItemNs = 0.0;
@@ -203,10 +215,10 @@ template <> struct CompetitorTraits<BS::light_thread_pool> {
   template <class T, class Map, class Combine>
   static T parallelReduce(BS::light_thread_pool &pool, std::size_t first, std::size_t last,
                           std::size_t participantCount, T identity, Map map, Combine combine) {
-    if (last <= first) {
+    if (last <= first || participantCount == 0U) {
       return identity;
     }
-    const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
+    const std::size_t blocks = participantCount;
     std::vector<T> partials(blocks, identity);
     // Per-block fetch_add gives each block a unique partials slot without
     // inferring the index from `bf`. BS partitions with floor-division plus
@@ -254,7 +266,10 @@ template <> struct CompetitorTraits<BS::light_thread_pool> {
   template <class Fn>
   static void parallelChain(BS::light_thread_pool &pool, std::size_t first, std::size_t last,
                             std::size_t participantCount, std::size_t stageCount, Fn fn) {
-    const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
+    if (participantCount == 0U) {
+      return;
+    }
+    const std::size_t blocks = participantCount;
     for (std::size_t stage = 0; stage < stageCount; ++stage) {
       pool.submit_blocks(
               first, last, [stage, &fn](std::size_t bf, std::size_t bl) { fn(stage, bf, bl); },
@@ -806,9 +821,9 @@ template <> struct CompetitorTraits<::tbb::task_arena> {
 /// Primitive mapping:
 ///   - `submitBlocksAndWait` -> single-task taskflow + run + wait.
 ///   - `parallelFor`         -> N range-strided tasks, one per worker block.
-///   - `parallelReduce`      -> emulated; Taskflow does not ship a first-class
-///     reduce, so the trait runs `for_each_index` over the chunk grid and
-///     atomically merges per-thread partials.
+///   - `parallelReduce`      -> not provided; the Pareto-reduce bench inlines
+///     per-pool because the bookkeeping varies enough that a uniform signature
+///     would obscure it.
 ///   - `parallelScan`        -> emulated; Taskflow does not ship a scan, so
 ///     a sequential prefix sum is run on the producer thread for correctness.
 ///     This is honest -- a competitor that lacks the primitive cannot win the
@@ -861,34 +876,9 @@ template <> struct CompetitorTraits<::tf::Executor> {
     exec.run(flow).wait();
   }
 
-  /// Reduction emulated via N partial-tasks plus a serial merge after wait.
-  /// Taskflow ships `transform_reduce`; we use a manual fan-out so the bench
-  /// captures the exact same dispatch + join shape as `parallelFor`.
-  template <class T, class Map, class Combine>
-  static T parallelReduce(::tf::Executor &exec, std::size_t first, std::size_t last, T identity,
-                          Map map, Combine combine) {
-    const std::size_t participantCount = exec.num_workers();
-    const std::size_t blocks = participantCount == 0 ? std::size_t{1} : participantCount;
-    std::vector<T> partials(blocks, identity);
-    const std::size_t span = last - first;
-    const std::size_t block = (span + blocks - 1) / blocks;
-    ::tf::Taskflow flow;
-    for (std::size_t b = 0; b < blocks; ++b) {
-      const std::size_t bf = first + std::min(span, b * block);
-      const std::size_t bl = first + std::min(span, (b + 1) * block);
-      if (bf == bl) {
-        continue;
-      }
-      flow.emplace(
-          [bf, bl, b, &partials, &map, &identity]() { partials[b] = map(bf, bl, identity); });
-    }
-    exec.run(flow).wait();
-    T result = identity;
-    for (auto &p : partials) {
-      result = combine(result, p);
-    }
-    return result;
-  }
+  // Native-pool parallelReduce shim is not provided; the Pareto-reduce bench
+  // inlines per-pool because the bookkeeping varies enough that a uniform
+  // signature would obscure it.
 
   /// Scan emulated as a serial pass on the producer; Taskflow has no parallel scan.
   template <class T, class Body>
@@ -945,7 +935,9 @@ template <> struct CompetitorTraits<::tf::Executor> {
 /// Primitive mapping (every primitive shims around `Schedule()` + `Barrier`):
 ///   - `submitBlocksAndWait` -> 1-block schedule + barrier wait.
 ///   - `parallelFor`         -> N-block schedule + barrier wait.
-///   - `parallelReduce`      -> N-block schedule with per-block partials + serial merge.
+///   - `parallelReduce`      -> not provided; the Pareto-reduce bench inlines
+///     per-pool because the bookkeeping varies enough that a uniform signature
+///     would obscure it.
 ///   - `parallelScan`        -> serial fallback; Eigen has no scan primitive.
 ///   - `fanout`              -> single `Schedule` + barrier wait.
 ///   - `parallelChain`       -> back-to-back parallelFor waves.
@@ -1011,44 +1003,9 @@ template <> struct CompetitorTraits<::Eigen::ThreadPool> {
     bar.Wait();
   }
 
-  /// Reduction over per-block partials, merged serially after the barrier.
-  template <class T, class Map, class Combine>
-  static T parallelReduce(::Eigen::ThreadPool &pool, std::size_t first, std::size_t last,
-                          T identity, Map map, Combine combine) {
-    const std::size_t participantCount = static_cast<std::size_t>(pool.NumThreads());
-    const std::size_t blocks = participantCount == 0 ? std::size_t{1} : participantCount;
-    std::vector<T> partials(blocks, identity);
-    const std::size_t span = last - first;
-    const std::size_t block = (span + blocks - 1) / blocks;
-    std::vector<std::pair<std::size_t, std::size_t>> ranges;
-    ranges.reserve(blocks);
-    for (std::size_t b = 0; b < blocks; ++b) {
-      const std::size_t bf = first + std::min(span, b * block);
-      const std::size_t bl = first + std::min(span, (b + 1) * block);
-      if (bf == bl) {
-        continue;
-      }
-      ranges.emplace_back(bf, bl);
-    }
-    if (ranges.empty()) {
-      return identity;
-    }
-    ::Eigen::Barrier bar(static_cast<unsigned int>(ranges.size()));
-    for (std::size_t i = 0; i < ranges.size(); ++i) {
-      const std::size_t bf = ranges[i].first;
-      const std::size_t bl = ranges[i].second;
-      pool.Schedule([&bar, bf, bl, i, &partials, &map, &identity]() {
-        partials[i] = map(bf, bl, identity);
-        bar.Notify();
-      });
-    }
-    bar.Wait();
-    T result = identity;
-    for (auto &p : partials) {
-      result = combine(result, p);
-    }
-    return result;
-  }
+  // Native-pool parallelReduce shim is not provided; the Pareto-reduce bench
+  // inlines per-pool because the bookkeeping varies enough that a uniform
+  // signature would obscure it.
 
   /// Scan: serial fallback; Eigen has no scan primitive.
   template <class T, class Body>
@@ -1101,8 +1058,9 @@ struct OpenMpRunner {
 /// Primitive mapping (each opens a fresh `parallel` region):
 ///   - `submitBlocksAndWait` -> single-block `parallel for` over `[first, last)`.
 ///   - `parallelFor`         -> `parallel for schedule(static)`.
-///   - `parallelReduce`      -> `parallel for reduction(...)`. Caller supplies
-///     the operator via a templated lambda that walks `[bf, bl)`.
+///   - `parallelReduce`      -> not provided; the Pareto-reduce bench inlines
+///     per-pool because the bookkeeping varies enough that a uniform signature
+///     would obscure it.
 ///   - `parallelScan`        -> serial fallback wrapped in a single-thread
 ///     parallel region; OpenMP gained `scan` in 5.0 but the directive depends
 ///     on the compiler/runtime supporting `inscan` clauses, which is not
@@ -1151,34 +1109,9 @@ template <> struct CompetitorTraits<OpenMpRunner> {
     }
   }
 
-  /// Reduction over `[first, last)` using OpenMP atomic merge.
-  ///
-  /// `#pragma omp for reduction(...)` requires the operator to be a recognized
-  /// built-in (sum, product, min, max, ...). For arbitrary `combine`, the trait
-  /// runs each thread's per-block partial under `parallel`, then atomically
-  /// merges via `#pragma omp critical`. This matches the shape of the other
-  /// traits' reduce shims and keeps the comparison fair.
-  template <class T, class Map, class Combine>
-  static T parallelReduce(OpenMpRunner &runner, std::size_t first, std::size_t last, T identity,
-                          Map map, Combine combine) {
-    const int threads = static_cast<int>(runner.threads);
-    T result = identity;
-#pragma omp parallel num_threads(threads)
-    {
-      const std::size_t threadCount = static_cast<std::size_t>(omp_get_num_threads());
-      const std::size_t threadIdx = static_cast<std::size_t>(omp_get_thread_num());
-      const std::size_t span = last - first;
-      const std::size_t block = (span + threadCount - 1) / threadCount;
-      const std::size_t bf = first + std::min(span, threadIdx * block);
-      const std::size_t bl = first + std::min(span, (threadIdx + 1) * block);
-      if (bf < bl) {
-        T local = map(bf, bl, identity);
-#pragma omp critical
-        result = combine(result, local);
-      }
-    }
-    return result;
-  }
+  // Native-pool parallelReduce shim is not provided; the Pareto-reduce bench
+  // inlines per-pool because the bookkeeping varies enough that a uniform
+  // signature would obscure it.
 
   /// Scan: serial fallback. OpenMP 5.0's `scan` directive is uneven in support.
   template <class T, class Body>

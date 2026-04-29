@@ -31,6 +31,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -147,7 +148,7 @@ private:
 
 /// Float comparison reference: every element in the buffer should equal `1.0`
 /// after the body runs (each body slot writes `1.0` into its range), so the
-/// expected sum is exactly `kElementCount`. The body intentionally writes a
+/// expected sum is exactly `kElementCount`. The body writes a
 /// constant rather than reading the input; this keeps cross-CCD coherence
 /// traffic on the *dispatch* path the bench wants to measure, instead of
 /// pulling the reading-side cache lines into a different CCD's L3.
@@ -245,7 +246,11 @@ BenchTable runCrossCcd(const CyclesPerNanosecond &cal) {
   table.workload = "cross_ccd_parallel_for";
 
   const auto ccds = enumerateCcds();
-  CITOR_ALWAYS_ASSERT(ccds.size() >= 2U);
+  if (ccds.size() < 2U) {
+    throw std::runtime_error{"cross-CCD bench: enumerateCcds() returned fewer than 2 CCDs at "
+                             "runtime; topology may have been collapsed by post-init affinity. "
+                             "Skipping."};
+  }
   const unsigned cpuOnCcd0 = firstCpuOfCcd(ccds[0]);
   const unsigned cpuOnCcd1 = firstCpuOfCcd(ccds[1]);
 

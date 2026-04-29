@@ -5,14 +5,19 @@
 // each item); a bound-pruning step drops subtrees whose upper bound is
 // below the best value found so far. Cancellation triggers when a
 // dramatically tighter upper bound is discovered: the producer's
-// CancellationToken is signaled and peer branches observe via
+// citor::CancellationToken is signaled and peer branches observe via
 // `tok.stop_requested()` polled at recursive entry.
 //
-// Two rows per pool: `[cancel-on]` (HintsT::cancellationChecks=true) and
-// `[cancel-off]` (HintsT::cancellationChecks=false). Both rows must produce
-// the same optimal value (the cancellation only prunes provably-suboptimal
-// subtrees). A counter side-channel asserts >= 1 cancellation firing per
-// timing iteration in `[cancel-on]` mode.
+// Two rows per pool: `[cancel-on]` (citor::CancellationToken cooperative,
+// HintsT::cancellationChecks=true) and `[cancel-off]`
+// (HintsT::cancellationChecks=false). Both citor and oneTBB rows use
+// citor::CancellationToken for the cancellation side-channel; this bench
+// measures cooperative-cancellation overhead, NOT pool-native cancellation.
+// TBB's native task_group_context::cancel_group_execution is
+// not exercised here. Both rows must produce the same optimal value (the
+// cancellation only prunes provably-suboptimal subtrees). A counter
+// side-channel asserts >= 1 cancellation firing per timing iteration in
+// `[cancel-on]` mode.
 //
 // Pool eligibility: citor + oneTBB. OpenMP recursive-spawn requires the
 // bench to open a "parallel single" region around the recursion entry;
@@ -162,6 +167,10 @@ void searchRec(Pool &pool, const std::vector<Item> &items, std::size_t idx, int 
     // what the side-channel counts). The bound-pruning step below
     // continues to prune the remaining search tree against the running
     // best, so correctness against the DP reference is preserved.
+    // observed > 0 guard: skip the first leaf tightening (we want a
+    // meaningful prior best, not a triggered cancel on the first non-zero
+    // value); the bound-prune pathway above already short-circuits zero-value
+    // branches.
     if (state.cancellationEnabled && curValue > observed && observed > 0 &&
         curValue > observed + (observed / 100)) {
       state.token.request_stop();
@@ -301,14 +310,18 @@ BenchTable buildTable(std::size_t participants, KnapsackCell cell, const CyclesP
   table.workload =
       std::string{"forkjoin_knapsack_cancel_j"} + std::to_string(participants) + "_" + cell.suffix;
 
-  // citor: 2 rows.
+  // citor: 2 rows. Both rows below use citor::CancellationToken for the
+  // observation side-channel. TBB's native cancel_group_execution is NOT
+  // wired through; the oneTBB rows measure cooperative-cancellation
+  // overhead with the same token type, not TBB-native cancellation.
   table.rows.push_back(measureKnapsack<citor::ThreadPool>(
-      "citor::ThreadPool[cancel-on]", participants, cell.n, cal, /*cancellationEnabled=*/true));
+      "citor::ThreadPool[citor::CancellationToken cooperative cancel-on]", participants, cell.n,
+      cal, /*cancellationEnabled=*/true));
   table.rows.push_back(measureKnapsack<citor::ThreadPool>(
       "citor::ThreadPool[cancel-off]", participants, cell.n, cal, /*cancellationEnabled=*/false));
 #ifdef CITOR_BENCH_HAS_TBB
-  table.rows.push_back(
-      measureKnapsack<::tbb::task_arena>("oneTBB[cancel-on]", participants, cell.n, cal, true));
+  table.rows.push_back(measureKnapsack<::tbb::task_arena>(
+      "oneTBB[citor::CancellationToken cooperative cancel-on]", participants, cell.n, cal, true));
   table.rows.push_back(
       measureKnapsack<::tbb::task_arena>("oneTBB[cancel-off]", participants, cell.n, cal, false));
 #endif

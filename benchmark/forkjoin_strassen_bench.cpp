@@ -82,8 +82,11 @@ constexpr std::size_t kSeqCutoff = 64;
 /// across the seven mults, so the scratch arena footprint stays bounded.
 /// Top-level parallelism is sufficient to expose seven concurrent leaves
 /// -- enough to saturate j={8, 16} participants without blowing the
-/// scratch arena at `N = 2048` (~234 MiB of floats at depth=1;
-/// scratchBudget(2048,0) = 17M + 7*scratchBudget(1024,1) ~= 58.4M floats).
+/// scratch arena at `N = 2048`. The exact float count is
+/// `scratchBudget(2048, 0)` (constexpr, defined below); see the
+/// `scratchBudget` recurrence for the multiplier rules. Defer to the
+/// constexpr rather than restating the figure here so the comment cannot
+/// drift if the recurrence changes.
 constexpr std::size_t kParallelDepth = 1;
 
 /// Hint preset for the inner parallel-row matmul.

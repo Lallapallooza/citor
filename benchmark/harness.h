@@ -113,10 +113,6 @@ template <class Invoke>
   return samples;
 }
 
-} // namespace citor::bench
-
-namespace citor::bench {
-
 /// Honest-bench checklist gate result. `Pass` means the gate is observed to
 /// hold; `Fail` means it is observed not to hold; `Unknown` means the host
 /// does not expose the data needed to decide.
