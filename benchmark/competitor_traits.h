@@ -1252,26 +1252,25 @@ template <> struct CompetitorTraits<dispenso::ThreadPool> {
     if (last <= first) {
       return;
     }
+    // Recommended form: `parallel_for(taskSet, start, end, body)` lets dispenso pick its
+    // default chunking strategy (`kStatic`). Avoids the explicit-ChunkedRange + small-range
+    // trap that triggers dispenso's inline-fallback with no consideration of body cost.
     dispenso::TaskSet taskSet(pool);
-    dispenso::parallel_for(taskSet,
-                           dispenso::ChunkedRange<std::size_t>(first, last, std::size_t{1}),
+    dispenso::parallel_for(taskSet, first, last,
                            [&fn](std::size_t lo, std::size_t hi) { fn(lo, hi); });
   }
 
   template <class Fn>
   static void parallelFor(dispenso::ThreadPool &pool, std::size_t first, std::size_t last,
-                          std::size_t participantCount, Fn fn) {
-    if (last <= first || participantCount == 0U) {
+                          std::size_t /*participantCount*/, Fn fn) {
+    if (last <= first) {
       return;
     }
-    const std::size_t span = last - first;
-    const std::size_t denom = participantCount;
-    std::size_t chunk = (span + denom - 1U) / denom;
-    if (chunk == 0U) {
-      chunk = 1U;
-    }
+    // Same recommended form for the bulk-partition entry. dispenso's default chunking
+    // produces a partition shape comparable to citor's auto-derived chunk on bulk
+    // workloads.
     dispenso::TaskSet taskSet(pool);
-    dispenso::parallel_for(taskSet, dispenso::ChunkedRange<std::size_t>(first, last, chunk),
+    dispenso::parallel_for(taskSet, first, last,
                            [&fn](std::size_t lo, std::size_t hi) { fn(lo, hi); });
   }
 };
