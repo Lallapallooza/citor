@@ -187,8 +187,8 @@ set(_citor_bench_sources
     parallel_reduce_bench.cpp
     parallel_reduce_pareto_bench.cpp
     pareto_body_bench.cpp
-    parallelfor_heat_bench.cpp
     plex_bench.cpp
+    runplex_heat_bench.cpp
     runplex_stencil_bench.cpp
     scan_bench.cpp
 )
