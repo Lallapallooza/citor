@@ -68,10 +68,9 @@ constexpr std::size_t kWarmupIterations = 5;
 
 /// Hint preset for the cross-CCD body. Static-uniform balance keeps the
 /// dispatch contract identical across rows (only the producer/arena placement
-/// changes); SplitCcd affinity is the citor default for bulk parallel-for and
-/// matches the workload's intent.
+/// changes); affinity inherits the engine default (CcdLocal) so the steal probe
+/// stays inside the producer's CCD.
 struct CrossCcdHints : citor::HintsDefaults {
-  static constexpr citor::Affinity affinity = citor::Affinity::SplitCcd;
   static constexpr bool cancellationChecks = false;
 };
 

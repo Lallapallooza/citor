@@ -251,14 +251,10 @@ TEST(ThreadPoolLifecycle, IdleBurnUnder1Percent) {
 // exists; the engine itself is observable only via the truncation contract checked here.
 TEST(ThreadPoolLifecycle, AffinityTruncatesToPhysicalCores) {
 #ifdef __linux__
-  const ThreadPool pool(8);
-  ASSERT_GE(pool.participants(), 1U);
-
-  // Affinity is set inside `pthread_create` -> `bindAffinityOnce`. The behavioral contract is
-  // that the pool truncates to physical cores in the process affinity mask, which guarantees
-  // pinning targets are distinct (one logical CPU per physical core was selected at topology
-  // detection time). The runtime pinning probe lives in the primitive layer, where workers can
-  // write their `sched_getcpu()` into a verification slot once a primitive can wake them.
+  // Snapshot the process affinity mask BEFORE construction. The pool auto-pins the constructor
+  // to slot 0's CPU at construction time so user buffers first-touch on the right CCD; the
+  // truncation contract is "participants <= physical CPUs in the original process mask", not
+  // "participants <= post-pin mask".
   cpu_set_t mask;
   CPU_ZERO(&mask);
   ASSERT_EQ(sched_getaffinity(0, sizeof(mask), &mask), 0);
@@ -268,9 +264,41 @@ TEST(ThreadPoolLifecycle, AffinityTruncatesToPhysicalCores) {
       ++allowed;
     }
   }
+
+  const ThreadPool pool(8);
+  ASSERT_GE(pool.participants(), 1U);
+
   EXPECT_LE(pool.participants(), allowed);
 #else
   GTEST_SKIP() << "affinity contract is Linux-only";
+#endif
+}
+
+// `snapshotCounters()` returns zero pool-level fields unless `CITOR_ENABLE_POOL_COUNTERS` was
+// defined at build time. When defined, dispatches advance per fan-out and inlineFallbacks
+// advances per `runInline` short-circuit. Worker-aggregated fields are always available.
+TEST(ThreadPoolLifecycle, CountersAdvanceOnDispatchAndInlineFallback) {
+#ifdef CITOR_ENABLE_POOL_COUNTERS
+  ThreadPool pool(4);
+  const auto before = pool.snapshotCounters();
+  for (int i = 0; i < 16; ++i) {
+    pool.parallelFor<citor::DynamicHints>(0U, 64U,
+                                          [](std::size_t /*lo*/, std::size_t /*hi*/) noexcept {});
+  }
+  const auto after = pool.snapshotCounters();
+  EXPECT_GE(after.dispatches, before.dispatches + 16U);
+
+  ThreadPool solo(1);
+  const auto soloBefore = solo.snapshotCounters();
+  for (int i = 0; i < 8; ++i) {
+    solo.parallelFor<citor::DynamicHints>(0U, 64U,
+                                          [](std::size_t /*lo*/, std::size_t /*hi*/) noexcept {});
+  }
+  const auto soloAfter = solo.snapshotCounters();
+  EXPECT_GE(soloAfter.inlineFallbacks, soloBefore.inlineFallbacks + 8U);
+  EXPECT_EQ(soloAfter.dispatches, soloBefore.dispatches);
+#else
+  GTEST_SKIP() << "pool-level counters disabled at build time (CITOR_ENABLE_POOL_COUNTERS=OFF)";
 #endif
 }
 

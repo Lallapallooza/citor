@@ -119,4 +119,59 @@ struct PoolControl {
   std::uint64_t pendingMaskBits = 0;
 };
 
+/// Pool-level relaxed-atomic counters for diagnostics.
+///
+/// Three monotonic pool-scoped counters incremented at the dispatch publish, inline-fallback, and
+/// cancellation-observed sites. Worker-scoped counters (futex parks/wakes, steal attempts) live
+/// on `WorkerState` and are aggregated into `PoolCountersSnapshot` by `snapshotCounters()`.
+///
+/// **Compile-time gated by `CITOR_ENABLE_POOL_COUNTERS`.** When the macro is undefined (the
+/// default), the struct has no atomic members and the increment sites compile to no-ops; the
+/// dispatch hot path pays zero extra atomics. When defined, each increment is `relaxed` and the
+/// struct is on its own cache line so the counter line never bounces with `PoolControl`'s
+/// contended atomics. Reset is not provided; counters are cumulative for the pool's lifetime.
+#ifdef CITOR_ENABLE_POOL_COUNTERS
+struct alignas(kCacheLine) PoolCounters {
+  /// Producer-side dispatches that reached the worker fan-out path (one increment per published
+  /// generation).
+  std::atomic<std::uint64_t> dispatches{0};
+
+  /// Calls that hit the `runInline` short-circuit (single participant, range too small per
+  /// `minTaskUs`, cross-arena guard, or empty range).
+  std::atomic<std::uint64_t> inlineFallbacks{0};
+
+  /// Producer observed a cancellation request before fan-out and skipped the body.
+  std::atomic<std::uint64_t> cancellationStops{0};
+};
+#define CITOR_COUNTERS_INC(member)                                                                 \
+  do {                                                                                             \
+    m_counters.member.fetch_add(1, std::memory_order_relaxed);                                     \
+  } while (0)
+#else
+struct PoolCounters {}; // empty stub; the member is zero-sized when counters are disabled.
+#define CITOR_COUNTERS_INC(member)                                                                 \
+  do {                                                                                             \
+  } while (0)
+#endif
+
+/// Snapshot POD returned by `ThreadPool::snapshotCounters()`. Pool-scoped fields come from
+/// `PoolCounters`; worker-scoped fields are aggregated by summing the matching field across
+/// every `WorkerState`. Each load is `relaxed` so values may not reflect a single point in time.
+struct PoolCountersSnapshot {
+  /// Producer dispatches that reached fan-out (matches `PoolCounters::dispatches`).
+  std::uint64_t dispatches = 0;
+  /// `runInline` short-circuits (matches `PoolCounters::inlineFallbacks`).
+  std::uint64_t inlineFallbacks = 0;
+  /// Producer-observed cancellation stops (matches `PoolCounters::cancellationStops`).
+  std::uint64_t cancellationStops = 0;
+  /// Sum of `WorkerState::parks` across workers (worker-side `FUTEX_WAIT_PRIVATE` invocations).
+  std::uint64_t futexParks = 0;
+  /// Sum of `WorkerState::wakes` across workers (worker-side futex returns).
+  std::uint64_t futexWakes = 0;
+  /// Sum of `WorkerState::stealAttempts` across workers (forkJoin steal probes).
+  std::uint64_t stealAttempts = 0;
+  /// Sum of `WorkerState::stealSuccesses` across workers (forkJoin steals that found work).
+  std::uint64_t stealSuccesses = 0;
+};
+
 } // namespace citor::detail

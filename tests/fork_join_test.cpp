@@ -18,11 +18,10 @@ using citor::forkJoin;
 using citor::HintsDefaults;
 using citor::ThreadPool;
 
-// Hint preset for fork-join tests. Recursive balance routes through the work-stealing path; the
+// Hint preset for fork-join tests. forkJoin uses its own Chase-Lev deque path; the engine does
+// not consult `Balance` on this codepath, so the preset only inherits HintsDefaults. The
 // cross-CCD case is exercised via the bundled `CcdLocalForkJoinHints` preset.
-struct ForkJoinTestHints : HintsDefaults {
-  static constexpr Balance balance = Balance::Recursive;
-};
+struct ForkJoinTestHints : HintsDefaults {};
 
 // 4 root tasks, each writes to a distinct slot. Verify every slot was set exactly once.
 TEST(ForkJoin, SimpleFourTasks) {

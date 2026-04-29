@@ -20,7 +20,6 @@ using citor::ChainHints;
 using citor::ChainHintsDefaults;
 using citor::globalStage;
 using citor::makeStage;
-using citor::perChunkStage;
 using citor::reduceStage;
 using citor::serialStage;
 using citor::staticStage;
@@ -109,69 +108,6 @@ TEST(ParallelChain, GlobalBarrierBetweenStages) {
             stage0Slot0Done.load(std::memory_order_acquire))
       << "Global barrier failed: a non-producer slot entered stage 1 before slot 0 finished "
          "stage 0";
-}
-
-// PerChunk barrier allows pipelining: stage s+1 chunk c can start before stage s of OTHER chunks
-// finishes. We verify by counting overlap: at least one slot enters stage 1 before some other
-// slot has finished stage 0. Compared against the global-barrier case where this never happens.
-//
-// Skipped when the pool has fewer than 4 participants: pipelining requires at least one slot that
-// can advance into stage 1 while another slot is still completing stage 0. Slot 0 sleeps 20ms in
-// stage 0, so observing overlap requires concurrent slots distinct from slot 0; the test's
-// `overlap > 0` assertion has no observable surface otherwise.
-TEST(ParallelChain, PerChunkBarrierAllowsPipeline) {
-  ThreadPool pool(4);
-  if (pool.participants() < 4U) {
-    GTEST_SKIP() << "pipelining observation needs at least four concurrent slots; pool reports "
-                 << pool.participants();
-  }
-  constexpr std::size_t kN = 64;
-  const std::size_t participants = pool.participants();
-
-  std::vector<std::atomic<std::uint8_t>> stage0Done(participants);
-  std::vector<std::atomic<std::uint8_t>> stage1Started(participants);
-  for (std::size_t i = 0; i < participants; ++i) {
-    stage0Done[i].store(0, std::memory_order_relaxed);
-    stage1Started[i].store(0, std::memory_order_relaxed);
-  }
-
-  std::atomic<std::uint32_t> overlapCount{0};
-
-  pool.parallelChain<ChainHintsDefaults>(
-      kN,
-      perChunkStage("produce",
-                    [&](std::size_t /*stageIdx*/, std::uint32_t slot, std::size_t /*lo*/,
-                        std::size_t /*hi*/) {
-                      // Slot 0 takes the longest; this guarantees that under PerChunk, slots 1+ can
-                      // move on without waiting on slot 0.
-                      if (slot == 0U) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-                      }
-                      stage0Done[slot].store(1, std::memory_order_release);
-                    }),
-      staticStage("consume", [&](std::size_t /*stageIdx*/, std::uint32_t slot, std::size_t /*lo*/,
-                                 std::size_t /*hi*/) {
-        stage1Started[slot].store(1, std::memory_order_release);
-        // Did some other slot complete stage 0 while slot 0 was still in-flight?
-        for (std::size_t s = 0; s < stage0Done.size(); ++s) {
-          if (s == slot) {
-            continue;
-          }
-          if (stage0Done[s].load(std::memory_order_acquire) == 0U) {
-            overlapCount.fetch_add(1, std::memory_order_acq_rel);
-          }
-        }
-      }));
-
-  // Every slot should have entered stage 1.
-  for (std::size_t s = 0; s < participants; ++s) {
-    EXPECT_EQ(stage1Started[s].load(std::memory_order_acquire), 1U);
-    EXPECT_EQ(stage0Done[s].load(std::memory_order_acquire), 1U);
-  }
-  // Slot 0 sleeps; slots 1, 2, 3 should have observed at least one slot still in stage 0 when
-  // they entered stage 1. Loose assertion: overlap > 0 means pipelining happened.
-  EXPECT_GT(overlapCount.load(std::memory_order_acquire), 0U)
-      << "PerChunk barrier failed to allow pipelining: every slot waited for every other slot";
 }
 
 // ProducerSerial: slot 0 (producer) executes the serial stage; other workers spin.

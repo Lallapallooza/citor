@@ -5,11 +5,6 @@
 // the same Pareto-body workload as the pareto_body_for bench so the
 // comparison surfaces what the runtime hint is actually buying.
 //
-// Balance::Steal currently aliases to Balance::DynamicChunked in the citor
-// engine (see thread_pool.h's dispatchOneStatic switch); registering a
-// dedicated Steal row would duplicate the DynamicChunked row, so it is
-// omitted.
-//
 // j={8, 16}.
 
 #include <atomic>

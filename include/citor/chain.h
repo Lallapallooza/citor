@@ -24,24 +24,6 @@ template <class F>
   return Stage<std::decay_t<F>, BarrierKind::None>{std::forward<F>(fn)};
 }
 
-/// Construct a `Stage` with the `BarrierKind::PerChunk` post-stage barrier.
-///
-/// The downstream stage's chunk `c` waits on the upstream worker's release-store on the same
-/// chunk `c` -- there is no global rendezvous between stages, so a worker can begin the next
-/// stage's body on its own chunk while neighbouring workers are still finishing the upstream
-/// stage on their chunks.
-///
-/// F Deduced callable type.
-/// name Diagnostic identifier surfaced through trace tooling.
-/// fn   Stage body invoked once per slot.
-/// A `Stage<decay_t<F>, BarrierKind::PerChunk>` carrying the callable.
-template <class F>
-[[nodiscard]] constexpr auto perChunkStage([[maybe_unused]] const char *name, F &&fn) noexcept(
-    noexcept(Stage<std::decay_t<F>, BarrierKind::PerChunk>{std::forward<F>(fn)}))
-    -> Stage<std::decay_t<F>, BarrierKind::PerChunk> {
-  return Stage<std::decay_t<F>, BarrierKind::PerChunk>{std::forward<F>(fn)};
-}
-
 /// Construct a `Stage` with the `BarrierKind::Global` post-stage barrier.
 ///
 /// Every worker rendezvouses on the producer-driven stage epoch before any worker may begin the

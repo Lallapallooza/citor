@@ -56,8 +56,8 @@ static_assert(citor::ChainHintsDefaults::pipelineSameChunk,
               "ChainHintsDefaults::pipelineSameChunk must be true");
 
 // ===== Stage / ChainHints structural sanity =====
-static_assert(Stage<int (*)(std::size_t, std::size_t), BarrierKind::PerChunk>::barrier ==
-                  BarrierKind::PerChunk,
+static_assert(Stage<int (*)(std::size_t, std::size_t), BarrierKind::Global>::barrier ==
+                  BarrierKind::Global,
               "Stage::barrier must reflect the After non-type template parameter");
 
 // ===== kCacheLine is hardcoded to 128, never the std value =====
@@ -107,7 +107,7 @@ TEST(ParallelHints, HintsDefaultsExposesDocumentedConstants) {
   using HintsT = citor::HintsDefaults;
   EXPECT_EQ(HintsT::balance, Balance::DynamicChunked);
   EXPECT_EQ(HintsT::determinism, Determinism::FixedBlockOrder);
-  EXPECT_EQ(HintsT::affinity, Affinity::None);
+  EXPECT_EQ(HintsT::affinity, Affinity::CcdLocal);
   EXPECT_EQ(HintsT::priority, Priority::Throughput);
   EXPECT_TRUE(HintsT::cancellationChecks);
 }
@@ -117,7 +117,7 @@ TEST(ParallelHints, RuntimeHintsHaveDocumentedDefaults) {
   const Hints h{};
   EXPECT_EQ(h.balance, Balance::StaticUniform);
   EXPECT_EQ(h.determinism, Determinism::FixedBlockOrder);
-  EXPECT_EQ(h.affinity, Affinity::None);
+  EXPECT_EQ(h.affinity, Affinity::CcdLocal);
   EXPECT_EQ(h.priority, Priority::Throughput);
   EXPECT_TRUE(h.cancellationChecks);
 }
@@ -201,6 +201,20 @@ TEST(ParallelCancellation, DeadlineNotExpiredInTheFuture) {
   const std::uint64_t now = __rdtsc();
   const Deadline future{now + (std::uint64_t{1} << 40)};
   EXPECT_FALSE(future.expired());
+}
+
+TEST(ParallelCancellation, DeadlineFromMillisExpiresAfterWait) {
+  // 1 ms deadline: not expired immediately, expired after a 5 ms sleep.
+  const Deadline d = Deadline::fromMillis(1);
+  EXPECT_FALSE(d.expired());
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  EXPECT_TRUE(d.expired());
+}
+
+TEST(ParallelCancellation, DeadlineFromMillisFutureNotExpired) {
+  // 10 s deadline: not expired immediately. Don't actually wait it out.
+  const Deadline d = Deadline::fromMillis(10000);
+  EXPECT_FALSE(d.expired());
 }
 #endif
 

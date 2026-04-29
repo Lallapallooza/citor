@@ -66,7 +66,7 @@ static_assert(RecursiveForkJoinTraits<::tbb::task_arena>::supportsRecursiveSpawn
 #endif
 
 struct ForkJoinHints : citor::HintsDefaults {
-  static constexpr citor::Affinity affinity = citor::Affinity::SplitCcd;
+  static constexpr citor::Affinity affinity = citor::Affinity::CcdLocal;
 };
 
 namespace citor::bench {

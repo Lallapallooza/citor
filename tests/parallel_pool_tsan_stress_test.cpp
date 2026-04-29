@@ -53,7 +53,6 @@ struct StressDynamicHints : HintsDefaults {
 };
 
 struct StressForkJoinHints : HintsDefaults {
-  static constexpr Balance balance = Balance::Recursive;
   static constexpr citor::Affinity affinity = citor::Affinity::CcdLocal;
 };
 

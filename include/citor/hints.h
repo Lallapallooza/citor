@@ -26,15 +26,9 @@ inline constexpr std::size_t kCacheLine = 128;
 ///   reductions cross-`nJobs` bit-identity for free.
 /// - `DynamicChunked`: workers race on a single relaxed counter (`nextBlock.fetch_add`). One atomic,
 ///   no deque, no stealing. Use when per-block cost varies (kNN, threshold emit).
-/// - `Steal`: opt-in Chase-Lev work-stealing on a range bag, halving the remaining range on a
-///   successful steal. Reserved for skewed range workloads.
-/// - `Recursive`: child-task work stealing for fork-join (recursive divide-and-conquer (e.g.
-/// tree-build subtrees)).
 enum class Balance : std::uint8_t {
   StaticUniform,
   DynamicChunked,
-  Steal,
-  Recursive,
 };
 
 /// Floating-point determinism contract a reduction primitive promises.
@@ -42,26 +36,24 @@ enum class Balance : std::uint8_t {
 /// - `FixedBlockOrder`: chunk-id pairwise tree combine; bit-identical across worker counts when
 ///   `chunk_size = f(n, site_tag)`.
 /// - `KahanCompensated`: Kahan/Neumaier compensated FP sum on top of the fixed-block tree.
-/// - `OrderTolerant`: racy combine via a shared accumulator; only safe when the call site has
-///   verified rounding does not depend on order (e.g., integer counts).
 enum class Determinism : std::uint8_t {
   FixedBlockOrder,
   KahanCompensated,
-  OrderTolerant,
 };
 
 /// CPU-affinity policy applied to the pool's workers.
 ///
-/// Pinning is performed once at thread creation; `pthread_setaffinity_np` is never called on the
-/// hot path. `OPENBLAS_NUM_THREADS=1` is a contract: when violated, the pool falls back to
-/// `Affinity::None` and emits a one-shot trace warning.
+/// Worker placement on the pool is fixed at construction (one-logical-per-physical-core, all
+/// pinned to slot 0's CCD by default -- see `Affinity::CcdLocal`). The hint controls where
+/// fork-join steal probes look for victims, NOT where workers spawn.
+///
+/// - `CcdLocal`: bias steal probes toward same-CCD workers first; fall back to cross-CCD only if
+///   the local CCD has no work to take. Matches the default placement and is the right choice for
+///   data-locality-sensitive recursive workloads.
+/// - `None`: no steal-direction preference; probe every worker uniformly.
 enum class Affinity : std::uint8_t {
   None,
-  PhysicalCores,
-  SplitCcd,
   CcdLocal,
-  FullMachine,
-  CallerArena,
 };
 
 /// Per-call priority class consulted when concurrent producers contend on the same pool.
@@ -85,15 +77,12 @@ enum class Priority : std::uint8_t {
 /// Synchronization barrier inserted between two adjacent stages of `parallelChain`.
 ///
 /// - `None`: worker proceeds to the next stage without synchronizing.
-/// - `PerChunk`: each worker waits only on the upstream worker's flag for the same chunk id;
-///   pipeline shape across stages keeps L1/L2 hot for a chunk.
 /// - `Global`: sense-reversing barrier across all `participants`.
 /// - `DeterministicReduce`: `Global` followed by a chunk-id pairwise-tree reduction.
 /// - `ProducerSerial`: workers other than rank 0 spin on a producer-done flag while rank 0 runs
 ///   the serial body.
 enum class BarrierKind : std::uint8_t {
   None,
-  PerChunk,
   Global,
   DeterministicReduce,
   ProducerSerial,
@@ -108,7 +97,7 @@ enum class BarrierKind : std::uint8_t {
 struct Hints {
   Balance balance = Balance::StaticUniform;
   Determinism determinism = Determinism::FixedBlockOrder;
-  Affinity affinity = Affinity::None;
+  Affinity affinity = Affinity::CcdLocal;
   Priority priority = Priority::Throughput;
   /// Estimated per-item cost in nanoseconds; `n * estimatedItemNs` gates the inline fallback.
   double estimatedItemNs = 0.0;
@@ -148,7 +137,7 @@ struct HintsDefaults {
   // as under StaticUniform.
   static constexpr Balance balance = Balance::DynamicChunked;
   static constexpr Determinism determinism = Determinism::FixedBlockOrder;
-  static constexpr Affinity affinity = Affinity::None;
+  static constexpr Affinity affinity = Affinity::CcdLocal;
   static constexpr Priority priority = Priority::Throughput;
   static constexpr double estimatedItemNs = 0.0;
   static constexpr double minTaskUs = 0.0;
@@ -205,10 +194,11 @@ struct FixedBlockReduceHints : HintsDefaults {
   static constexpr double minTaskUs = 25.0;
 };
 
-/// Fork-join preset: `Balance::Recursive` (the work-stealing path) with same-CCD victim
-///        biasing for cross-CCD locality.
+/// Fork-join preset with same-CCD victim biasing for cross-CCD locality.
+///
+/// Inherits from `HintsDefaults` and only changes the steal-direction hint. forkJoin uses its
+/// own Chase-Lev deques; the `Balance` field is not consulted on the fork-join hot path.
 struct CcdLocalForkJoinHints : HintsDefaults {
-  static constexpr Balance balance = Balance::Recursive;
   static constexpr Affinity affinity = Affinity::CcdLocal;
 };
 

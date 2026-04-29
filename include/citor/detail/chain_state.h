@@ -55,10 +55,7 @@ struct alignas(kCacheLine) ChainDoneSlot {
 /// `chainCancelled` poll.
 ///
 /// For `BarrierKind::ProducerSerial` the producer runs the serial body alone while non-producer
-/// workers spin on slot 0's `done`. For `BarrierKind::PerChunk` the per-stage chunk identity is
-/// preserved across stages -- a stage's chunk `c` is the slice produced for `slot = c` -- and the
-/// downstream stage on chunk `c` waits on `done[c] >= s + 1`, which a slot on its own chunk
-/// satisfies by definition (no cross-slot wait).
+/// workers spin on slot 0's `done`.
 ///
 /// Padding-suppression note: the layout keeps every contended atomic on its own
 /// `kCacheLine`-sized line, so the analyser's "excessive padding" warning is the design trade-off
@@ -120,8 +117,7 @@ struct ChainState {
   ///
   /// The partition is `lo = (n * slot) / participants`, `hi = (n * (slot + 1)) / participants`.
   /// Per-stage chunk identity is preserved across stages: a stage's chunk `c` is the slice
-  /// `[lo, hi)` produced for `slot = c`. The `BarrierKind::PerChunk` synchronization waits on
-  /// `done[c] >= stageIdx + 1` to ensure the upstream worker for chunk `c` has retired.
+  /// `[lo, hi)` produced for `slot = c`.
   ///
   /// slot Worker slot index in `[0, participants)`.
   /// `(lo, hi)` pair denoting the slot's contiguous range over `[0, n)`.

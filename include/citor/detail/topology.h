@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <fstream>
 #include <sstream>
@@ -33,6 +34,15 @@ struct Topology {
   /// CCD index for each logical CPU id; `ccdOfCpu[id]` indexes `ccdGroups`.
   std::vector<std::uint32_t> ccdOfCpu;
 
+  /// L3 cache size in KiB for each CCD; `l3KibOfCcd[i]` corresponds to `ccdGroups[i]`. Read from
+  /// `/sys/devices/system/cpu/cpuN/cache/index3/size` once per probe; zero when sysfs is absent.
+  std::vector<std::uint64_t> l3KibOfCcd;
+
+  /// Index into `ccdGroups` of the preferred CCD for small pools that fit in a single L3. Picks
+  /// the largest L3 (= 3D V-Cache CCD where one CCD has a stacked SRAM die);
+  /// breaks ties by lowest index so the choice is deterministic across runs.
+  std::uint32_t preferredCcd = 0;
+
   /// Total logical CPU count reported by the OS.
   std::uint32_t logicalCount = 0;
 
@@ -42,6 +52,38 @@ struct Topology {
   /// Number of distinct CCDs (or shared-L3 groups).
   std::uint32_t ccdCount = 0;
 };
+
+/// Read a sysfs cache size string like "32768K" or "96M" and convert to KiB. Returns 0 on parse
+/// failure or missing file so the caller can fall back to "unknown size".
+inline std::uint64_t readCacheSizeKib(const std::string &path) noexcept {
+  std::ifstream in(path);
+  if (!in.is_open()) {
+    return 0U;
+  }
+  std::string token;
+  if (!(in >> token) || token.empty()) {
+    return 0U;
+  }
+  std::uint64_t value = 0U;
+  std::size_t i = 0;
+  while (i < token.size() && std::isdigit(static_cast<unsigned char>(token[i]))) {
+    value = value * 10U + static_cast<std::uint64_t>(token[i] - '0');
+    ++i;
+  }
+  if (i == 0U) {
+    return 0U;
+  }
+  if (i < token.size()) {
+    const char unit = token[i];
+    if (unit == 'M' || unit == 'm') {
+      value *= 1024U;
+    } else if (unit == 'G' || unit == 'g') {
+      value *= 1024U * 1024U;
+    }
+    // 'K'/'k' or unknown unit: leave value as-is (sysfs convention is KiB by default).
+  }
+  return value;
+}
 
 /// Read a comma-separated CPU list (e.g. `0-7,16-23`) from a sysfs file.
 ///
@@ -201,6 +243,30 @@ inline Topology detectTopology() {
   }
 
   topo.ccdCount = static_cast<std::uint32_t>(topo.ccdGroups.size());
+
+  // Per-CCD L3 size + preferred-CCD selection. V-Cache parts have one CCD with a stacked SRAM die
+  // (96 MiB on 9950X3D's CCD0 vs 32 MiB on the regular CCD); for workloads whose working set
+  // exceeds the smaller L3 but fits the larger, landing on the V-Cache CCD is a 5-10x speedup.
+  // We pick the largest-L3 CCD as the default placement target; tie-break by lowest index so
+  // symmetric chips (no V-Cache) still get a deterministic choice across runs.
+  topo.l3KibOfCcd.assign(topo.ccdGroups.size(), 0U);
+  for (std::size_t ccd = 0; ccd < topo.ccdGroups.size(); ++ccd) {
+    if (topo.ccdGroups[ccd].empty()) {
+      continue;
+    }
+    const std::uint32_t rep = topo.ccdGroups[ccd].front();
+    topo.l3KibOfCcd[ccd] = readCacheSizeKib(
+        "/sys/devices/system/cpu/cpu" + std::to_string(rep) + "/cache/index3/size");
+  }
+  std::uint64_t bestKib = 0U;
+  std::uint32_t bestIdx = 0;
+  for (std::size_t ccd = 0; ccd < topo.l3KibOfCcd.size(); ++ccd) {
+    if (topo.l3KibOfCcd[ccd] > bestKib) {
+      bestKib = topo.l3KibOfCcd[ccd];
+      bestIdx = static_cast<std::uint32_t>(ccd);
+    }
+  }
+  topo.preferredCcd = bestIdx;
 
   // Reorder `physicalCores` so each CCD's members appear in descending CPU id order. The
   // standalone-pool slot-0 CPU (the caller thread's current CPU) is later rotated to the

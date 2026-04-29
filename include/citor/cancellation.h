@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <memory>
@@ -11,6 +12,37 @@
 #endif
 
 namespace citor {
+
+namespace detail {
+/// One-time TSC-frequency calibration (cycles per nanosecond). Measures wall time vs `__rdtsc()`
+/// over a 5 ms window on first call; cached for the process lifetime. Used by
+/// `Deadline::fromMillis` / `Deadline::fromMicros`. Returns 0.0 on architectures without a TSC
+/// (any factory call collapses to a never-expires deadline in that case).
+[[nodiscard]] inline double tscCyclesPerNs() noexcept {
+#if defined(__x86_64__) || defined(_M_X64)
+  static const double kCyclesPerNs = []() noexcept {
+    using clock = std::chrono::steady_clock;
+    constexpr auto kWindow = std::chrono::milliseconds(5);
+    const auto wallStart = clock::now();
+    const std::uint64_t tscStart = __rdtsc();
+    while (clock::now() - wallStart < kWindow) {
+      // Tight wait; the overhead is dominated by the wall-clock query, not the loop body.
+    }
+    const std::uint64_t tscEnd = __rdtsc();
+    const auto wallEnd = clock::now();
+    const auto wallNs =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(wallEnd - wallStart).count();
+    if (wallNs <= 0 || tscEnd <= tscStart) {
+      return 0.0;
+    }
+    return static_cast<double>(tscEnd - tscStart) / static_cast<double>(wallNs);
+  }();
+  return kCyclesPerNs;
+#else
+  return 0.0;
+#endif
+}
+} // namespace detail
 
 /// Cooperative cancellation handle shared by the producer and pool workers.
 ///
@@ -31,7 +63,7 @@ public:
   /// The default-constructed token holds no shared state: `stop_requested()` always returns
   /// `false`, `request_stop()` is a no-op (returns `false`). This is the always-on default for
   /// call sites that do not need cancellation; the per-dispatch heap allocation +
-  /// shared_ptr dispose/destroy chain (several indirect calls per dispatch on the
+  /// shared_ptr dispose/destroy chain (a string of indirect calls per dispatch on the
   /// j=2 hot path) goes away when the caller does not pass an explicit token.
   ///
   /// Callers that need to actually call `request_stop()` from elsewhere must construct via
@@ -117,6 +149,44 @@ public:
   ///
   /// tscThreshold Absolute TSC cycle count at which the deadline expires.
   constexpr explicit Deadline(std::uint64_t tscThreshold) noexcept : m_tscThreshold(tscThreshold) {}
+
+  /// Construct a deadline at `now + ms` using a one-time TSC frequency calibration.
+  ///
+  /// Calibrates the TSC frequency on first call (5 ms wall-clock window) and caches the result for
+  /// the process lifetime. Subsequent calls are a single `__rdtsc()` plus a multiplication. On
+  /// non-x86 hosts the calibration returns 0 and this factory returns the never-expires sentinel.
+  ///
+  /// ms Wall-clock milliseconds from now until the deadline expires.
+  [[nodiscard]] static Deadline fromMillis(std::uint64_t ms) noexcept {
+#if defined(__x86_64__) || defined(_M_X64)
+    const double cyclesPerNs = detail::tscCyclesPerNs();
+    if (cyclesPerNs <= 0.0) {
+      return Deadline{};
+    }
+    const auto delta = static_cast<std::uint64_t>(static_cast<double>(ms) * 1.0e6 * cyclesPerNs);
+    return Deadline{__rdtsc() + delta};
+#else
+    (void)ms;
+    return Deadline{};
+#endif
+  }
+
+  /// Construct a deadline at `now + us`. See `fromMillis` for calibration details.
+  ///
+  /// us Wall-clock microseconds from now until the deadline expires.
+  [[nodiscard]] static Deadline fromMicros(std::uint64_t us) noexcept {
+#if defined(__x86_64__) || defined(_M_X64)
+    const double cyclesPerNs = detail::tscCyclesPerNs();
+    if (cyclesPerNs <= 0.0) {
+      return Deadline{};
+    }
+    const auto delta = static_cast<std::uint64_t>(static_cast<double>(us) * 1.0e3 * cyclesPerNs);
+    return Deadline{__rdtsc() + delta};
+#else
+    (void)us;
+    return Deadline{};
+#endif
+  }
 
   /// Check whether the live TSC has reached the deadline's threshold.
   ///
