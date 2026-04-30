@@ -31,10 +31,10 @@ namespace {
 /// p25 of per-dispatch ns across `kIterations` brackets.
 constexpr std::size_t kIterations = 2'000;
 
-/// Inner-batch size. Empty fan-out dispatch is ~150 ns - 15 us across the
+/// Inner-batch size. Empty fan-out dispatch spans roughly two orders of magnitude across the
 /// surveyed pools; batching 64 dispatches per bracket pushes the slowest pool
 /// safely above the timer-tick floor and amortizes the `__rdtscp` overhead
-/// (~25 ns) below the noise floor for the fastest pool.
+/// below the noise floor for the fastest pool.
 constexpr std::size_t kBatchSize = 64;
 
 /// Warmup iterations dropped from the sample window. Hot dispatch numbers are
@@ -59,6 +59,12 @@ constexpr std::size_t kWarmupIterations = 50;
 template <class PoolT, class Dispatch>
 [[nodiscard]] BenchRow measureEmptyFanoutWith(const char *displayName, std::size_t participants,
                                                const CyclesPerNanosecond &cal, Dispatch dispatch) {
+  if (!engineEnabled(displayName)) {
+    BenchRow row{};
+    row.name = displayName;
+    row.skipped = true;
+    return row;
+  }
   using Traits = CompetitorTraits<PoolT>;
   auto pool = Traits::make(participants);
 
@@ -147,12 +153,18 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
 #ifdef CITOR_BENCH_HAS_OPENMP
   table.rows.push_back(measureEmptyFanout<OpenMpRunner>(participants, cal));
 #endif
+#ifdef CITOR_BENCH_HAS_LEOPARD
+  table.rows.push_back(measureEmptyFanout<hmthrp::ThreadPool>(participants, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+  table.rows.push_back(measureEmptyFanout<dispenso::ThreadPool>(participants, cal));
+#endif
 
   return table;
 }
 
 /// Bench runner for the j=16 hot variant; the headline workload at the
-/// a representative dominant workload shape on AMD Zen 5.
+/// a representative dominant workload shape on multi-CCD AMD chips.
 BenchTable runEmptyFanoutJ16Hot(const CyclesPerNanosecond &cal) {
   return buildTable(/*participants=*/16, "j16_hot", cal);
 }

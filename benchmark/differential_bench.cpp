@@ -121,6 +121,7 @@ template <class RunFn> [[nodiscard]] Samples runSamples(const CyclesPerNanosecon
       .opsPerSec = opsPerSec,
       .errPercent = divergencePct,
       .tailNs = std::nullopt,
+      .rawSamplesNs = {},
   };
 }
 
@@ -270,6 +271,50 @@ template <class Pool, class EnqueueFn>
 }
 #endif
 
+#ifdef CITOR_BENCH_HAS_LEOPARD
+[[nodiscard]] Samples sampleLeopard(std::size_t participants, const CyclesPerNanosecond &cal) {
+  auto pool = CompetitorTraits<hmthrp::ThreadPool>::make(participants);
+  const auto in = buildInputInt64();
+  return runSamples(cal, [&] {
+    std::vector<std::int64_t> partials(participants, 0);
+    const std::size_t blockSize = (kN + participants - 1) / participants;
+    CompetitorTraits<hmthrp::ThreadPool>::parallelFor(
+        *pool, std::size_t{0}, kN, participants,
+        [&in, &partials, blockSize](std::size_t lo, std::size_t hi) {
+          const std::size_t blockIdx = lo / blockSize;
+          partials[blockIdx] = partialSum(in, lo, hi);
+        });
+    std::int64_t total = 0;
+    for (const std::int64_t v : partials) {
+      total += v;
+    }
+    return total;
+  });
+}
+#endif
+
+#ifdef CITOR_BENCH_HAS_DISPENSO
+[[nodiscard]] Samples sampleDispenso(std::size_t participants, const CyclesPerNanosecond &cal) {
+  auto pool = CompetitorTraits<dispenso::ThreadPool>::make(participants);
+  const auto in = buildInputInt64();
+  return runSamples(cal, [&] {
+    std::vector<std::int64_t> partials(participants, 0);
+    const std::size_t blockSize = (kN + participants - 1) / participants;
+    CompetitorTraits<dispenso::ThreadPool>::parallelFor(
+        *pool, std::size_t{0}, kN, participants,
+        [&in, &partials, blockSize](std::size_t lo, std::size_t hi) {
+          const std::size_t blockIdx = lo / blockSize;
+          partials[blockIdx] = partialSum(in, lo, hi);
+        });
+    std::int64_t total = 0;
+    for (const std::int64_t v : partials) {
+      total += v;
+    }
+    return total;
+  });
+}
+#endif
+
 #ifdef CITOR_BENCH_HAS_OPENMP
 [[nodiscard]] Samples sampleOpenMp(std::size_t participants, const CyclesPerNanosecond &cal) {
   const auto in = buildInputInt64();
@@ -310,6 +355,14 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
   table.rows.push_back(makeRow("OpenMP", sampleOpenMp(participants, cal), refBits));
+#endif
+#ifdef CITOR_BENCH_HAS_LEOPARD
+  table.rows.push_back(
+      makeRow("Leopard::ThreadPool", sampleLeopard(participants, cal), refBits));
+#endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+  table.rows.push_back(
+      makeRow("dispenso::ThreadPool", sampleDispenso(participants, cal), refBits));
 #endif
   return table;
 }

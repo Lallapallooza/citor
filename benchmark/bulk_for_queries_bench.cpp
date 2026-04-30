@@ -335,6 +335,48 @@ template <class RunFn>
 }
 #endif
 
+#ifdef CITOR_BENCH_HAS_LEOPARD
+[[nodiscard]] BenchRow measureLeopardPool(const CyclesPerNanosecond &cal) {
+  auto pool = CompetitorTraits<hmthrp::ThreadPool>::make(kParticipants);
+  Workload w = buildWorkload();
+  const float *queries = w.queries.data();
+  const float *refs = w.refs.data();
+  float *out = w.outBuf.data();
+  auto bodyChunk = [queries, refs, out](std::size_t lo, std::size_t hi) {
+    for (std::size_t q = lo; q < hi; ++q) {
+      runOneQuery(q, queries, refs, out);
+    }
+  };
+  BenchRow row = measureLoop(CompetitorTraits<hmthrp::ThreadPool>::name, cal, [&] {
+    CompetitorTraits<hmthrp::ThreadPool>::parallelFor(*pool, std::size_t{0}, kQueries,
+                                                      kParticipants, bodyChunk);
+  });
+  (void)out[0];
+  return row;
+}
+#endif
+
+#ifdef CITOR_BENCH_HAS_DISPENSO
+[[nodiscard]] BenchRow measureDispensoPool(const CyclesPerNanosecond &cal) {
+  auto pool = CompetitorTraits<dispenso::ThreadPool>::make(kParticipants);
+  Workload w = buildWorkload();
+  const float *queries = w.queries.data();
+  const float *refs = w.refs.data();
+  float *out = w.outBuf.data();
+  auto bodyChunk = [queries, refs, out](std::size_t lo, std::size_t hi) {
+    for (std::size_t q = lo; q < hi; ++q) {
+      runOneQuery(q, queries, refs, out);
+    }
+  };
+  BenchRow row = measureLoop(CompetitorTraits<dispenso::ThreadPool>::name, cal, [&] {
+    CompetitorTraits<dispenso::ThreadPool>::parallelFor(*pool, std::size_t{0}, kQueries,
+                                                        kParticipants, bodyChunk);
+  });
+  (void)out[0];
+  return row;
+}
+#endif
+
 #ifdef CITOR_BENCH_HAS_OPENMP
 [[nodiscard]] BenchRow measureOpenMpPool(const CyclesPerNanosecond &cal) {
   auto runner = CompetitorTraits<OpenMpRunner>::make(kParticipants);
@@ -390,6 +432,12 @@ BenchTable buildTable(const CyclesPerNanosecond &cal) {
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
   table.rows.push_back(measureOpenMpPool(cal));
+#endif
+#ifdef CITOR_BENCH_HAS_LEOPARD
+  table.rows.push_back(measureLeopardPool(cal));
+#endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+  table.rows.push_back(measureDispensoPool(cal));
 #endif
   return table;
 }

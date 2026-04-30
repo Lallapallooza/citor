@@ -120,6 +120,12 @@ template <class PoolT, class Dispatch>
 [[nodiscard]] BenchRow measureColdDispatchWith(const char *displayName, std::size_t participants,
                                                 const CyclesPerNanosecond &cal,
                                                 Dispatch dispatch) {
+  if (!engineEnabled(displayName)) {
+    BenchRow row{};
+    row.name = displayName;
+    row.skipped = true;
+    return row;
+  }
   using Traits = CompetitorTraits<PoolT>;
   auto pool = Traits::make(participants);
 
@@ -202,7 +208,7 @@ template <class PoolT>
 
 /// Citor's dispatch-floor row driven by an explicit hint type so the bench can
 /// surface Static-vs-Dynamic balance side-by-side. The hint must inherit from
-/// `EmptyFanoutHints` (chunk=1, no cancellation polls) so the per-block cost is
+/// `citor::DynamicHints` (default cancellation polls; auto-derived chunk) so the per-block cost is
 /// identical across the two rows; only the balance differs.
 template <class HintsT>
 [[nodiscard]] BenchRow measureCitorColdDispatchWithHint(const char *displayName,
@@ -241,6 +247,12 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
   table.rows.push_back(measureColdDispatch<OpenMpRunner>(participants, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_LEOPARD
+  table.rows.push_back(measureColdDispatch<hmthrp::ThreadPool>(participants, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+  table.rows.push_back(measureColdDispatch<dispenso::ThreadPool>(participants, cal));
 #endif
 
   return table;

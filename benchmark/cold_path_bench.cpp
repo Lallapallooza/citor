@@ -78,6 +78,12 @@ constexpr std::chrono::milliseconds kCoolOff{30};
 template <class PoolT, class Dispatch>
 [[nodiscard]] BenchRow measureColdFanoutWith(const char *displayName, std::size_t participants,
                                               const CyclesPerNanosecond &cal, Dispatch dispatch) {
+  if (!engineEnabled(displayName)) {
+    BenchRow row{};
+    row.name = displayName;
+    row.skipped = true;
+    return row;
+  }
   using Traits = CompetitorTraits<PoolT>;
   auto pool = Traits::make(participants);
 
@@ -158,6 +164,12 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
   table.rows.push_back(measureColdFanout<OpenMpRunner>(participants, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_LEOPARD
+  table.rows.push_back(measureColdFanout<hmthrp::ThreadPool>(participants, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+  table.rows.push_back(measureColdFanout<dispenso::ThreadPool>(participants, cal));
 #endif
 
   return table;

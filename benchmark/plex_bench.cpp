@@ -235,6 +235,50 @@ template <class Pool, class EnqueueFn>
 }
 #endif
 
+#ifdef CITOR_BENCH_HAS_LEOPARD
+[[nodiscard]] BenchRow measureLeopardPool(std::size_t participants,
+                                          const CyclesPerNanosecond &cal) {
+  auto pool = CompetitorTraits<hmthrp::ThreadPool>::make(participants);
+  std::atomic<std::uint64_t> sink{0};
+  auto bodyChunk = [&sink, &cal](std::size_t lo, std::size_t hi) {
+    for (std::size_t i = lo; i < hi; ++i) {
+      spinForNs(kBodyNs, cal);
+      sink.fetch_add(i, std::memory_order_relaxed);
+    }
+  };
+  BenchRow row = measureLoop("Leopard::dispatch x30", cal, [&] {
+    for (std::size_t p = 0; p < kPlexPhases; ++p) {
+      CompetitorTraits<hmthrp::ThreadPool>::parallelFor(*pool, std::size_t{0}, participants,
+                                                        participants, bodyChunk);
+    }
+  });
+  (void)sink.load(std::memory_order_relaxed);
+  return row;
+}
+#endif
+
+#ifdef CITOR_BENCH_HAS_DISPENSO
+[[nodiscard]] BenchRow measureDispensoPool(std::size_t participants,
+                                           const CyclesPerNanosecond &cal) {
+  auto pool = CompetitorTraits<dispenso::ThreadPool>::make(participants);
+  std::atomic<std::uint64_t> sink{0};
+  auto bodyChunk = [&sink, &cal](std::size_t lo, std::size_t hi) {
+    for (std::size_t i = lo; i < hi; ++i) {
+      spinForNs(kBodyNs, cal);
+      sink.fetch_add(i, std::memory_order_relaxed);
+    }
+  };
+  BenchRow row = measureLoop("dispenso::parallel_for x30", cal, [&] {
+    for (std::size_t p = 0; p < kPlexPhases; ++p) {
+      CompetitorTraits<dispenso::ThreadPool>::parallelFor(*pool, std::size_t{0}, participants,
+                                                          participants, bodyChunk);
+    }
+  });
+  (void)sink.load(std::memory_order_relaxed);
+  return row;
+}
+#endif
+
 #ifdef CITOR_BENCH_HAS_OPENMP
 [[nodiscard]] BenchRow measureOpenMpPool(std::size_t participants, const CyclesPerNanosecond &cal) {
   std::atomic<std::uint64_t> sink{0};
@@ -274,6 +318,12 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
   table.rows.push_back(measureOpenMpPool(participants, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_LEOPARD
+  table.rows.push_back(measureLeopardPool(participants, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+  table.rows.push_back(measureDispensoPool(participants, cal));
 #endif
   return table;
 }

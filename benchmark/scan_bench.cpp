@@ -304,6 +304,48 @@ template <class Pool, class EnqueueFn>
 }
 #endif
 
+#ifdef CITOR_BENCH_HAS_LEOPARD
+[[nodiscard]] BenchRow measureLeopardPool(std::size_t participants,
+                                          const CyclesPerNanosecond &cal) {
+  auto pool = CompetitorTraits<hmthrp::ThreadPool>::make(participants);
+  ScanData d = buildData();
+  BenchRow row = measureLoop("Leopard::scan_two_wave", cal, [&] {
+    runTwoWaveScan(d, participants, [&](std::size_t blocks, auto blockBody) {
+      const std::size_t blockSize = (kN + blocks - 1) / blocks;
+      CompetitorTraits<hmthrp::ThreadPool>::parallelFor(
+          *pool, std::size_t{0}, kN, blocks,
+          [&blockBody, blockSize](std::size_t lo, std::size_t hi) {
+            const std::size_t blockIdx = lo / blockSize;
+            blockBody(blockIdx, lo, hi);
+          });
+    });
+  });
+  (void)d.out[kN - 1];
+  return row;
+}
+#endif
+
+#ifdef CITOR_BENCH_HAS_DISPENSO
+[[nodiscard]] BenchRow measureDispensoPool(std::size_t participants,
+                                           const CyclesPerNanosecond &cal) {
+  auto pool = CompetitorTraits<dispenso::ThreadPool>::make(participants);
+  ScanData d = buildData();
+  BenchRow row = measureLoop("dispenso::scan_two_wave", cal, [&] {
+    runTwoWaveScan(d, participants, [&](std::size_t blocks, auto blockBody) {
+      const std::size_t blockSize = (kN + blocks - 1) / blocks;
+      CompetitorTraits<dispenso::ThreadPool>::parallelFor(
+          *pool, std::size_t{0}, kN, blocks,
+          [&blockBody, blockSize](std::size_t lo, std::size_t hi) {
+            const std::size_t blockIdx = lo / blockSize;
+            blockBody(blockIdx, lo, hi);
+          });
+    });
+  });
+  (void)d.out[kN - 1];
+  return row;
+}
+#endif
+
 #ifdef CITOR_BENCH_HAS_OPENMP
 [[nodiscard]] BenchRow measureOpenMpPool(std::size_t participants, const CyclesPerNanosecond &cal) {
   ScanData d = buildData();
@@ -348,6 +390,12 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
   table.rows.push_back(measureOpenMpPool(participants, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_LEOPARD
+  table.rows.push_back(measureLeopardPool(participants, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+  table.rows.push_back(measureDispensoPool(participants, cal));
 #endif
   return table;
 }

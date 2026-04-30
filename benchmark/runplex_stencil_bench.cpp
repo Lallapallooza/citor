@@ -248,6 +248,68 @@ template <class RunFn>
 }
 #endif
 
+#ifdef CITOR_BENCH_HAS_LEOPARD
+[[nodiscard]] BenchRow measureLeopard(std::size_t participants, std::int64_t referenceTotal,
+                                      const CyclesPerNanosecond &cal) {
+  auto pool = CompetitorTraits<hmthrp::ThreadPool>::make(participants);
+  std::vector<std::int64_t> slotState(participants, 0);
+  return measureLoop(
+      "Leopard::dispatch x30", cal,
+      [&] {
+        for (std::size_t s = 0; s < participants; ++s) {
+          slotState[s] = static_cast<std::int64_t>(s);
+        }
+        for (std::size_t phase = 0; phase < kPhases; ++phase) {
+          CompetitorTraits<hmthrp::ThreadPool>::parallelFor(
+              *pool, std::size_t{0}, participants, participants,
+              [phase, &slotState, &cal](std::size_t lo, std::size_t hi) {
+                for (std::size_t i = lo; i < hi; ++i) {
+                  spinForNs(kBodyNs, cal);
+                  slotState[i] = advance(slotState[i], phase);
+                }
+              });
+        }
+        std::int64_t total = 0;
+        for (std::int64_t v : slotState) {
+          total += v;
+        }
+        return total;
+      },
+      referenceTotal);
+}
+#endif
+
+#ifdef CITOR_BENCH_HAS_DISPENSO
+[[nodiscard]] BenchRow measureDispenso(std::size_t participants, std::int64_t referenceTotal,
+                                       const CyclesPerNanosecond &cal) {
+  auto pool = CompetitorTraits<dispenso::ThreadPool>::make(participants);
+  std::vector<std::int64_t> slotState(participants, 0);
+  return measureLoop(
+      "dispenso::parallel_for x30", cal,
+      [&] {
+        for (std::size_t s = 0; s < participants; ++s) {
+          slotState[s] = static_cast<std::int64_t>(s);
+        }
+        for (std::size_t phase = 0; phase < kPhases; ++phase) {
+          CompetitorTraits<dispenso::ThreadPool>::parallelFor(
+              *pool, std::size_t{0}, participants, participants,
+              [phase, &slotState, &cal](std::size_t lo, std::size_t hi) {
+                for (std::size_t i = lo; i < hi; ++i) {
+                  spinForNs(kBodyNs, cal);
+                  slotState[i] = advance(slotState[i], phase);
+                }
+              });
+        }
+        std::int64_t total = 0;
+        for (std::int64_t v : slotState) {
+          total += v;
+        }
+        return total;
+      },
+      referenceTotal);
+}
+#endif
+
 #ifdef CITOR_BENCH_HAS_OPENMP
 [[nodiscard]] BenchRow measureOpenMp(std::size_t participants, std::int64_t referenceTotal,
                                      const CyclesPerNanosecond &cal) {
@@ -341,6 +403,12 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
   table.rows.push_back(measureOpenMp(participants, referenceTotal, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_LEOPARD
+  table.rows.push_back(measureLeopard(participants, referenceTotal, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+  table.rows.push_back(measureDispenso(participants, referenceTotal, cal));
 #endif
   return table;
 }
