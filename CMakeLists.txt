@@ -30,11 +30,14 @@ option(CITOR_USE_AVX2 "Enable AVX2 / FMA on the public include set" ON)
 # which are pre-existing). Default OFF so the dispatch hot path pays no extra atomics.
 option(CITOR_ENABLE_POOL_COUNTERS "Enable pool-level diagnostic counters (default OFF)" OFF)
 
-# Per-worker pthread stack size. Default 1024 KiB accommodates recursive forkJoin bodies under
-# TSan + ASan shadow stacks (UTS-style benchmarks overflow at 256 KiB under sanitizer builds).
-# Production builds with no sanitizer and shallow recursion can drop this to 256 (saves ~12 MiB
-# committed per j=16 pool); verify with the heaviest forkJoin workload on hand before doing so.
-set(CITOR_WORKER_STACK_KIB "1024" CACHE STRING "Per-worker pthread stack size, KiB")
+# Per-worker pthread stack size. Default 2048 KiB accommodates recursive forkJoin bodies under
+# TSan + ASan shadow stacks (UTS-style benchmarks overflow at 256 KiB under sanitizer builds)
+# AND the cilksort_j16_n16m bench (overflows at 1024 KiB on Release: log2(16M / 8K) = 11 levels
+# of recursion combined with the per-frame 32-bucket merge scratch and per-iteration tmp/data
+# pointers exceeds the smaller stack on j=16). Production builds with no sanitizer and shallow
+# recursion can drop this to 256 (saves ~28 MiB committed per j=16 pool); verify with the
+# heaviest forkJoin workload on hand before doing so.
+set(CITOR_WORKER_STACK_KIB "2048" CACHE STRING "Per-worker pthread stack size, KiB")
 
 include(${PROJECT_SOURCE_DIR}/cmake/CPM.cmake)
 include(${PROJECT_SOURCE_DIR}/cmake/Tooling.cmake)

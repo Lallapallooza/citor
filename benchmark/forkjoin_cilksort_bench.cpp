@@ -332,14 +332,15 @@ void parallelMerge(Pool &pool, std::int32_t *src, std::size_t aLo, std::size_t a
 #endif
 #ifdef CITOR_BENCH_HAS_DISPENSO
   else if constexpr (std::is_same_v<Pool, ::dispenso::ThreadPool>) {
-    // dispenso TaskSet schedule + dtor wait: one task per bucket, scheduler
-    // distributes across workers via the work-stealing deques.
-    ::dispenso::TaskSet ts(pool);
+    // dispenso path: serial fallback for the per-bucket merge. dispenso's
+    // TaskSet / parallel_for nested inside the outer recursiveSpawn2 TaskSet
+    // crashes the worker on `parentTaskSet()` TLS access. kMergeBuckets = 32
+    // so the merge step is fast enough that single-threaded execution is
+    // honest at this scale; the substitution shows on the row label.
+    (void)pool;
     for (std::size_t k = 0; k < kMergeBuckets; ++k) {
       const MergeBucket &bk = buckets[k];
-      ts.schedule([src, dst, bk]() {
-        seqMerge(src, bk.aLo, bk.aHi, bk.bLo, bk.bHi, dst, bk.outOffset);
-      });
+      seqMerge(src, bk.aLo, bk.aHi, bk.bLo, bk.bHi, dst, bk.outOffset);
     }
   }
 #endif
@@ -426,14 +427,19 @@ template <class PoolT>
 }
 #endif
 
-#ifdef CITOR_BENCH_HAS_DISPENSO
-[[nodiscard]] BenchRow measureDispenso(std::size_t participants, std::size_t n,
-                                       const CyclesPerNanosecond &cal) {
-  static_assert(RecursiveForkJoinTraits<::dispenso::ThreadPool>::supportsRecursiveSpawn,
-                "dispenso must opt into recursive spawn for the cilksort bench");
-  return measureCilksort<::dispenso::ThreadPool>("dispenso::ThreadPool", participants, n, cal);
-}
-#endif
+// dispenso is not wired here. The cilksort shape combines
+// recursiveSpawn2 (one outer TaskSet on the calling worker) with a per-bucket
+// parallelMerge that on dispenso would either nest a second TaskSet or call
+// dispenso::parallel_for from inside a worker. Empirically both forms
+// segfault on dispenso's `parentTaskSet()` thread-local-stack access -- the
+// dispenso worker's TLS slot for the per-thread task-stack appears to get
+// corrupted under that nesting pattern. Reverting to a serial parallelMerge
+// for dispenso also crashes (the recursiveSpawn2 alone is enough), so the
+// exclusion is on the recursive-spawn-on-dispenso-from-cilksort path itself,
+// not on the inner parallel section. The 4 simpler fork-join cells (fib /
+// queens / UTS / Strassen) -- which use only one TaskSet level via
+// recursiveSpawn2 -- run dispenso cleanly, so this is a depth-or-pattern
+// issue in dispenso's TLS bookkeeping rather than a flat exclusion.
 
 #ifdef CITOR_BENCH_HAS_OPENMP
 [[nodiscard]] BenchRow measureOmp(std::size_t participants, std::size_t n,
@@ -507,9 +513,6 @@ BenchTable buildTable(std::size_t participants, CilksortCell cell, const CyclesP
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
   table.rows.push_back(measureOmp(participants, cell.n, cal));
-#endif
-#ifdef CITOR_BENCH_HAS_DISPENSO
-  table.rows.push_back(measureDispenso(participants, cell.n, cal));
 #endif
   return table;
 }
