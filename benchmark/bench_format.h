@@ -22,6 +22,7 @@ namespace citor::bench {
 /// Bench TUs that can populate `BenchRow::tailNs` consult this flag before
 /// doing so. The default is OFF so the current bench output is byte-identical
 /// to runs that pre-date the flag; downstream awk parsers in the
+/// downstream awk parsers key off `$2` (ns/op) and `$NF` (row name), which
 /// both stay stable across the flag toggle. The flag is set from
 /// `bench_main.cpp` based on the `--with-tail-percentiles` command-line
 /// argument.
@@ -32,6 +33,48 @@ inline bool &tailPercentilesEnabled() {
   return enabled;
 }
 
+/// Engine-name substring filter (populated from the `--engine` CLI flag).
+///
+/// `bench_main.cpp` writes the parsed substrings into the global vector at startup.
+/// Per-pool measure functions check `engineEnabled(name)` at the top and early-return
+/// a sentinel row when the predicate is false, so measurement is genuinely skipped
+/// rather than just hidden from the formatted output.
+inline std::vector<std::string> &engineFilters() {
+  static std::vector<std::string> filters;
+  return filters;
+}
+
+/// Process-global toggle for raw-sample export.
+///
+/// Set from `bench_main.cpp` when the `--export <path>` CLI flag (or the
+/// `CITOR_BENCH_EXPORT` env fallback) is present. When ON, `finalizeRow` copies
+/// the per-iteration ns vector into `BenchRow::rawSamplesNs` BEFORE its in-place
+/// sort + p25/MAD reduction so the exporter can emit one record per measured
+/// iteration alongside the existing terminal table. Default OFF: no copy
+/// happens, the dispatch hot path and the bench's measurement code are
+/// untouched, terminal output is byte-identical to a no-flag run.
+///
+/// Mutable reference to the flag.
+inline bool &rawSampleExportEnabled() {
+  static bool enabled = false;
+  return enabled;
+}
+
+/// Returns true when |name| should be measured. Empty filter list means "all on";
+/// otherwise true when at least one filter substring is contained in |name|.
+inline bool engineEnabled(std::string_view name) {
+  const auto &filters = engineFilters();
+  if (filters.empty()) {
+    return true;
+  }
+  for (const auto &filter : filters) {
+    if (name.find(filter) != std::string_view::npos) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /// One competitor's measurement row in a comparative bench table.
 ///
 /// `relative` is computed by `formatTable` against the row whose `name` matches
@@ -39,6 +82,10 @@ inline bool &tailPercentilesEnabled() {
 struct BenchRow {
   /// Pool name shown in the rightmost column.
   std::string name;
+
+  /// When set, the row was filtered out via `--engine` and skipped before
+  /// measurement ran. `formatTable` does not render skipped rows.
+  bool skipped = false;
 
   /// Median wall time per dispatch in nanoseconds.
   double nsPerOp = 0.0;
@@ -56,6 +103,12 @@ struct BenchRow {
   /// renders no extra columns and the row is byte-identical to the pre-tail
   /// output.
   std::optional<std::array<double, 3>> tailNs;
+
+  /// Per-iteration raw samples in ns, copied by `finalizeRow` ONLY when
+  /// `rawSampleExportEnabled()` is set at the time `finalizeRow` runs. Empty in
+  /// the default (no `--export`) path. Written by the JSON exporter in
+  /// `bench_export.h`; never consulted by the terminal formatter.
+  std::vector<double> rawSamplesNs;
 };
 
 /// A complete comparison table for one workload.
@@ -216,7 +269,17 @@ inline void formatTable(const BenchTable &table, std::string_view baselineName, 
                     .nsPerOp = 0.0,
                     .opsPerSec = 0.0,
                     .errPercent = 0.0,
-                    .tailNs = std::nullopt};
+                    .tailNs = std::nullopt,
+                    .rawSamplesNs = {}};
+  }
+  // Snapshot raw samples in their natural (chronological) order BEFORE the
+  // in-place sort below, so the exporter can record per-iteration ns in the
+  // order they were measured. This copy is conditional on the export flag and
+  // only executed under `--export` -- the default no-flag path does zero extra
+  // work.
+  std::vector<double> rawSnapshot;
+  if (rawSampleExportEnabled()) {
+    rawSnapshot = samples;
   }
   std::sort(samples.begin(), samples.end());
   const std::size_t pIdx = samples.size() / 4U;
@@ -253,13 +316,18 @@ inline void formatTable(const BenchTable &table, std::string_view baselineName, 
     constexpr double kMadToSigma = 1.4826;
     errPct = 100.0 * kMadToSigma * mad / p25;
   }
-  return BenchRow{
+  BenchRow row{
       .name = std::move(name),
       .nsPerOp = p25,
       .opsPerSec = opsPerSec,
       .errPercent = errPct,
       .tailNs = std::nullopt,
+      .rawSamplesNs = {},
   };
+  if (!rawSnapshot.empty()) {
+    row.rawSamplesNs = std::move(rawSnapshot);
+  }
+  return row;
 }
 
 /// Compute the relative standard deviation of |samples| as a percentage.
@@ -311,7 +379,7 @@ inline double relativeStdDevPercent(const std::vector<double> &samples) {
 ///
 /// samples  Per-iteration ns measurements; not modified.
 /// resamples Number of bootstrap resamples to draw. 1024 gives a
-///                  a few percent standard error on the half-width estimate, which is
+///                  ~3 % standard error on the half-width estimate, which is
 ///                  small enough to be invisible in the rendered err% cell.
 /// seed     RNG seed for the resample loop. The bench wants
 ///                 reproducible CI estimates across runs, so this defaults to

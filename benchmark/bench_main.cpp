@@ -6,13 +6,14 @@
 // used only by the calibration step that converts cycle deltas to wall-clock
 // nanoseconds.
 //
-// The driver is minimal: each workload TU registers its name and
+// The driver is minimal by design: each workload TU registers its name and
 // runner, the driver iterates them in registration order, prints the resulting
 // `BenchTable` for each, and returns 0 on success.
 
 #define ANKERL_NANOBENCH_IMPLEMENT
 #include <nanobench.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -22,6 +23,7 @@
 #include <thread>
 #include <vector>
 
+#include "bench_export.h"
 #include "bench_format.h"
 #include "bench_registry.h"
 #include "cycle_clock.h"
@@ -47,26 +49,52 @@ void printCalibrationBanner(const citor::bench::CyclesPerNanosecond &cal) {
 
 struct CliOptions {
   std::vector<std::string_view> filters;
+  /// Engine-name substring filters. When non-empty, only rows whose `name`
+  /// contains at least one of the substrings are rendered. Measurement still
+  /// runs for every pool (the filter applies at format time so existing
+  /// per-bench `buildTable` code stays untouched).
+  std::vector<std::string_view> engineFilters;
   bool listOnly = false;
   /// When set, populate `BenchRow::tailNs` (p25/p50/p99) on workloads that
   /// support it and emit the three extra columns. Default OFF so existing
+  /// awk parsers downstream of the bench see the pre-tail format unchanged
   /// (they key off `$2` ns/op and `$NF` row name; the tail columns sit
   /// between `err%` and the row name).
   bool withTailPercentiles = false;
+  /// When non-empty, the bench writes a single JSON document with full
+  /// per-iteration raw samples and provenance to this path at the end of the
+  /// run. The terminal table output is unchanged. Populated from the
+  /// `--export <path>` flag, falling back to the `CITOR_BENCH_EXPORT` env var.
+  std::string exportPath;
+  /// Pretty-print the JSON export (default: compact). Set via the
+  /// `CITOR_BENCH_EXPORT_PRETTY=1` env var.
+  bool exportPretty = false;
 };
 
 void printUsage(std::ostream &out) {
-  out << "usage: parallel_bench [--filter SUBSTR] [--filter=SUBSTR] [--list]\n"
-      << "                      [--with-tail-percentiles]\n"
+  out << "usage: parallel_bench [--filter SUBSTR] [--engine SUBSTR] [--list]\n"
+      << "                      [--with-tail-percentiles] [--export PATH]\n"
       << "       parallel_bench SUBSTR\n"
       << '\n'
       << "  --filter SUBSTR          Run only workloads whose name contains SUBSTR.\n"
       << "                           May be repeated; matches are OR-ed.\n"
+      << "  --engine SUBSTR          Only render rows whose engine/pool name contains\n"
+      << "                           SUBSTR. May be repeated; matches are OR-ed.\n"
+      << "                           Substring of the row's display name (e.g.\n"
+      << "                           `citor`, `oneTBB`, `[Static]`). Measurement\n"
+      << "                           still runs for every pool.\n"
       << "  --list                   Print matching workload names and exit.\n"
       << "  --with-tail-percentiles  Populate p25/p50/p99 columns on workloads that\n"
       << "                           build an `hdr_histogram` over their cycle\n"
       << "                           samples. OFF by default; downstream awk\n"
-      << "                           parsers see the pre-tail column layout.\n";
+      << "                           parsers see the pre-tail column layout.\n"
+      << "  --export PATH            Write a single JSON document to PATH carrying\n"
+      << "                           per-iteration raw samples and full provenance\n"
+      << "                           (host, kernel, governor, TSC freq, citor commit,\n"
+      << "                           checklist gates, etc.). Schema: see\n"
+      << "                           the bench-export documentation. Falls back to\n"
+      << "                           CITOR_BENCH_EXPORT=PATH env var. Set\n"
+      << "                           CITOR_BENCH_EXPORT_PRETTY=1 for indented JSON.\n";
 }
 
 bool parseArgs(int argc, char **argv, CliOptions &opts) {
@@ -102,6 +130,42 @@ bool parseArgs(int argc, char **argv, CliOptions &opts) {
       opts.filters.push_back(value);
       continue;
     }
+    if (arg == "--engine" || arg == "-e") {
+      if (i + 1 >= argc) {
+        std::cerr << "parallel_bench: --engine requires a substring\n";
+        return false;
+      }
+      opts.engineFilters.emplace_back(argv[++i]);
+      continue;
+    }
+    if (arg == "--export") {
+      if (i + 1 >= argc) {
+        std::cerr << "parallel_bench: --export requires a path\n";
+        return false;
+      }
+      opts.exportPath = argv[++i];
+      continue;
+    }
+    constexpr std::string_view kExportPrefix = "--export=";
+    if (arg.substr(0, kExportPrefix.size()) == kExportPrefix) {
+      const std::string_view value = arg.substr(kExportPrefix.size());
+      if (value.empty()) {
+        std::cerr << "parallel_bench: --export requires a non-empty path\n";
+        return false;
+      }
+      opts.exportPath.assign(value);
+      continue;
+    }
+    constexpr std::string_view kEnginePrefix = "--engine=";
+    if (arg.substr(0, kEnginePrefix.size()) == kEnginePrefix) {
+      const std::string_view value = arg.substr(kEnginePrefix.size());
+      if (value.empty()) {
+        std::cerr << "parallel_bench: --engine requires a non-empty substring\n";
+        return false;
+      }
+      opts.engineFilters.push_back(value);
+      continue;
+    }
     if (!arg.empty() && arg.front() == '-') {
       std::cerr << "parallel_bench: unknown option '" << arg << "'\n";
       printUsage(std::cerr);
@@ -134,6 +198,29 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
   tailPercentilesEnabled() = opts.withTailPercentiles;
+  {
+    auto &filters = engineFilters();
+    filters.clear();
+    for (const std::string_view f : opts.engineFilters) {
+      filters.emplace_back(f);
+    }
+  }
+  // CLI flag wins; env var is the fallback for CI / wrapper-script use.
+  if (opts.exportPath.empty()) {
+    if (const char *envPath = std::getenv("CITOR_BENCH_EXPORT");
+        envPath != nullptr && envPath[0] != '\0') {
+      opts.exportPath = envPath;
+    }
+  }
+  if (const char *prettyEnv = std::getenv("CITOR_BENCH_EXPORT_PRETTY");
+      prettyEnv != nullptr && prettyEnv[0] != '\0' && prettyEnv[0] != '0') {
+    opts.exportPretty = true;
+  }
+  // Toggle the global flag BEFORE any cell runs, so `finalizeRow` snapshots raw
+  // samples on every call. When `exportPath` is empty the flag stays off and
+  // every cell runs on the no-extra-work path identical to pre-export bench
+  // builds.
+  rawSampleExportEnabled() = !opts.exportPath.empty();
   if (registry().empty()) {
     std::cerr << "parallel_bench: no workloads registered; check link order\n";
     return EXIT_FAILURE;
@@ -194,6 +281,11 @@ int main(int argc, char **argv) {
 
   bool anyRan = false;
   bool firstCell = true;
+  // Tables are retained across cells only when --export is on, so the JSON
+  // writer can emit one record per (workload, pool, rep). When --export is
+  // off this vector stays empty and the cell-loop body's `BenchTable` lives
+  // only for the duration of formatting, matching the prior behavior.
+  std::vector<BenchTable> exportTables;
   for (const auto &reg : registry()) {
     if (!matchesFilters(reg.name, opts.filters)) {
       continue;
@@ -205,8 +297,19 @@ int main(int argc, char **argv) {
     const std::uint64_t rssBeforeKb = readPeakRssKb();
     const RusageSample rusageBefore = readRusage();
     try {
-      const BenchTable table = reg.run(cal);
-      formatTable(table, /*baselineName=*/"citor::ThreadPool", std::cout);
+      BenchTable table = reg.run(cal);
+      // Drop sentinel rows that were skipped before measurement via
+      // `engineEnabled` (populated from `--engine`).
+      table.rows.erase(
+          std::remove_if(table.rows.begin(), table.rows.end(),
+                         [](const BenchRow &row) { return row.skipped; }),
+          table.rows.end());
+      if (!table.rows.empty()) {
+        formatTable(table, /*baselineName=*/"citor::ThreadPool", std::cout);
+      }
+      if (!opts.exportPath.empty() && !table.rows.empty()) {
+        exportTables.push_back(std::move(table));
+      }
     } catch (const std::exception &ex) {
       // A workload may legitimately refuse to run (e.g. when the host's CPU affinity
       // mask collapses the pool to a single participant and the workload would otherwise
@@ -229,6 +332,15 @@ int main(int argc, char **argv) {
   if (!anyRan) {
     std::cerr << "parallel_bench: no workloads matched filter\n";
     return EXIT_FAILURE;
+  }
+  if (!opts.exportPath.empty()) {
+    const ExportContext context = probeContext(cal);
+    const bool ok = writeJsonExport(opts.exportPath, context, exportTables, opts.exportPretty);
+    if (!ok) {
+      std::cerr << "parallel_bench: --export to '" << opts.exportPath << "' failed\n";
+      return EXIT_FAILURE;
+    }
+    std::cout << "[EXPORT] wrote " << opts.exportPath << '\n';
   }
   return EXIT_SUCCESS;
 }
