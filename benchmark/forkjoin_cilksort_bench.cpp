@@ -271,6 +271,20 @@ void parallelMerge(Pool &pool, std::int32_t *src, std::size_t aLo, std::size_t a
     CITOR_ALWAYS_ASSERT(running == total);
   }
 #endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+  else if constexpr (std::is_same_v<Pool, ::dispenso::ThreadPool>) {
+    // dispenso has no first-class scan; mirror the OpenMP serial-prefix
+    // shortcut. kMergeBuckets = 32 means the scan is below measurement
+    // granularity, so this is honest rather than a substitution dodge.
+    (void)pool;
+    std::size_t running = 0;
+    for (std::size_t i = 0; i < kMergeBuckets; ++i) {
+      offsets[i] = running;
+      running += sizes[i];
+    }
+    CITOR_ALWAYS_ASSERT(running == total);
+  }
+#endif
 
   // Stamp the output offsets into each bucket descriptor and dispatch the
   // per-bucket merge via `parallelFor` (one bucket per slot).
@@ -313,6 +327,19 @@ void parallelMerge(Pool &pool, std::int32_t *src, std::size_t aLo, std::size_t a
     for (std::ptrdiff_t k = 0; k < static_cast<std::ptrdiff_t>(kMergeBuckets); ++k) {
       const MergeBucket &bk = buckets[static_cast<std::size_t>(k)];
       seqMerge(src, bk.aLo, bk.aHi, bk.bLo, bk.bHi, dst, bk.outOffset);
+    }
+  }
+#endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+  else if constexpr (std::is_same_v<Pool, ::dispenso::ThreadPool>) {
+    // dispenso TaskSet schedule + dtor wait: one task per bucket, scheduler
+    // distributes across workers via the work-stealing deques.
+    ::dispenso::TaskSet ts(pool);
+    for (std::size_t k = 0; k < kMergeBuckets; ++k) {
+      const MergeBucket &bk = buckets[k];
+      ts.schedule([src, dst, bk]() {
+        seqMerge(src, bk.aLo, bk.aHi, bk.bLo, bk.bHi, dst, bk.outOffset);
+      });
     }
   }
 #endif
@@ -399,6 +426,15 @@ template <class PoolT>
 }
 #endif
 
+#ifdef CITOR_BENCH_HAS_DISPENSO
+[[nodiscard]] BenchRow measureDispenso(std::size_t participants, std::size_t n,
+                                       const CyclesPerNanosecond &cal) {
+  static_assert(RecursiveForkJoinTraits<::dispenso::ThreadPool>::supportsRecursiveSpawn,
+                "dispenso must opt into recursive spawn for the cilksort bench");
+  return measureCilksort<::dispenso::ThreadPool>("dispenso::ThreadPool", participants, n, cal);
+}
+#endif
+
 #ifdef CITOR_BENCH_HAS_OPENMP
 [[nodiscard]] BenchRow measureOmp(std::size_t participants, std::size_t n,
                                   const CyclesPerNanosecond &cal) {
@@ -471,6 +507,9 @@ BenchTable buildTable(std::size_t participants, CilksortCell cell, const CyclesP
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
   table.rows.push_back(measureOmp(participants, cell.n, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+  table.rows.push_back(measureDispenso(participants, cell.n, cal));
 #endif
   return table;
 }

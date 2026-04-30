@@ -17,11 +17,17 @@
 //                            in-place.
 //   - oneTBB             -> `tbb::task_group::run` + `wait`; TBB's wait drains
 //                            the arena, descheduling itself to run children.
+//   - dispenso           -> `dispenso::TaskSet::schedule` + dtor wait; the
+//                            TaskSet drains via the scheduler so nested calls
+//                            from a worker do not deadlock (verified via
+//                            scratch/forkjoin_dispenso_probe.cpp).
 //   - Sequential         -> single-thread baseline so parallel speedup is
 //                            visible in the table.
 //
 // Pools excluded:
 //   - BS / dp / task_thread_pool / Eigen / OpenMP -- no recursive scheduling.
+//     (OpenMP `task` + `taskwait` does work, but is wired in the *_uts /
+//     strassen / cilksort cells, not the fib/queens cell here.)
 //   - Taskflow `Executor::async` + `std::future::get()` -- `.get()` blocks the
 //     calling worker on a condition variable that Taskflow's scheduler does
 //     not coordinate with, so deep recursion deadlocks. Taskflow's first-class
@@ -30,6 +36,9 @@
 //     extension can register a Subflow-shaped variant.
 //   - riften::Thiefpool -- same `std::future::get()` blocking issue as
 //     Taskflow when called from outside the pool.
+//   - Leopard::ThreadPool -- nested `dispatch(false, fn).get()` deadlocks the
+//     calling worker on its own future, livelocking the global queue. Verified
+//     via scratch/forkjoin_leopard_probe.cpp (10s timeout on fib(22)).
 
 #include <algorithm>
 #include <atomic>
@@ -57,12 +66,21 @@ static_assert(RecursiveForkJoinTraits<::citor::ThreadPool>::supportsRecursiveSpa
 static_assert(RecursiveForkJoinTraits<::tbb::task_arena>::supportsRecursiveSpawn,
               "oneTBB task_arena must support recursive spawn for the fork-join bench");
 #endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+static_assert(RecursiveForkJoinTraits<::dispenso::ThreadPool>::supportsRecursiveSpawn,
+              "dispenso::ThreadPool must support recursive spawn for the fork-join bench");
+#endif
 
 } // namespace citor::bench
 
 #ifdef CITOR_BENCH_HAS_TBB
 #include <oneapi/tbb/task_arena.h>
 #include <oneapi/tbb/task_group.h>
+#endif
+
+#ifdef CITOR_BENCH_HAS_DISPENSO
+#include <dispenso/task_set.h>
+#include <dispenso/thread_pool.h>
 #endif
 
 struct ForkJoinHints : citor::HintsDefaults {
@@ -242,6 +260,25 @@ template <class Workload>
 #endif
 
 // =============================================================================
+// dispenso -- TaskSet::schedule + dtor wait
+// =============================================================================
+
+#ifdef CITOR_BENCH_HAS_DISPENSO
+template <class Workload>
+[[nodiscard]] BenchRow measureDispenso(const char *name, std::size_t participants,
+                                       const CyclesPerNanosecond &cal, Workload workload) {
+  ::dispenso::ThreadPool pool(participants);
+  return measureLoop(name, cal, [&] {
+    return workload([&pool](auto &&a, auto &&b) {
+      ::dispenso::TaskSet ts(pool);
+      ts.schedule(std::forward<decltype(a)>(a));
+      ts.schedule(std::forward<decltype(b)>(b));
+    });
+  });
+}
+#endif
+
+// =============================================================================
 // Taskflow -- Executor::async with future.get()
 // =============================================================================
 
@@ -287,6 +324,9 @@ BenchTable buildFibTable(std::size_t participants, const char *suffix,
 #ifdef CITOR_BENCH_HAS_TBB
   table.rows.push_back(measureTbb("oneTBB", participants, cal, fibWorkload()));
 #endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+  table.rows.push_back(measureDispenso("dispenso::ThreadPool", participants, cal, fibWorkload()));
+#endif
   table.rows.push_back(measureSeqFib(cal));
   return table;
 }
@@ -298,6 +338,9 @@ BenchTable buildQueensTable(std::size_t participants, const char *suffix,
   table.rows.push_back(measureCitor("citor::ThreadPool", participants, cal, queensWorkload()));
 #ifdef CITOR_BENCH_HAS_TBB
   table.rows.push_back(measureTbb("oneTBB", participants, cal, queensWorkload()));
+#endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+  table.rows.push_back(measureDispenso("dispenso::ThreadPool", participants, cal, queensWorkload()));
 #endif
   table.rows.push_back(measureSeqQueens(cal));
   return table;

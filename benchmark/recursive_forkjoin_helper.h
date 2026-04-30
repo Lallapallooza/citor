@@ -18,6 +18,11 @@
 #include <omp.h>
 #endif
 
+#ifdef CITOR_BENCH_HAS_DISPENSO
+#include <dispenso/task_set.h>
+#include <dispenso/thread_pool.h>
+#endif
+
 namespace citor::bench {
 
 /// Compile-time advertisement of whether `Pool` supports recursive
@@ -82,6 +87,19 @@ template <> struct RecursiveForkJoinTraits<::tf::Subflow> {
 };
 #endif
 
+#ifdef CITOR_BENCH_HAS_DISPENSO
+// dispenso supports recursive spawn via `dispenso::TaskSet::schedule` from
+// inside a worker; the TaskSet destructor coordinates with the worker's
+// scheduler so the parent task yields scheduling rights to its children.
+// Verified empirically against a fib(22) probe (`scratch/forkjoin_dispenso_probe.cpp`):
+// recursive `TaskSet::schedule(...)` inside a worker completes without
+// deadlock, unlike Leopard's `dispatch` which blocks the calling worker on a
+// future and livelocks the global queue.
+template <> struct RecursiveForkJoinTraits<::dispenso::ThreadPool> {
+  static constexpr bool supportsRecursiveSpawn = true;
+};
+#endif
+
 namespace detail {
 
 /// Helper used to defer the static_assert until a non-recursive Pool is
@@ -111,7 +129,7 @@ struct DefaultRecursiveSpawnHints {
 /// For pools with `supportsRecursiveSpawn == false`, the template fails to
 /// compile via `static_assert` with a fixed diagnostic. The diagnostic is
 /// deliberately instructive ("use a different bench shape") rather than
-/// generic so the substitution rationale is visible at the call site.
+/// generic so reviewers see why the substitution was made.
 ///
 /// Pool  Pool type satisfying `RecursiveForkJoinTraits<Pool>::supportsRecursiveSpawn`.
 /// Body  Callable invoked as `body(pool)` for each child.
@@ -159,6 +177,16 @@ template <class Pool, class Body> inline void recursiveSpawn(Pool &pool, Body &&
     pool.emplace([&](::tf::Subflow &child) { body(child); });
     pool.emplace([&](::tf::Subflow &child) { body(child); });
     pool.join();
+  }
+#endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+  else if constexpr (std::is_same_v<Pool, ::dispenso::ThreadPool>) {
+    // dispenso's TaskSet destructor runs as a wait-and-drain; nested
+    // `schedule` calls from inside a worker are picked up by other workers
+    // (or the producer's drain on the dtor path).
+    ::dispenso::TaskSet ts(pool);
+    ts.schedule([&]() { body(pool); });
+    ts.schedule([&]() { body(pool); });
   }
 #endif
 }
@@ -214,6 +242,13 @@ inline void recursiveSpawn2(Pool &pool, Left &&left, Right &&right) {
     pool.emplace([&](::tf::Subflow &child) { left(child); });
     pool.emplace([&](::tf::Subflow &child) { right(child); });
     pool.join();
+  }
+#endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+  else if constexpr (std::is_same_v<Pool, ::dispenso::ThreadPool>) {
+    ::dispenso::TaskSet ts(pool);
+    ts.schedule([&]() { left(pool); });
+    ts.schedule([&]() { right(pool); });
   }
 #endif
 }

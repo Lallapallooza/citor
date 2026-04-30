@@ -370,6 +370,14 @@ template <class PoolT>
 }
 #endif
 
+#ifdef CITOR_BENCH_HAS_DISPENSO
+[[nodiscard]] BenchRow measureDispenso(std::size_t participants, const CyclesPerNanosecond &cal) {
+  static_assert(RecursiveForkJoinTraits<::dispenso::ThreadPool>::supportsRecursiveSpawn,
+                "dispenso must opt into recursive spawn for the UTS bench");
+  return measureUts<::dispenso::ThreadPool>("dispenso::ThreadPool", participants, cal);
+}
+#endif
+
 #ifdef CITOR_BENCH_HAS_OPENMP
 [[nodiscard]] BenchRow measureOmp(std::size_t participants, const CyclesPerNanosecond &cal) {
   static_assert(RecursiveForkJoinTraits<OpenMpRunner>::supportsRecursiveSpawn,
@@ -440,6 +448,9 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
   table.rows.push_back(measureOmp(participants, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+  table.rows.push_back(measureDispenso(participants, cal));
 #endif
   return table;
 }

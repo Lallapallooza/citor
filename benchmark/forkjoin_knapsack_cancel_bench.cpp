@@ -325,6 +325,12 @@ BenchTable buildTable(std::size_t participants, KnapsackCell cell, const CyclesP
   table.rows.push_back(
       measureKnapsack<::tbb::task_arena>("oneTBB[cancel-off]", participants, cell.n, cal, false));
 #endif
+  // dispenso is NOT wired here. Its TaskSet completes the
+  // recursive search tree fast enough that the bound-tightening cancel
+  // observation (firings >= 1 per iteration) is non-deterministic on this
+  // workload, so the bench's correctness assertion fires sporadically. The
+  // other 4 fork-join cells (fib/queens, UTS, Strassen, cilksort) DO render
+  // dispenso since they have no cancellation invariant.
   return table;
 }
 
