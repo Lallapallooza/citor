@@ -223,5 +223,227 @@ inline void sha1Compute(const std::uint8_t *data, std::size_t len,
   block[57] = static_cast<std::uint8_t>((totalBits >> 48U) & 0xFFU);
   block[58] = static_cast<std::uint8_t>((totalBits >> 40U) & 0xFFU);
   block[59] = static_cast<std::uint8_t>((totalBits >> 32U) & 0xFFU);
+  block[60] = static_cast<std::uint8_t>((totalBits >> 24U) & 0xFFU);
+  block[61] = static_cast<std::uint8_t>((totalBits >> 16U) & 0xFFU);
+  block[62] = static_cast<std::uint8_t>((totalBits >> 8U) & 0xFFU);
+  block[63] = static_cast<std::uint8_t>(totalBits & 0xFFU);
+  sha1Compress(h, block);
+  for (std::size_t i = 0; i < 5; ++i) {
+    out[(i * 4U)] = static_cast<std::uint8_t>((h[i] >> 24U) & 0xFFU);
+    out[(i * 4U) + 1U] = static_cast<std::uint8_t>((h[i] >> 16U) & 0xFFU);
+    out[(i * 4U) + 2U] = static_cast<std::uint8_t>((h[i] >> 8U) & 0xFFU);
+    out[(i * 4U) + 3U] = static_cast<std::uint8_t>(h[i] & 0xFFU);
+  }
+}
+
+struct UtsRngState {
+  std::array<std::uint8_t, 20> bytes;
+};
+
+[[nodiscard]] inline UtsRngState rngInit(std::uint32_t seed) noexcept {
+  std::array<std::uint8_t, 20> buf{};
+  buf[16] = static_cast<std::uint8_t>((seed >> 24U) & 0xFFU);
+  buf[17] = static_cast<std::uint8_t>((seed >> 16U) & 0xFFU);
+  buf[18] = static_cast<std::uint8_t>((seed >> 8U) & 0xFFU);
+  buf[19] = static_cast<std::uint8_t>(seed & 0xFFU);
+  UtsRngState out{};
+  sha1Compute(buf.data(), buf.size(), out.bytes);
+  return out;
+}
+
+[[nodiscard]] inline UtsRngState rngSpawn(const UtsRngState &parent,
+                                          std::uint32_t childIdx) noexcept {
+  std::array<std::uint8_t, 24> buf{};
+  std::memcpy(buf.data(), parent.bytes.data(), 20);
+  buf[20] = static_cast<std::uint8_t>((childIdx >> 24U) & 0xFFU);
+  buf[21] = static_cast<std::uint8_t>((childIdx >> 16U) & 0xFFU);
+  buf[22] = static_cast<std::uint8_t>((childIdx >> 8U) & 0xFFU);
+  buf[23] = static_cast<std::uint8_t>(childIdx & 0xFFU);
+  UtsRngState out{};
+  sha1Compute(buf.data(), buf.size(), out.bytes);
+  return out;
+}
+
+[[nodiscard]] inline std::int32_t rngRand(const UtsRngState &s) noexcept {
+  const std::uint32_t b = (static_cast<std::uint32_t>(s.bytes[16]) << 24U) |
+                          (static_cast<std::uint32_t>(s.bytes[17]) << 16U) |
+                          (static_cast<std::uint32_t>(s.bytes[18]) << 8U) |
+                          static_cast<std::uint32_t>(s.bytes[19]);
+  return static_cast<std::int32_t>(b & 0x7FFFFFFFU);
+}
+
+[[nodiscard]] inline double rngToProb(std::int32_t n) noexcept {
+  return n < 0 ? 0.0 : static_cast<double>(n) / 2147483648.0;
+}
+
+constexpr int kRootB0 = 4;
+constexpr int kMaxDepth = 10;
+constexpr std::uint32_t kRootSeed = 19U;
+constexpr std::int64_t kExpectedNodes = 4'130'071;
+constexpr int kSeqCutoffDepth = 5;
+
+[[nodiscard]] inline int utsNumChildrenGeo(const UtsRngState &state, int depth) noexcept {
+  const double bI = (depth < kMaxDepth) ? static_cast<double>(kRootB0) : 0.0;
+  const double p = 1.0 / (1.0 + bI);
+  const std::int32_t h = rngRand(state);
+  const double u = rngToProb(h);
+  if (bI <= 0.0) {
+    return 0;
+  }
+  return static_cast<int>(std::floor(std::log(1.0 - u) / std::log(1.0 - p)));
+}
+
+[[nodiscard]] std::int64_t utsSeqWalk(const UtsRngState &state, int depth) noexcept {
+  std::int64_t count = 1;
+  const int n = utsNumChildrenGeo(state, depth);
+  for (int i = 0; i < n; ++i) {
+    const UtsRngState child = rngSpawn(state, static_cast<std::uint32_t>(i));
+    count += utsSeqWalk(child, depth + 1);
+  }
+  return count;
+}
+
+// libfork-idiomatic UTS: fork all-but-last child, call the last child inline,
+// join, then aggregate. Mirrors libfork's own reference UTS bench
+// (https://github.com/ConorWilliams/libfork/blob/v3.8.0/bench/source/uts/libfork.cpp).
+//
+// The C++20 parWalk in forkjoin_uts_bench.cpp bisects children at the
+// midpoint into two halves; libfork's continuation-stealing model prefers
+// fork-per-child because each fork creates an independently stealable
+// continuation. The aggregate node count is identical either way; only the
+// task-graph shape differs. Using the libfork-idiomatic shape gives libfork
+// the spawn/steal pattern it was tuned for, so the cell measures libfork at
+// its native strength rather than forcing it through a foreign fan-out.
+inline constexpr auto utsCoro = [](auto self, UtsRngState state, int depth,
+                                   std::int64_t *out) -> lf::task<void> {
+  if (depth >= kSeqCutoffDepth) {
+    *out = utsSeqWalk(state, depth);
+    co_return;
+  }
+  const int n = utsNumChildrenGeo(state, depth);
+  if (n == 0) {
+    *out = 1;
+    co_return;
+  }
+  std::vector<std::int64_t> childCounts(static_cast<std::size_t>(n), 0);
+  for (int i = 0; i < n - 1; ++i) {
+    const UtsRngState child = rngSpawn(state, static_cast<std::uint32_t>(i));
+    co_await lf::fork[self](child, depth + 1, &childCounts[static_cast<std::size_t>(i)]);
+  }
+  // Last child runs inline; this matches libfork's own UTS bench pattern
+  // (fork n-1 children, call the nth) and lets the worker descend into the
+  // last subtree without paying the spawn-and-steal overhead for it.
+  const UtsRngState lastChild = rngSpawn(state, static_cast<std::uint32_t>(n - 1));
+  co_await lf::call[self](lastChild, depth + 1, &childCounts[static_cast<std::size_t>(n - 1)]);
+  co_await lf::join;
+  std::int64_t total = 1;
+  for (std::int64_t v : childCounts) {
+    total += v;
+  }
+  *out = total;
+};
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// Entry points exposed to fork_join_bench.cpp / forkjoin_uts_bench.cpp.
+// ---------------------------------------------------------------------------
+
+BenchRow runLibforkFib28(std::size_t participants, const CyclesPerNanosecond &cal) {
+  // lazy_pool is libfork's recommended general-purpose scheduler. It parks
+// idle workers aggressively (which costs a wake-up at the start of each
+// iteration on tight benches) but is what a real application would use,
+// and busy_pool produced pathological numbers on fib28_j16 in this fixture
+// (orders of magnitude slower than lazy_pool).
+lf::lazy_pool pool(participants);
+  std::atomic<std::int64_t> sink{0};
+  for (std::size_t i = 0; i < kFibWarmupIterations; ++i) {
+    sink.store(lf::sync_wait(pool, fibCoro, kFibN), std::memory_order_relaxed);
+  }
+  std::vector<double> samples;
+  samples.reserve(kFibIterations);
+  for (std::size_t i = 0; i < kFibIterations; ++i) {
+    const std::uint64_t startCycles = readCyclesStart();
+    const std::int64_t value = lf::sync_wait(pool, fibCoro, kFibN);
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    sink.store(value, std::memory_order_relaxed);
+  }
+  (void)sink.load(std::memory_order_relaxed);
+  return finalizeRow("libfork", samples);
+}
+
+BenchRow runLibforkNQueens12(std::size_t participants, const CyclesPerNanosecond &cal) {
+  // lazy_pool is libfork's recommended general-purpose scheduler. It parks
+// idle workers aggressively (which costs a wake-up at the start of each
+// iteration on tight benches) but is what a real application would use,
+// and busy_pool produced pathological numbers on fib28_j16 in this fixture
+// (orders of magnitude slower than lazy_pool).
+lf::lazy_pool pool(participants);
+  const std::vector<QueensRoot> roots = buildQueensRoots(kQueensN);
+  std::vector<std::int64_t> partials(roots.size(), 0);
+
+  auto runOnce = [&]() -> std::int64_t {
+    std::fill(partials.begin(), partials.end(), 0);
+    if (!roots.empty()) {
+      lf::sync_wait(pool, queensCoro, roots.data(), partials.data(), std::size_t{0}, roots.size(),
+                    kQueensN);
+    }
+    std::int64_t total = 0;
+    for (std::int64_t v : partials) {
+      total += v;
+    }
+    return total;
+  };
+
+  std::atomic<std::int64_t> sink{0};
+  for (std::size_t i = 0; i < kFibWarmupIterations; ++i) {
+    sink.store(runOnce(), std::memory_order_relaxed);
+  }
+  std::vector<double> samples;
+  samples.reserve(kFibIterations);
+  for (std::size_t i = 0; i < kFibIterations; ++i) {
+    const std::uint64_t startCycles = readCyclesStart();
+    const std::int64_t value = runOnce();
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    sink.store(value, std::memory_order_relaxed);
+  }
+  (void)sink.load(std::memory_order_relaxed);
+  return finalizeRow("libfork", samples);
+}
+
+BenchRow runLibforkUtsT1(std::size_t participants, const CyclesPerNanosecond &cal) {
+  // lazy_pool is libfork's recommended general-purpose scheduler. It parks
+// idle workers aggressively (which costs a wake-up at the start of each
+// iteration on tight benches) but is what a real application would use,
+// and busy_pool produced pathological numbers on fib28_j16 in this fixture
+// (orders of magnitude slower than lazy_pool).
+lf::lazy_pool pool(participants);
+  const UtsRngState root = rngInit(kRootSeed);
+
+  auto runOnce = [&]() -> std::int64_t {
+    std::int64_t result = 0;
+    lf::sync_wait(pool, utsCoro, root, 0, &result);
+    return result;
+  };
+
+  std::int64_t parallelCount = 0;
+  for (std::size_t i = 0; i < kUtsWarmupIterations; ++i) {
+    parallelCount = runOnce();
+  }
+  CITOR_ALWAYS_ASSERT(parallelCount == kExpectedNodes);
+
+  std::vector<double> samples;
+  samples.reserve(kUtsIterations);
+  for (std::size_t i = 0; i < kUtsIterations; ++i) {
+    const std::uint64_t startCycles = readCyclesStart();
+    const std::int64_t count = runOnce();
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    CITOR_ALWAYS_ASSERT(count == kExpectedNodes);
+  }
+  return finalizeRow("libfork", samples);
+}
 
 } // namespace citor::bench
