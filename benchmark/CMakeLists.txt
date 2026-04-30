@@ -221,6 +221,28 @@ cpmaddpackage(
         "DISPENSO_BUILD_BENCHMARKS OFF"
 )
 
+# libfork (ConorWilliams) -- header-only C++20 coroutine fork-join library
+# with continuation-stealing schedulers (busy_pool, lazy_pool). Fetched
+# DOWNLOAD_ONLY so libfork's INTERFACE target (which requests cxx_std_23) is
+# not added to the project; the libfork-using TU sets `-std=c++23` directly.
+# `LF_NO_HWLOC` and `LF_USE_BOOST_ATOMIC` are not invoked here because the
+# DOWNLOAD_ONLY path bypasses libfork's CMake entirely; hwloc is only consulted
+# in libfork's CMake (not in the headers), so omitting that machinery is safe.
+cpmaddpackage(
+    NAME libfork
+    GITHUB_REPOSITORY ConorWilliams/libfork
+    GIT_TAG v3.8.0
+    DOWNLOAD_ONLY YES
+)
+if(libfork_ADDED AND NOT TARGET libfork_headers)
+    add_library(libfork_headers INTERFACE)
+    target_include_directories(
+        libfork_headers
+        SYSTEM
+        INTERFACE ${libfork_SOURCE_DIR}/include
+    )
+endif()
+
 find_package(OpenMP QUIET)
 if(OpenMP_CXX_FOUND)
     add_library(parallel_bench_openmp INTERFACE)
@@ -253,6 +275,16 @@ set(_citor_bench_sources
     runplex_stencil_bench.cpp
     scan_bench.cpp
 )
+
+# libfork's public API uses C++23-only multi-arg subscript syntax
+# (`co_await lf::fork[&a, fn](args)`); the rest of the bench compiles at
+# C++20. Compile the libfork runner TU at C++23 in isolation. The TU exposes
+# only `BenchRow`-shaped entry points, so the C++20/C++23 ABI question
+# reduces to `std::vector<double>` / `std::string` cross-TU handoff, which is
+# stable across C++20-C++23 with the same standard library.
+if(TARGET libfork_headers)
+    list(APPEND _citor_bench_sources libfork_runners.cpp)
+endif()
 
 add_executable(parallel_bench ${_citor_bench_sources})
 target_include_directories(parallel_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -330,6 +362,21 @@ if(TARGET dispenso)
     endif()
     target_link_libraries(parallel_bench PRIVATE dispenso)
     target_compile_definitions(parallel_bench PRIVATE CITOR_BENCH_HAS_DISPENSO)
+endif()
+if(TARGET libfork_headers)
+    target_link_libraries(parallel_bench PRIVATE libfork_headers)
+    target_compile_definitions(parallel_bench PRIVATE CITOR_BENCH_HAS_LIBFORK)
+    # libfork_runners.cpp uses C++23-only multi-arg subscript syntax via
+    # libfork's API. The rest of the bench compiles at C++20 and would warn
+    # heavily at the libfork headers; isolating the std=c++23 override on
+    # this single TU keeps both the std and the warning surface contained.
+    set_source_files_properties(
+        libfork_runners.cpp
+        PROPERTIES
+            COMPILE_OPTIONS
+                "-std=c++23;-Wno-c++23-extensions;-Wno-deprecated-declarations"
+            SKIP_LINTING ON
+    )
 endif()
 
 if(UNIX AND NOT APPLE)

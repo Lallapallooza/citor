@@ -51,6 +51,7 @@
 #include "bench_registry.h"
 #include "competitor_traits.h"
 #include "cycle_clock.h"
+#include "libfork_runners.h"
 #include "recursive_forkjoin_helper.h"
 
 namespace citor::bench {
@@ -331,6 +332,9 @@ BenchTable buildFibTable(std::size_t participants, const char *suffix,
 #ifdef CITOR_BENCH_HAS_DISPENSO
   table.rows.push_back(measureDispenso("dispenso::ThreadPool", participants, cal, fibWorkload()));
 #endif
+#ifdef CITOR_BENCH_HAS_LIBFORK
+  table.rows.push_back(runLibforkFib28(participants, cal));
+#endif
   table.rows.push_back(measureSeqFib(cal));
   return table;
 }
@@ -345,6 +349,9 @@ BenchTable buildQueensTable(std::size_t participants, const char *suffix,
 #endif
 #ifdef CITOR_BENCH_HAS_DISPENSO
   table.rows.push_back(measureDispenso("dispenso::ThreadPool", participants, cal, queensWorkload()));
+#endif
+#ifdef CITOR_BENCH_HAS_LIBFORK
+  table.rows.push_back(runLibforkNQueens12(participants, cal));
 #endif
   table.rows.push_back(measureSeqQueens(cal));
   return table;

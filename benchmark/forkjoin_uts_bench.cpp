@@ -41,6 +41,7 @@
 #include "bench_registry.h"
 #include "competitor_traits.h"
 #include "cycle_clock.h"
+#include "libfork_runners.h"
 #include "recursive_forkjoin_helper.h"
 
 #ifdef CITOR_BENCH_HAS_TBB
@@ -451,6 +452,9 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
 #endif
 #ifdef CITOR_BENCH_HAS_DISPENSO
   table.rows.push_back(measureDispenso(participants, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_LIBFORK
+  table.rows.push_back(runLibforkUtsT1(participants, cal));
 #endif
   return table;
 }
