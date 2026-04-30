@@ -82,63 +82,33 @@ namespace citor::bench {
 /// agree in practice.
 template <class Pool> struct CompetitorTraits;
 
-/// Bench-only hint preset for the empty-fan-out dispatch-floor workload.
-///
-/// Single block per participant, no inline-fallback gate, no cancellation polls; the
-/// hot-path branches collapse to the minimum so the measurement isolates dispatch latency.
-struct EmptyFanoutHints : citor::HintsDefaults {
-  static constexpr std::size_t chunk = 1;
-  static constexpr bool cancellationChecks = false;
-};
-
 /// Trait for the new `citor::ThreadPool`.
 ///
-/// The bench dispatches the closure as a single static-uniform `parallelFor<EmptyFanoutHints>`
-/// spanning `[first, last)`. That mirrors the "submit one block, wait" shape the BS / dp / task /
-/// riften adapters use, so dispatch latency is measured on equal footing.
+/// Routes through citor's public `DynamicHints` preset so the bench measures the user-facing
+/// default the engine ships with (DynamicChunked balance, auto-derived ,
+/// cold-collapse on). Cells that want a side-by-side Static-vs-Dynamic comparison call
+/// `pool.parallelFor<H>` directly with `citor::StaticHints` / `citor::DynamicHints` and bypass
+/// this shim.
 template <> struct CompetitorTraits<citor::ThreadPool> {
   /// Display name used in the bench table's rightmost column.
   static constexpr const char *name = "citor::ThreadPool";
 
-  /// Construct the new pool with |participants| total participants.
-  ///
-  /// `citor::ThreadPool` interprets `participants` as
-  /// "producer + background workers"; slot 0 is the producer thread, so the
-  /// pool spawns `participants - 1` background pthreads.
-  ///
-  /// participants Total participant count, including the producer.
-  /// Owning pointer to the constructed pool.
+  /// Construct the new pool with |participants| total participants. citor counts the producer
+  /// as slot 0, so the pool spawns `participants - 1` background pthreads.
   static auto make(std::size_t participants) {
     return std::make_unique<citor::ThreadPool>(participants);
   }
 
-  /// Dispatch the closure as a single `parallelFor<EmptyFanoutHints>` invocation.
-  ///
-  /// The bench harness submits an empty range `[0, 1)` to isolate dispatch latency from any
-  /// per-block work. With `chunk = 1` and a one-element range the call publishes one block, the
-  /// producer runs it inline as slot 0, and the join waits until every background worker stamps
-  /// the matching `doneEpoch`.
-  ///
-  /// pool  Pool instance to dispatch into.
-  /// first Inclusive lower bound of the range.
-  /// last  Exclusive upper bound of the range.
-  /// fn    Callable invoked once per block as `fn(blockFirst, blockAfterLast)`.
   template <class Fn>
   static void submitBlocksAndWait(citor::ThreadPool &pool, std::size_t first, std::size_t last,
                                   Fn fn) {
-    pool.parallelFor<EmptyFanoutHints>(first, last, fn);
+    pool.parallelFor<citor::DynamicHints>(first, last, fn);
   }
 
-  /// Range-partitioned `parallelFor` mirroring the future-pool shims'
-  /// signature: the `participantCount` argument is consumed as a chunk hint
-  /// at the static-uniform balance level. citor's hint type carries the
-  /// dispatch policy at compile time, so the participant count maps to
-  /// `chunk = 0` (auto-partition by `n / participants`) and the empty-fan-
-  /// out hint preset is reused.
   template <class Fn>
   static void parallelFor(citor::ThreadPool &pool, std::size_t first, std::size_t last,
                           std::size_t /*participantCount*/, Fn fn) {
-    pool.parallelFor<EmptyFanoutHints>(first, last, fn);
+    pool.parallelFor<citor::DynamicHints>(first, last, fn);
   }
 };
 
@@ -168,7 +138,7 @@ template <> struct CompetitorTraits<BS::light_thread_pool> {
   /// Submit `last - first` blocks of size 1 and wait for all of them.
   ///
   /// Per-block dispatch with one body invocation per element matches the shape
-  /// citor's `parallelFor<EmptyFanoutHints>` produces (chunk = 1, blockCount =
+  /// citor's `parallelFor<citor::DynamicHints>` produces (auto-derived chunk, blockCount =
   /// range size), so the comparison measures the same logical work for every
   /// pool: every block of every range is a separate scheduling decision rather
   /// than one task running on one worker.
@@ -1229,6 +1199,60 @@ template <> struct CompetitorTraits<hmthrp::ThreadPool> {
       f.get();
     }
   }
+
+  /// Reduction emulated as N dispatch + per-block partials + serial merge. Leopard has no
+  /// first-class reduce primitive; the bench measures fan-out + future-wait, mirroring the
+  /// riften / dp / task adapter shape.
+  template <class T, class Map, class Combine>
+  static T parallelReduce(hmthrp::ThreadPool &pool, std::size_t first, std::size_t last,
+                          std::size_t participantCount, T identity, Map map, Combine combine) {
+    const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
+    std::vector<T> partials(blocks, identity);
+    const std::size_t span = last - first;
+    const std::size_t block = (span + blocks - 1U) / blocks;
+    std::vector<std::future<void>> futures;
+    futures.reserve(blocks);
+    for (std::size_t b = 0; b < blocks; ++b) {
+      const std::size_t bf = first + std::min(span, b * block);
+      const std::size_t bl = first + std::min(span, (b + 1) * block);
+      if (bf == bl) {
+        continue;
+      }
+      futures.emplace_back(pool.dispatch(
+          false, [bf, bl, b, &partials, &map, identity]() { partials[b] = map(bf, bl, identity); }));
+    }
+    for (auto &f : futures) {
+      f.get();
+    }
+    T result = identity;
+    for (auto &p : partials) {
+      result = combine(result, p);
+    }
+    return result;
+  }
+
+  /// Scan: serial fallback. Leopard has no scan primitive.
+  template <class T, class Body>
+  static T parallelScan(hmthrp::ThreadPool &pool, std::size_t first, std::size_t last, T identity,
+                        Body body) {
+    (void)pool;
+    return body(first, last, identity);
+  }
+
+  /// Fan-out: dispatch one closure, wait on its future.
+  template <class Fn> static void fanout(hmthrp::ThreadPool &pool, Fn fn) {
+    pool.dispatch(false, std::move(fn)).get();
+  }
+
+  /// Chain emulated as |stageCount| back-to-back parallelFor waves.
+  template <class Fn>
+  static void parallelChain(hmthrp::ThreadPool &pool, std::size_t first, std::size_t last,
+                            std::size_t participantCount, std::size_t stageCount, Fn fn) {
+    for (std::size_t stage = 0; stage < stageCount; ++stage) {
+      parallelFor(pool, first, last, participantCount,
+                  [stage, &fn](std::size_t bf, std::size_t bl) { fn(stage, bf, bl); });
+    }
+  }
 };
 #endif // CITOR_BENCH_HAS_LEOPARD
 
@@ -1272,6 +1296,59 @@ template <> struct CompetitorTraits<dispenso::ThreadPool> {
     dispenso::TaskSet taskSet(pool);
     dispenso::parallel_for(taskSet, first, last,
                            [&fn](std::size_t lo, std::size_t hi) { fn(lo, hi); });
+  }
+
+  /// Reduction emulated as N parallel_for chunks + per-block partials + serial merge.
+  /// dispenso ships `parallel_for_deferred` and a TaskSet, but no first-class reduce; the
+  /// bench measures fan-out + barrier-wait through the TaskSet's destructor.
+  template <class T, class Map, class Combine>
+  static T parallelReduce(dispenso::ThreadPool &pool, std::size_t first, std::size_t last,
+                          std::size_t participantCount, T identity, Map map, Combine combine) {
+    const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
+    std::vector<T> partials(blocks, identity);
+    const std::size_t span = last - first;
+    const std::size_t block = (span + blocks - 1U) / blocks;
+    {
+      dispenso::TaskSet taskSet(pool);
+      for (std::size_t b = 0; b < blocks; ++b) {
+        const std::size_t bf = first + std::min(span, b * block);
+        const std::size_t bl = first + std::min(span, (b + 1) * block);
+        if (bf == bl) {
+          continue;
+        }
+        taskSet.schedule(
+            [bf, bl, b, &partials, &map, identity]() { partials[b] = map(bf, bl, identity); });
+      }
+    }
+    T result = identity;
+    for (auto &p : partials) {
+      result = combine(result, p);
+    }
+    return result;
+  }
+
+  /// Scan: serial fallback. dispenso has no scan primitive.
+  template <class T, class Body>
+  static T parallelScan(dispenso::ThreadPool &pool, std::size_t first, std::size_t last, T identity,
+                        Body body) {
+    (void)pool;
+    return body(first, last, identity);
+  }
+
+  /// Fan-out: schedule one closure, wait on the TaskSet's destructor.
+  template <class Fn> static void fanout(dispenso::ThreadPool &pool, Fn fn) {
+    dispenso::TaskSet taskSet(pool);
+    taskSet.schedule(std::move(fn));
+  }
+
+  /// Chain emulated as |stageCount| back-to-back parallelFor waves.
+  template <class Fn>
+  static void parallelChain(dispenso::ThreadPool &pool, std::size_t first, std::size_t last,
+                            std::size_t participantCount, std::size_t stageCount, Fn fn) {
+    for (std::size_t stage = 0; stage < stageCount; ++stage) {
+      parallelFor(pool, first, last, participantCount,
+                  [stage, &fn](std::size_t bf, std::size_t bl) { fn(stage, bf, bl); });
+    }
   }
 };
 #endif // CITOR_BENCH_HAS_DISPENSO

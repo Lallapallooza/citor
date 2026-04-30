@@ -405,6 +405,107 @@ template <class T, class Kernel>
 #endif
 
 // =============================================================================
+// Leopard + dispenso -- two-wave reduce shimmed via Traits::parallelFor.
+// =============================================================================
+
+#ifdef CITOR_BENCH_HAS_LEOPARD
+template <class T, class Kernel>
+[[nodiscard]] T runLeopardTwoWave(hmthrp::ThreadPool &pool, const std::vector<T> &in,
+                                  std::size_t blocks, Kernel kernel) {
+  // Direct dispatch -- one block per partial -- so the kernel's per-block result lands at the
+  // balance and would map two trait-blocks to the same partial slot.
+  std::vector<T> partials(blocks, T{0});
+  const std::size_t blockSize = (kN + blocks - 1) / blocks;
+  std::vector<std::future<void>> futures;
+  futures.reserve(blocks);
+  for (std::size_t b = 0; b < blocks; ++b) {
+    const std::size_t lo = std::min(kN, b * blockSize);
+    const std::size_t hi = std::min(kN, (b + 1U) * blockSize);
+    if (lo == hi) {
+      continue;
+    }
+    futures.emplace_back(pool.dispatch(false, [b, lo, hi, &in, &partials, kernel]() {
+      partials[b] = kernel(in, lo, hi);
+    }));
+  }
+  for (auto &f : futures) {
+    f.get();
+  }
+  T total{0};
+  for (T v : partials) {
+    total += v;
+  }
+  return total;
+}
+
+[[nodiscard]] BenchRow measureLeopardPlain(std::size_t participants,
+                                           const CyclesPerNanosecond &cal) {
+  auto pool = CompetitorTraits<hmthrp::ThreadPool>::make(participants);
+  ReduceData<std::int64_t> d = buildData<std::int64_t>();
+  return measureLoop<std::int64_t>("Leopard::reduce_two_wave", cal, [&] {
+    return runLeopardTwoWave<std::int64_t>(*pool, d.in, participants,
+                                           partialSumPlain<std::int64_t>);
+  });
+}
+
+[[nodiscard]] BenchRow measureLeopardKahan(std::size_t participants,
+                                           const CyclesPerNanosecond &cal) {
+  auto pool = CompetitorTraits<hmthrp::ThreadPool>::make(participants);
+  ReduceData<double> d = buildData<double>();
+  return measureLoop<double>("Leopard::reduce_kahan_two_wave", cal, [&] {
+    return runLeopardTwoWave<double>(*pool, d.in, participants, partialSumKahan);
+  });
+}
+#endif
+
+#ifdef CITOR_BENCH_HAS_DISPENSO
+template <class T, class Kernel>
+[[nodiscard]] T runDispensoTwoWave(dispenso::ThreadPool &pool, const std::vector<T> &in,
+                                   std::size_t blocks, Kernel kernel) {
+  // See runLeopardTwoWave for the partials-sizing rationale.
+  std::vector<T> partials(blocks, T{0});
+  const std::size_t blockSize = (kN + blocks - 1) / blocks;
+  {
+    dispenso::TaskSet taskSet(pool);
+    for (std::size_t b = 0; b < blocks; ++b) {
+      const std::size_t lo = std::min(kN, b * blockSize);
+      const std::size_t hi = std::min(kN, (b + 1U) * blockSize);
+      if (lo == hi) {
+        continue;
+      }
+      taskSet.schedule([b, lo, hi, &in, &partials, kernel]() {
+        partials[b] = kernel(in, lo, hi);
+      });
+    }
+  }
+  T total{0};
+  for (T v : partials) {
+    total += v;
+  }
+  return total;
+}
+
+[[nodiscard]] BenchRow measureDispensoPlain(std::size_t participants,
+                                            const CyclesPerNanosecond &cal) {
+  auto pool = CompetitorTraits<dispenso::ThreadPool>::make(participants);
+  ReduceData<std::int64_t> d = buildData<std::int64_t>();
+  return measureLoop<std::int64_t>("dispenso::reduce_two_wave", cal, [&] {
+    return runDispensoTwoWave<std::int64_t>(*pool, d.in, participants,
+                                            partialSumPlain<std::int64_t>);
+  });
+}
+
+[[nodiscard]] BenchRow measureDispensoKahan(std::size_t participants,
+                                            const CyclesPerNanosecond &cal) {
+  auto pool = CompetitorTraits<dispenso::ThreadPool>::make(participants);
+  ReduceData<double> d = buildData<double>();
+  return measureLoop<double>("dispenso::reduce_kahan_two_wave", cal, [&] {
+    return runDispensoTwoWave<double>(*pool, d.in, participants, partialSumKahan);
+  });
+}
+#endif
+
+// =============================================================================
 // OpenMP -- parallel for reduction(+:)
 // =============================================================================
 
@@ -479,6 +580,12 @@ BenchTable buildPlainTable(std::size_t participants, const char *suffix,
 #ifdef CITOR_BENCH_HAS_OPENMP
   table.rows.push_back(measureOpenMpPlain(participants, cal));
 #endif
+#ifdef CITOR_BENCH_HAS_LEOPARD
+  table.rows.push_back(measureLeopardPlain(participants, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+  table.rows.push_back(measureDispensoPlain(participants, cal));
+#endif
   return table;
 }
 
@@ -502,6 +609,12 @@ BenchTable buildKahanTable(std::size_t participants, const char *suffix,
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
   table.rows.push_back(measureOpenMpKahan(participants, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_LEOPARD
+  table.rows.push_back(measureLeopardKahan(participants, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+  table.rows.push_back(measureDispensoKahan(participants, cal));
 #endif
   return table;
 }

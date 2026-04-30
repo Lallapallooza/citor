@@ -359,6 +359,79 @@ template <class RunFn>
 }
 #endif
 
+#ifdef CITOR_BENCH_HAS_LEOPARD
+[[nodiscard]] BenchRow measureLeopard(std::size_t participants, const ParetoData &d,
+                                      const CyclesPerNanosecond &cal) {
+  auto pool = CompetitorTraits<hmthrp::ThreadPool>::make(participants);
+  return measureLoop(
+      "Leopard::reduce_two_wave", cal,
+      [&] {
+        // Direct dispatch (not Traits::parallelFor) so partials sizing matches block count
+        // breaks `partials[blockIdx]` when callers expect 1:1 block-to-partial mapping.
+        const std::size_t blocks = participants;
+        std::vector<std::int64_t> partials(blocks, 0);
+        const std::size_t span = kN;
+        const std::size_t block = (span + blocks - 1U) / blocks;
+        std::vector<std::future<void>> futures;
+        futures.reserve(blocks);
+        for (std::size_t b = 0; b < blocks; ++b) {
+          const std::size_t lo = std::min(span, b * block);
+          const std::size_t hi = std::min(span, (b + 1U) * block);
+          if (lo == hi) {
+            continue;
+          }
+          futures.emplace_back(pool->dispatch(false, [b, lo, hi, &partials, &d, &cal]() {
+            partials[b] = paretoBlockSum(d, lo, hi, cal);
+          }));
+        }
+        for (auto &f : futures) {
+          f.get();
+        }
+        std::int64_t total = 0;
+        for (std::int64_t v : partials) {
+          total += v;
+        }
+        return total;
+      },
+      d.totalCostNs);
+}
+#endif
+
+#ifdef CITOR_BENCH_HAS_DISPENSO
+[[nodiscard]] BenchRow measureDispenso(std::size_t participants, const ParetoData &d,
+                                       const CyclesPerNanosecond &cal) {
+  auto pool = CompetitorTraits<dispenso::ThreadPool>::make(participants);
+  return measureLoop(
+      "dispenso::reduce_two_wave", cal,
+      [&] {
+        // See Leopard above for the partials-sizing rationale.
+        const std::size_t blocks = participants;
+        std::vector<std::int64_t> partials(blocks, 0);
+        const std::size_t span = kN;
+        const std::size_t block = (span + blocks - 1U) / blocks;
+        {
+          dispenso::TaskSet taskSet(*pool);
+          for (std::size_t b = 0; b < blocks; ++b) {
+            const std::size_t lo = std::min(span, b * block);
+            const std::size_t hi = std::min(span, (b + 1U) * block);
+            if (lo == hi) {
+              continue;
+            }
+            taskSet.schedule([b, lo, hi, &partials, &d, &cal]() {
+              partials[b] = paretoBlockSum(d, lo, hi, cal);
+            });
+          }
+        }
+        std::int64_t total = 0;
+        for (std::int64_t v : partials) {
+          total += v;
+        }
+        return total;
+      },
+      d.totalCostNs);
+}
+#endif
+
 #ifdef CITOR_BENCH_HAS_OPENMP
 [[nodiscard]] BenchRow measureOpenMp(std::size_t participants, const ParetoData &d,
                                      const CyclesPerNanosecond &cal) {
@@ -411,6 +484,12 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
   table.rows.push_back(measureOpenMp(participants, d, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_LEOPARD
+  table.rows.push_back(measureLeopard(participants, d, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+  table.rows.push_back(measureDispenso(participants, d, cal));
 #endif
   return table;
 }
