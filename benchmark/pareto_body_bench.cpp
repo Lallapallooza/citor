@@ -158,6 +158,12 @@ inline void paretoBlockBody(const ParetoData &d, std::size_t lo, std::size_t hi,
 template <class RunFn>
 [[nodiscard]] BenchRow measureLoop(const char *name, const CyclesPerNanosecond &cal, RunFn run,
                                    std::int64_t referenceTotal) {
+  if (!engineEnabled(name)) {
+    BenchRow row{};
+    row.name = name;
+    row.skipped = true;
+    return row;
+  }
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     const std::int64_t v = run();
     CITOR_ALWAYS_ASSERT(v == referenceTotal);
@@ -398,6 +404,56 @@ template <class HintsT>
 }
 #endif
 
+#ifdef CITOR_BENCH_HAS_LEOPARD
+[[nodiscard]] BenchRow measureLeopard(std::size_t participants, const ParetoData &d,
+                                       const CyclesPerNanosecond &cal) {
+  hmthrp::ThreadPool pool(participants);
+  return measureLoop(
+      "Leopard::ThreadPool::parallelFor", cal,
+      [&] {
+        std::atomic<std::int64_t> sink{0};
+        const std::size_t blocks = participants * 2U;
+        const std::size_t block = (kN + blocks - 1U) / blocks;
+        std::vector<std::future<void>> futures;
+        futures.reserve(blocks);
+        for (std::size_t b = 0; b < blocks; ++b) {
+          const std::size_t lo = std::min(kN, b * block);
+          const std::size_t hi = std::min(kN, (b + 1) * block);
+          if (lo >= hi) {
+            continue;
+          }
+          futures.emplace_back(pool.dispatch(
+              false, [lo, hi, &d, &cal, &sink]() { paretoBlockBody(d, lo, hi, cal, sink); }));
+        }
+        for (auto &f : futures) {
+          f.get();
+        }
+        return sink.load(std::memory_order_relaxed);
+      },
+      d.totalCostNs);
+}
+#endif
+
+#ifdef CITOR_BENCH_HAS_DISPENSO
+[[nodiscard]] BenchRow measureDispenso(std::size_t participants, const ParetoData &d,
+                                        const CyclesPerNanosecond &cal) {
+  dispenso::ThreadPool pool(participants);
+  return measureLoop(
+      "dispenso::ThreadPool::parallel_for", cal,
+      [&] {
+        std::atomic<std::int64_t> sink{0};
+        dispenso::TaskSet taskSet(pool);
+        dispenso::parallel_for(
+            taskSet, std::size_t{0}, kN,
+            [&d, &cal, &sink](std::size_t lo, std::size_t hi) {
+              paretoBlockBody(d, lo, hi, cal, sink);
+            });
+        return sink.load(std::memory_order_relaxed);
+      },
+      d.totalCostNs);
+}
+#endif
+
 // =============================================================================
 // Table builder + registrar
 // =============================================================================
@@ -426,6 +482,12 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
   table.rows.push_back(measureOpenMp(participants, d, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_LEOPARD
+  table.rows.push_back(measureLeopard(participants, d, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+  table.rows.push_back(measureDispenso(participants, d, cal));
 #endif
   return table;
 }

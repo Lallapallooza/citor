@@ -107,6 +107,12 @@ template <class PoolT, class Dispatch>
 [[nodiscard]] BenchRow measureGranularityWith(const char *displayName, std::size_t participants,
                                                double bodyNs, const CyclesPerNanosecond &cal,
                                                Dispatch dispatch) {
+  if (!engineEnabled(displayName)) {
+    BenchRow row{};
+    row.name = displayName;
+    row.skipped = true;
+    return row;
+  }
   using Traits = CompetitorTraits<PoolT>;
   auto pool = Traits::make(participants);
   [[maybe_unused]] MeasurementScope<PoolT> measurementScope(*pool);

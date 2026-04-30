@@ -124,6 +124,12 @@ template <class PoolT, class Dispatch>
 [[nodiscard]] BenchRow measureHeatWith(const char *displayName, std::size_t participants,
                                         std::size_t n, const CyclesPerNanosecond &cal,
                                         double referenceChecksum, Dispatch dispatch) {
+  if (!engineEnabled(displayName)) {
+    BenchRow row{};
+    row.name = displayName;
+    row.skipped = true;
+    return row;
+  }
   using Traits = CompetitorTraits<PoolT>;
   auto pool = Traits::make(participants);
 
@@ -235,6 +241,12 @@ BenchTable buildTable(std::size_t participants, HeatCell cell, const CyclesPerNa
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
   table.rows.push_back(measureHeat<OpenMpRunner>(participants, cell.n, cal, reference));
+#endif
+#ifdef CITOR_BENCH_HAS_LEOPARD
+  table.rows.push_back(measureHeat<hmthrp::ThreadPool>(participants, cell.n, cal, reference));
+#endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+  table.rows.push_back(measureHeat<dispenso::ThreadPool>(participants, cell.n, cal, reference));
 #endif
   return table;
 }

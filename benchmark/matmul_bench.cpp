@@ -285,6 +285,43 @@ template <> struct MatmulDispatch<OpenMpRunner> {
 };
 #endif
 
+#ifdef CITOR_BENCH_HAS_LEOPARD
+template <> struct MatmulDispatch<hmthrp::ThreadPool> {
+  template <class Fn>
+  static void run(hmthrp::ThreadPool &pool, std::size_t n, std::size_t participants, Fn fn) {
+    if (participants == 0U) {
+      participants = 1U;
+    }
+    const std::size_t blocks = participants * 2U;
+    const std::size_t block = (n + blocks - 1U) / blocks;
+    std::vector<std::future<void>> futures;
+    futures.reserve(blocks);
+    for (std::size_t b = 0; b < blocks; ++b) {
+      const std::size_t lo = std::min(n, b * block);
+      const std::size_t hi = std::min(n, (b + 1) * block);
+      if (lo >= hi) {
+        continue;
+      }
+      futures.emplace_back(pool.dispatch(false, [lo, hi, &fn]() { fn(lo, hi); }));
+    }
+    for (auto &f : futures) {
+      f.get();
+    }
+  }
+};
+#endif
+
+#ifdef CITOR_BENCH_HAS_DISPENSO
+template <> struct MatmulDispatch<dispenso::ThreadPool> {
+  template <class Fn>
+  static void run(dispenso::ThreadPool &pool, std::size_t n, std::size_t /*participants*/, Fn fn) {
+    dispenso::TaskSet taskSet(pool);
+    dispenso::parallel_for(taskSet, std::size_t{0}, n,
+                           [&fn](std::size_t lo, std::size_t hi) { fn(lo, hi); });
+  }
+};
+#endif
+
 /// Sample one pool's per-call wall time for `C = A * B` at `N`.
 ///
 /// PoolT          Concrete pool type (the trait's specialization key).
@@ -296,6 +333,12 @@ template <class PoolT, class Dispatch>
 [[nodiscard]] BenchRow measureMatmulWith(const char *displayName, std::size_t participants,
                                           std::size_t n, const CyclesPerNanosecond &cal,
                                           Dispatch dispatch) {
+  if (!engineEnabled(displayName)) {
+    BenchRow row{};
+    row.name = displayName;
+    row.skipped = true;
+    return row;
+  }
   using Traits = CompetitorTraits<PoolT>;
   auto pool = Traits::make(participants);
 
@@ -411,6 +454,12 @@ BenchTable buildTable(std::size_t participants, MatmulCell cell, const CyclesPer
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
   table.rows.push_back(measureMatmul<OpenMpRunner>(participants, cell.n, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_LEOPARD
+  table.rows.push_back(measureMatmul<hmthrp::ThreadPool>(participants, cell.n, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+  table.rows.push_back(measureMatmul<dispenso::ThreadPool>(participants, cell.n, cal));
 #endif
 
   return table;
