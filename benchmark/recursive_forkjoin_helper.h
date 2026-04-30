@@ -129,7 +129,7 @@ struct DefaultRecursiveSpawnHints {
 /// For pools with `supportsRecursiveSpawn == false`, the template fails to
 /// compile via `static_assert` with a fixed diagnostic. The diagnostic is
 /// deliberately instructive ("use a different bench shape") rather than
-/// generic so reviewers see why the substitution was made.
+/// generic so the substitution rationale is visible at the call site.
 ///
 /// Pool  Pool type satisfying `RecursiveForkJoinTraits<Pool>::supportsRecursiveSpawn`.
 /// Body  Callable invoked as `body(pool)` for each child.
@@ -181,12 +181,15 @@ template <class Pool, class Body> inline void recursiveSpawn(Pool &pool, Body &&
 #endif
 #ifdef CITOR_BENCH_HAS_DISPENSO
   else if constexpr (std::is_same_v<Pool, ::dispenso::ThreadPool>) {
-    // dispenso's TaskSet destructor runs as a wait-and-drain; nested
-    // `schedule` calls from inside a worker are picked up by other workers
-    // (or the producer's drain on the dtor path).
+    // dispenso's TaskSet drains via the dtor. Pass `ForceQueuingTag` so the
+    // nested schedule never runs inline on the calling worker -- without it,
+    // dispenso's anti-flooding throttle (task_set_impl.h:174-183: when called
+    // from a pool worker and `curWork > numThreads*1.5`) would inline both
+    // siblings serially on the parent's thread, defeating the fork-join
+    // contract by removing concurrent execution of L and R.
     ::dispenso::TaskSet ts(pool);
-    ts.schedule([&]() { body(pool); });
-    ts.schedule([&]() { body(pool); });
+    ts.schedule([&]() { body(pool); }, ::dispenso::ForceQueuingTag{});
+    ts.schedule([&]() { body(pool); }, ::dispenso::ForceQueuingTag{});
   }
 #endif
 }
@@ -246,9 +249,10 @@ inline void recursiveSpawn2(Pool &pool, Left &&left, Right &&right) {
 #endif
 #ifdef CITOR_BENCH_HAS_DISPENSO
   else if constexpr (std::is_same_v<Pool, ::dispenso::ThreadPool>) {
+    // ForceQueuingTag: see the single-body overload above.
     ::dispenso::TaskSet ts(pool);
-    ts.schedule([&]() { left(pool); });
-    ts.schedule([&]() { right(pool); });
+    ts.schedule([&]() { left(pool); }, ::dispenso::ForceQueuingTag{});
+    ts.schedule([&]() { right(pool); }, ::dispenso::ForceQueuingTag{});
   }
 #endif
 }

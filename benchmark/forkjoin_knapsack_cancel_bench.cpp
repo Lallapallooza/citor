@@ -325,12 +325,19 @@ BenchTable buildTable(std::size_t participants, KnapsackCell cell, const CyclesP
   table.rows.push_back(
       measureKnapsack<::tbb::task_arena>("oneTBB[cancel-off]", participants, cell.n, cal, false));
 #endif
-  // dispenso is NOT wired here. Its TaskSet completes the
-  // recursive search tree fast enough that the bound-tightening cancel
-  // observation (firings >= 1 per iteration) is non-deterministic on this
-  // workload, so the bench's correctness assertion fires sporadically. The
-  // other 4 fork-join cells (fib/queens, UTS, Strassen, cilksort) DO render
-  // dispenso since they have no cancellation invariant.
+  // dispenso is not wired here despite recursive_forkjoin_helper's
+  // ForceQueuingTag plumbing forcing concurrent sibling execution. ForceQueuing
+  // succeeds at the scheduling layer (verified in fib28 / UTS / Strassen /
+  // cilksort cells, where siblings are observably parallel), but the bench's
+  // `firings >= 1 per iteration` invariant additionally requires the OTHER
+  // branch's `tok.stop_requested()` poll to OBSERVE the cancel signal before
+  // its own subtree completes. Empirically dispenso's first-or-N-th timed
+  // iteration trips the assertion at n=20 -- the cooperative-cancel signal
+  // doesn't propagate fast enough across dispenso's TaskSet workers for the
+  // search to bail mid-flight reliably. citor / TBB tighten via a worker that
+  // is contemporaneously polling at chunk boundaries, so the signal is
+  // observed deterministically. Both behaviours are valid; the bench shape
+  // requires the citor/TBB pattern.
   return table;
 }
 
