@@ -498,3 +498,303 @@ constexpr std::size_t kStrassenIterations = 10;
 constexpr std::size_t kStrassenWarmupIterations = 2;
 
 struct Sub {
+  float *data;
+  std::size_t stride;
+  std::size_t n;
+};
+
+struct AlignedFloatDeleter {
+  void operator()(float *p) const noexcept {
+    if (p != nullptr) {
+      std::free(p);
+    }
+  }
+};
+
+using AlignedFloatBuffer = std::unique_ptr<float[], AlignedFloatDeleter>;
+
+inline AlignedFloatBuffer allocateAlignedFloats(std::size_t count) {
+  void *raw = nullptr;
+  const std::size_t bytes = ((count * sizeof(float) + 63U) / 64U) * 64U;
+  if (::posix_memalign(&raw, 64U, bytes) != 0) {
+    std::abort();
+  }
+  return AlignedFloatBuffer{static_cast<float *>(raw)};
+}
+
+inline void deterministicFill(float *p, std::size_t count, std::uint32_t seed) noexcept {
+  std::mt19937 rng{seed};
+  std::uniform_real_distribution<float> dist(-1.0F, 1.0F);
+  for (std::size_t i = 0; i < count; ++i) {
+    p[i] = dist(rng);
+  }
+}
+
+inline void addInto(const Sub &dst, const Sub &a, const Sub &b) noexcept {
+  for (std::size_t i = 0; i < dst.n; ++i) {
+    const float *aRow = a.data + (i * a.stride);
+    const float *bRow = b.data + (i * b.stride);
+    float *dRow = dst.data + (i * dst.stride);
+    for (std::size_t j = 0; j < dst.n; ++j) {
+      dRow[j] = aRow[j] + bRow[j];
+    }
+  }
+}
+
+inline void subInto(const Sub &dst, const Sub &a, const Sub &b) noexcept {
+  for (std::size_t i = 0; i < dst.n; ++i) {
+    const float *aRow = a.data + (i * a.stride);
+    const float *bRow = b.data + (i * b.stride);
+    float *dRow = dst.data + (i * dst.stride);
+    for (std::size_t j = 0; j < dst.n; ++j) {
+      dRow[j] = aRow[j] - bRow[j];
+    }
+  }
+}
+
+inline void addEq(const Sub &dst, const Sub &a) noexcept {
+  for (std::size_t i = 0; i < dst.n; ++i) {
+    const float *aRow = a.data + (i * a.stride);
+    float *dRow = dst.data + (i * dst.stride);
+    for (std::size_t j = 0; j < dst.n; ++j) {
+      dRow[j] += aRow[j];
+    }
+  }
+}
+
+inline void subEq(const Sub &dst, const Sub &a) noexcept {
+  for (std::size_t i = 0; i < dst.n; ++i) {
+    const float *aRow = a.data + (i * a.stride);
+    float *dRow = dst.data + (i * dst.stride);
+    for (std::size_t j = 0; j < dst.n; ++j) {
+      dRow[j] -= aRow[j];
+    }
+  }
+}
+
+inline void seqMatmul(const Sub &c, const Sub &a, const Sub &b) noexcept {
+  for (std::size_t i = 0; i < c.n; ++i) {
+    float *cRow = c.data + (i * c.stride);
+    for (std::size_t j = 0; j < c.n; ++j) {
+      cRow[j] = 0.0F;
+    }
+    for (std::size_t k = 0; k < c.n; ++k) {
+      const float aik = a.data[(i * a.stride) + k];
+      const float *bRow = b.data + (k * b.stride);
+      for (std::size_t j = 0; j < c.n; ++j) {
+        cRow[j] += aik * bRow[j];
+      }
+    }
+  }
+}
+
+[[nodiscard]] inline Sub quadrant(const Sub &m, std::size_t row, std::size_t col) noexcept {
+  const std::size_t half = m.n / 2U;
+  return Sub{
+      .data = m.data + (row * half * m.stride) + (col * half), .stride = m.stride, .n = half};
+}
+
+[[nodiscard]] constexpr std::size_t scratchBudget(std::size_t n, std::size_t depth) noexcept {
+  if (n <= kSeqCutoff) {
+    return 0U;
+  }
+  const std::size_t half = n / 2U;
+  const std::size_t levelSize = 17U * (half * half);
+  const std::size_t childMul = depth < kStrassenParallelDepth ? 7U : 1U;
+  return levelSize + (childMul * scratchBudget(half, depth + 1U));
+}
+
+[[nodiscard]] inline float strassenTolerance(std::size_t n) noexcept {
+  constexpr double kEpsFloat = 1.1920929e-7;
+  constexpr double kHighamScale = 1.5;
+  const double bound =
+      kHighamScale * std::pow(static_cast<double>(n), 2.8073549220576041) * kEpsFloat;
+  return static_cast<float>(bound);
+}
+
+// libfork strassen coroutine: matches the C++20 reference at
+// forkjoin_strassen_bench.cpp:strassenRec. Operand temporaries + sub-product
+// buffers live in `scratch`; each parallel sub-product gets a disjoint slice
+// while depth < kStrassenParallelDepth, otherwise the seven mults serially
+// reuse a single child slice.
+inline constexpr auto strassenCoro = [](auto self, Sub c, Sub a, Sub b, float *scratch,
+                                        std::size_t depth) -> lf::task<void> {
+  if (c.n <= kSeqCutoff) {
+    seqMatmul(c, a, b);
+    co_return;
+  }
+  const std::size_t half = c.n / 2U;
+  const std::size_t halfSize = half * half;
+
+  float *cursor = scratch;
+  auto take = [&cursor, halfSize]() {
+    float *out = cursor;
+    cursor += halfSize;
+    return out;
+  };
+  Sub mBufs[7];
+  for (std::size_t k = 0; k < 7; ++k) {
+    mBufs[k] = Sub{.data = take(), .stride = half, .n = half};
+  }
+  Sub t1A{take(), half, half};
+  Sub t1B{take(), half, half};
+  Sub t2A{take(), half, half};
+  Sub t3B{take(), half, half};
+  Sub t4B{take(), half, half};
+  Sub t5A{take(), half, half};
+  Sub t6A{take(), half, half};
+  Sub t6B{take(), half, half};
+  Sub t7A{take(), half, half};
+  Sub t7B{take(), half, half};
+  float *childScratch = cursor;
+
+  const Sub a11 = quadrant(a, 0, 0);
+  const Sub a12 = quadrant(a, 0, 1);
+  const Sub a21 = quadrant(a, 1, 0);
+  const Sub a22 = quadrant(a, 1, 1);
+  const Sub b11 = quadrant(b, 0, 0);
+  const Sub b12 = quadrant(b, 0, 1);
+  const Sub b21 = quadrant(b, 1, 0);
+  const Sub b22 = quadrant(b, 1, 1);
+  const Sub c11 = quadrant(c, 0, 0);
+  const Sub c12 = quadrant(c, 0, 1);
+  const Sub c21 = quadrant(c, 1, 0);
+  const Sub c22 = quadrant(c, 1, 1);
+
+  addInto(t1A, a11, a22);
+  addInto(t1B, b11, b22);
+  addInto(t2A, a21, a22);
+  subInto(t3B, b12, b22);
+  subInto(t4B, b21, b11);
+  addInto(t5A, a11, a12);
+  subInto(t6A, a21, a11);
+  addInto(t6B, b11, b12);
+  subInto(t7A, a12, a22);
+  addInto(t7B, b21, b22);
+
+  const std::size_t childBudget = scratchBudget(half, depth + 1U);
+
+  if (depth < kStrassenParallelDepth) {
+    co_await lf::fork[self](mBufs[0], t1A, t1B, childScratch, depth + 1U);
+    co_await lf::fork[self](mBufs[1], t2A, b11, childScratch + childBudget, depth + 1U);
+    co_await lf::fork[self](mBufs[2], a11, t3B, childScratch + (2U * childBudget), depth + 1U);
+    co_await lf::fork[self](mBufs[3], a22, t4B, childScratch + (3U * childBudget), depth + 1U);
+    co_await lf::fork[self](mBufs[4], t5A, b22, childScratch + (4U * childBudget), depth + 1U);
+    co_await lf::fork[self](mBufs[5], t6A, t6B, childScratch + (5U * childBudget), depth + 1U);
+    co_await lf::call[self](mBufs[6], t7A, t7B, childScratch + (6U * childBudget), depth + 1U);
+    co_await lf::join;
+  } else {
+    co_await lf::call[self](mBufs[0], t1A, t1B, childScratch, depth + 1U);
+    co_await lf::call[self](mBufs[1], t2A, b11, childScratch, depth + 1U);
+    co_await lf::call[self](mBufs[2], a11, t3B, childScratch, depth + 1U);
+    co_await lf::call[self](mBufs[3], a22, t4B, childScratch, depth + 1U);
+    co_await lf::call[self](mBufs[4], t5A, b22, childScratch, depth + 1U);
+    co_await lf::call[self](mBufs[5], t6A, t6B, childScratch, depth + 1U);
+    co_await lf::call[self](mBufs[6], t7A, t7B, childScratch, depth + 1U);
+    co_await lf::join;
+  }
+
+  addInto(c11, mBufs[0], mBufs[3]);
+  subEq(c11, mBufs[4]);
+  addEq(c11, mBufs[6]);
+
+  addInto(c12, mBufs[2], mBufs[4]);
+  addInto(c21, mBufs[1], mBufs[3]);
+
+  subInto(c22, mBufs[0], mBufs[1]);
+  addEq(c22, mBufs[2]);
+  addEq(c22, mBufs[5]);
+};
+
+} // namespace strassen
+
+// ---------------------------------------------------------------------------
+// cilksort: matches forkjoin_cilksort_bench.cpp's recursion. The merge phase
+// uses a serial bucket-merge fallback because libfork's coroutine recursion
+// inside a worker pairs awkwardly with the per-bucket parallel-merge wave;
+// the bucket count is small enough (kMergeBuckets = 64) that the serial
+// pass is below measurement granularity at the cell sizes (n in {1M, 16M}).
+// ---------------------------------------------------------------------------
+
+namespace cilksort {
+
+constexpr std::size_t kSeqCutoff = 256;
+constexpr std::size_t kMergeBuckets = 64;
+constexpr std::size_t kCilksortIterations = 25;
+constexpr std::size_t kCilksortWarmupIterations = 3;
+
+[[nodiscard]] inline std::vector<std::int32_t> buildInput(std::size_t n) {
+  std::vector<std::int32_t> v(n);
+  std::mt19937 rng{0xc1701U};
+  std::uniform_int_distribution<std::int32_t> dist(std::numeric_limits<std::int32_t>::min(),
+                                                   std::numeric_limits<std::int32_t>::max());
+  for (std::size_t i = 0; i < n; ++i) {
+    v[i] = dist(rng);
+  }
+  return v;
+}
+
+inline std::size_t seqMerge(const std::int32_t *src, std::size_t aLo, std::size_t aHi,
+                            std::size_t bLo, std::size_t bHi, std::int32_t *dst,
+                            std::size_t outLo) noexcept {
+  std::size_t i = aLo;
+  std::size_t j = bLo;
+  std::size_t k = outLo;
+  while (i < aHi && j < bHi) {
+    if (src[i] <= src[j]) {
+      dst[k++] = src[i++];
+    } else {
+      dst[k++] = src[j++];
+    }
+  }
+  while (i < aHi) {
+    dst[k++] = src[i++];
+  }
+  while (j < bHi) {
+    dst[k++] = src[j++];
+  }
+  return k - outLo;
+}
+
+inline void serialMerge(std::int32_t *src, std::size_t aLo, std::size_t aHi, std::size_t bLo,
+                        std::size_t bHi, std::int32_t *dst, std::size_t outLo) {
+  const std::size_t nA = aHi - aLo;
+  const std::size_t nB = bHi - bLo;
+  const std::size_t total = nA + nB;
+  if (total == 0) {
+    return;
+  }
+  if (total < kSeqCutoff) {
+    seqMerge(src, aLo, aHi, bLo, bHi, dst, outLo);
+    return;
+  }
+  // Bucket-split + serial seqMerge per bucket. Same shape as the dispenso
+  // serial-fallback path: scan + per-bucket merge are both serial because
+  // libfork inside the recursion doesn't compose with another fork-wave at
+  // the merge depth without double-spawning the executor.
+  const bool aIsLarger = nA >= nB;
+  const std::size_t primLo = aIsLarger ? aLo : bLo;
+  const std::size_t primHi = aIsLarger ? aHi : bHi;
+  const std::size_t secLo = aIsLarger ? bLo : aLo;
+  const std::size_t secHi = aIsLarger ? bHi : aHi;
+  const std::size_t nPrim = primHi - primLo;
+  std::array<std::size_t, kMergeBuckets + 1U> primSplit{};
+  std::array<std::size_t, kMergeBuckets + 1U> secSplit{};
+  primSplit[0] = primLo;
+  primSplit[kMergeBuckets] = primHi;
+  secSplit[0] = secLo;
+  secSplit[kMergeBuckets] = secHi;
+  for (std::size_t k = 1; k < kMergeBuckets; ++k) {
+    primSplit[k] = primLo + ((nPrim * k) / kMergeBuckets);
+    const std::int32_t key = src[primSplit[k]];
+    secSplit[k] = static_cast<std::size_t>(std::lower_bound(src + secLo, src + secHi, key) - src);
+  }
+  std::size_t running = outLo;
+  for (std::size_t k = 0; k < kMergeBuckets; ++k) {
+    const std::size_t aLoK = aIsLarger ? primSplit[k] : secSplit[k];
+    const std::size_t aHiK = aIsLarger ? primSplit[k + 1U] : secSplit[k + 1U];
+    const std::size_t bLoK = aIsLarger ? secSplit[k] : primSplit[k];
+    const std::size_t bHiK = aIsLarger ? secSplit[k + 1U] : primSplit[k + 1U];
+    running += seqMerge(src, aLoK, aHiK, bLoK, bHiK, dst, running);
+  }
+}
