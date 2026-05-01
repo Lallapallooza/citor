@@ -7,6 +7,7 @@ set(_citor_tests
     bulk_for_queries_test
     chase_lev_deque_test
     fork_join_test
+    notebook_alloc_test
     parallel_chain_test
     parallel_for_test
     parallel_for_tsan_test

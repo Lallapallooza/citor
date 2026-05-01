@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "citor/detail/notebook.h"
 #include "citor/hints.h"
 
 namespace citor::detail {
@@ -129,6 +130,53 @@ struct WorkerState {
 
   /// Reserved trace ring slot; populated by the trace-ring type when tracing lands.
   alignas(kCacheLine) TraceRingSlot trace{};
+
+  /// Inbound knock word for the LTC steal-half handshake.
+  ///
+  /// Thieves CAS this from `Empty` to `Pending`; the owner CASes from `Pending`
+  /// to `Claimed` at its next safe point. The 64-bit word packs state, epoch,
+  /// and thief slot id; the encoding is the LTC layer's responsibility. Lives
+  /// alone on its own cache line so steady-state thief contention does not
+  /// invalidate the dispatch hot path's `mailbox` / `doneEpoch` lines.
+  alignas(kCacheLine) std::atomic<std::uint64_t> knock{0};
+
+  /// Per-thief outbound response slots.
+  ///
+  /// Indexed by `thiefRequestCounter & (kRespSlots - 1)`. Each slot owns its
+  /// own cache line via `ResponseSlot::alignas(kCacheLine)`, so concurrent
+  /// thieves writing different slots do not contend.
+  ResponseSlot responses[kRespSlots]{};
+
+  /// Per-worker LTC notebook header; cursors and base pointers only.
+  ///
+  /// The notebook arena (entries + inline bytes) lives in the heap allocation
+  /// pointed to by `tlsArena`; this header carries the cursors that walk it.
+  /// Owner-only writes; the victim-on-own-thread materialize path also runs on
+  /// the owner's thread, so no atomic discipline is required here.
+  alignas(kCacheLine) NotebookHeader notebook{};
+
+  /// Per-worker adaptive served-steal counters; cache-line aligned by `AdaptiveCounters` itself.
+  AdaptiveCounters adaptive{};
 };
+
+// Existing offsets must not move once LTC fields are appended; the dispatch
+// hot path indexes `mailbox`, `doneEpoch`, and the per-worker counters through
+// these offsets and a shift would silently move state into another cache line.
+static_assert(offsetof(WorkerState, mailbox) == 0);
+static_assert(offsetof(WorkerState, doneEpoch) == kCacheLine);
+static_assert(offsetof(WorkerState, workerId) == kCacheLine * 2);
+static_assert(offsetof(WorkerState, parks) == kCacheLine * 3);
+static_assert(offsetof(WorkerState, wakes) == kCacheLine * 4);
+static_assert(offsetof(WorkerState, dispatches) == kCacheLine * 5);
+static_assert(offsetof(WorkerState, hotSpinEpoch) == kCacheLine * 6);
+static_assert(offsetof(WorkerState, stealAttempts) == kCacheLine * 7);
+static_assert(offsetof(WorkerState, stealSuccesses) == kCacheLine * 8);
+static_assert(offsetof(WorkerState, claimedAt) == kCacheLine * 9);
+static_assert(offsetof(WorkerState, deque) == kCacheLine * 10);
+static_assert(offsetof(WorkerState, trace) == kCacheLine * 11);
+
+// LTC fields land after `trace`. The full struct must still fit comfortably
+// in L2 across the worker fleet (16 workers x 4 KiB = 64 KiB).
+static_assert(sizeof(WorkerState) <= 4096);
 
 } // namespace citor::detail
