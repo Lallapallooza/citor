@@ -16,21 +16,20 @@
 // with a few iterations, then timed.
 //
 // Excluded from the libfork roster:
-//   - Strassen / cilksort -- the existing implementations are 200+ lines of
-//     recursive code each with parallel-for sub-phases; porting to libfork
-//     coroutines is a separate piece of work and is not blocking the primary
-//     fork-join comparison.
 //   - knapsack-cancel    -- libfork has no first-class cancellation primitive
 //     comparable to citor's `CancellationToken`; the cell tests cancellation
 //     latency, not raw fork-join throughput.
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -349,6 +348,42 @@ inline constexpr auto utsCoro = [](auto self, UtsRngState state, int depth,
 // Entry points exposed to fork_join_bench.cpp / forkjoin_uts_bench.cpp.
 // ---------------------------------------------------------------------------
 
+// Cutoff-parameterized fib coroutine: shape mirrors libfork's published bench
+// (`bench/source/fib/libfork.cpp`) which has NO cutoff at all. Our `kFibFineN`
+// + `kFibFineCutoff=2` cells expose the per-spawn-cost regime where libfork's
+// continuation-stealing wins.
+inline constexpr auto fibCutoffCoro = [](auto self, int n, int cutoff) -> lf::task<std::int64_t> {
+  if (n <= cutoff) {
+    co_return seqFib(n);
+  }
+  std::int64_t a = 0;
+  std::int64_t b = 0;
+  co_await lf::fork[&a, self](n - 1, cutoff);
+  co_await lf::call[&b, self](n - 2, cutoff);
+  co_await lf::join;
+  co_return a + b;
+};
+
+BenchRow runLibforkFibFine(std::size_t participants, int n, int cutoff,
+                           const CyclesPerNanosecond &cal) {
+  lf::lazy_pool pool(participants);
+  std::atomic<std::int64_t> sink{0};
+  for (std::size_t i = 0; i < kFibWarmupIterations; ++i) {
+    sink.store(lf::sync_wait(pool, fibCutoffCoro, n, cutoff), std::memory_order_relaxed);
+  }
+  std::vector<double> samples;
+  samples.reserve(kFibIterations);
+  for (std::size_t i = 0; i < kFibIterations; ++i) {
+    const std::uint64_t startCycles = readCyclesStart();
+    const std::int64_t value = lf::sync_wait(pool, fibCutoffCoro, n, cutoff);
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    sink.store(value, std::memory_order_relaxed);
+  }
+  (void)sink.load(std::memory_order_relaxed);
+  return finalizeRow("libfork", samples);
+}
+
 BenchRow runLibforkFib28(std::size_t participants, const CyclesPerNanosecond &cal) {
   // lazy_pool is libfork's recommended general-purpose scheduler. It parks
 // idle workers aggressively (which costs a wake-up at the start of each
@@ -446,4 +481,20 @@ lf::lazy_pool pool(participants);
   return finalizeRow("libfork", samples);
 }
 
-} // namespace citor::bench
+// ---------------------------------------------------------------------------
+// Strassen: same algorithm as forkjoin_strassen_bench.cpp (kSeqCutoff = 64,
+// kParallelDepth = 1, 7 sub-products in 4 paired groups). The recursion is
+// expressed as libfork coroutines that fork the four groups + the lone M7
+// branch. Sub-product output buffers and operand temporaries live in a
+// caller-managed scratch arena (`scratchBudget(n, 0)` floats) so the
+// coroutine stays small.
+// ---------------------------------------------------------------------------
+
+namespace strassen {
+
+constexpr std::size_t kSeqCutoff = 64;
+constexpr std::size_t kStrassenParallelDepth = 1;
+constexpr std::size_t kStrassenIterations = 10;
+constexpr std::size_t kStrassenWarmupIterations = 2;
+
+struct Sub {
