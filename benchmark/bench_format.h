@@ -324,6 +324,19 @@ inline void formatTable(const BenchTable &table, std::string_view baselineName, 
       .tailNs = std::nullopt,
       .rawSamplesNs = {},
   };
+  // When the tail-percentile flag is on, populate tailNs from the already-
+  // sorted samples. The convention matches `parallel_for_cold_dispatch_bench.cpp`
+  // (the only TU previously consuming `BenchRow::tailNs`): {p25, p50, p99}
+  // in nanoseconds. Linear interpolation between sample indices is overkill
+  // for the bench's sample sizes (10-50); pick the floor index.
+  if (tailPercentilesEnabled() && !samples.empty()) {
+    auto pickPct = [&samples](double pct) -> double {
+      const std::size_t maxIdx = samples.size() - 1U;
+      const std::size_t idx = static_cast<std::size_t>((pct / 100.0) * static_cast<double>(maxIdx));
+      return samples[idx];
+    };
+    row.tailNs = std::array<double, 3>{pickPct(25.0), pickPct(50.0), pickPct(99.0)};
+  }
   if (!rawSnapshot.empty()) {
     row.rawSamplesNs = std::move(rawSnapshot);
   }

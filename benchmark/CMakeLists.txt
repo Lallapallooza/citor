@@ -270,6 +270,31 @@ if(OpenMP_CXX_FOUND)
     target_link_libraries(parallel_bench_openmp INTERFACE OpenMP::OpenMP_CXX)
 endif()
 
+# hwloc (hardware locality) -- enables NUMA-aware thread pinning in libfork's
+# `lazy_pool`/`busy_pool` and TMC's `cpu_executor()`. Both libraries
+# auto-detect hwloc at compile time via their respective build flags
+# (LF_USE_HWLOC for libfork; TMC_USE_HWLOC for TMC). Without hwloc, both
+# pools fall through to a flat-thread layout that empirically pessimizes
+# their published headline numbers on multi-CCD AMD Zen and multi-socket
+# Intel hosts.
+#
+# `find_package(PkgConfig)` + `pkg_check_modules(hwloc)` is the upstream-
+# documented way to locate hwloc on Linux. The IMPORTED target
+# `PkgConfig::hwloc` carries the include + link flags; an interface target
+# `parallel_bench_hwloc` re-exports them so each bench-side competitor
+# wiring block stays uniform.
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(hwloc IMPORTED_TARGET hwloc)
+endif()
+if(TARGET PkgConfig::hwloc)
+    add_library(parallel_bench_hwloc INTERFACE)
+    target_link_libraries(parallel_bench_hwloc INTERFACE PkgConfig::hwloc)
+    set(CITOR_BENCH_HAS_HWLOC ON)
+else()
+    set(CITOR_BENCH_HAS_HWLOC OFF)
+endif()
+
 set(_citor_bench_sources
     affinity_sweep_bench.cpp
     balance_sweep_bench.cpp
@@ -283,6 +308,10 @@ set(_citor_bench_sources
     fork_join_bench.cpp
     forkjoin_cilksort_bench.cpp
     forkjoin_knapsack_cancel_bench.cpp
+    forkjoin_matmul_dac_bench.cpp
+    forkjoin_mixed_detached_sync_bench.cpp
+    forkjoin_pool_group_cross_ccd_bench.cpp
+    forkjoin_skynet_bench.cpp
     forkjoin_strassen_bench.cpp
     forkjoin_uts_bench.cpp
     granularity_bench.cpp
@@ -393,6 +422,14 @@ endif()
 if(TARGET libfork_headers)
     target_link_libraries(parallel_bench PRIVATE libfork_headers)
     target_compile_definitions(parallel_bench PRIVATE CITOR_BENCH_HAS_LIBFORK)
+    if(CITOR_BENCH_HAS_HWLOC)
+        # libfork's lazy_pool / busy_pool consult hwloc for NUMA-aware pinning
+        # via `lf::numa_strategy::fan` (the default of the published bench
+        # harness). Setting LF_USE_HWLOC switches the schedulers from a flat-
+        # thread layout to topology-aware pinning.
+        target_link_libraries(parallel_bench PRIVATE parallel_bench_hwloc)
+        target_compile_definitions(parallel_bench PRIVATE LF_USE_HWLOC)
+    endif()
     # libfork_runners.cpp uses C++23-only multi-arg subscript syntax via
     # libfork's API. The rest of the bench compiles at C++20 and would warn
     # heavily at the libfork headers; isolating the std=c++23 override on
@@ -407,7 +444,30 @@ if(TARGET libfork_headers)
 endif()
 if(TARGET tmc_headers)
     target_link_libraries(parallel_bench PRIVATE tmc_headers)
-    target_compile_definitions(parallel_bench PRIVATE CITOR_BENCH_HAS_TMC)
+    target_compile_definitions(
+        parallel_bench
+        PRIVATE
+            CITOR_BENCH_HAS_TMC
+            # Match libfork's published bench harness configuration
+            # (build/_deps/libfork-src/bench/CMakeLists.txt:100-108):
+            #   TMC_WORK_ITEM=CORO   - fix work-item type at compile time.
+            #   TMC_PRIORITY_COUNT=1 - turns the priority-count member into a
+            #                         constexpr so per-priority array indexing
+            #                         and queue lookup fold to compile-time
+            #                         constants.
+            TMC_WORK_ITEM=CORO
+            TMC_PRIORITY_COUNT=1
+    )
+    if(CITOR_BENCH_HAS_HWLOC)
+        # TMC consults hwloc when TMC_USE_HWLOC is defined. Without it,
+        # tmc::cpu_executor falls back to a flat-thread layout where the
+        # work-stealing matrix degenerates to a single Latin-square (see
+        # build/_deps/toomanycooks-src/include/tmc/detail/ex_cpu.ipp:647-677).
+        # With hwloc, the executor pins each worker to a physical core and
+        # builds a topology-aware steal matrix.
+        target_link_libraries(parallel_bench PRIVATE parallel_bench_hwloc)
+        target_compile_definitions(parallel_bench PRIVATE TMC_USE_HWLOC)
+    endif()
     # tmc compiles at C++20 (project default). Skip linting on the impl TU --
     # the TMC_IMPL definitions pull in the full implementation surface and
     # tidy diagnostics on third-party headers are not actionable here.

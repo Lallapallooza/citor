@@ -2,6 +2,8 @@
 
 Header-only C++20 thread pool tuned for sub-microsecond dispatch on modern x86_64 (Linux + AVX2). Eight cooperating primitives, decentralized barriers, Chase-Lev work-stealing, per-CCD arenas.
 
+The name is from Latin *cito* ("swiftly, quickly").
+
 ## Status
 
 Pre-release. Linux x86_64 + AVX2 only. The public API is stable enough to consume; perf numbers and bench harness are still being hardened. macOS / Windows / AArch64 ports are not in scope yet.
