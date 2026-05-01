@@ -223,5 +223,201 @@ struct UtsRngState {
 };
 
 [[nodiscard]] inline UtsRngState rngInit(std::uint32_t seed) noexcept {
+  std::array<std::uint8_t, 20> buf{};
+  buf[16] = static_cast<std::uint8_t>((seed >> 24U) & 0xFFU);
+  buf[17] = static_cast<std::uint8_t>((seed >> 16U) & 0xFFU);
+  buf[18] = static_cast<std::uint8_t>((seed >> 8U) & 0xFFU);
+  buf[19] = static_cast<std::uint8_t>(seed & 0xFFU);
+  UtsRngState out{};
+  sha1Compute(buf.data(), buf.size(), out.bytes);
+  return out;
+}
+
+[[nodiscard]] inline UtsRngState rngSpawn(const UtsRngState &parent,
+                                          std::uint32_t childIdx) noexcept {
+  std::array<std::uint8_t, 24> buf{};
+  std::memcpy(buf.data(), parent.bytes.data(), 20);
+  buf[20] = static_cast<std::uint8_t>((childIdx >> 24U) & 0xFFU);
+  buf[21] = static_cast<std::uint8_t>((childIdx >> 16U) & 0xFFU);
+  buf[22] = static_cast<std::uint8_t>((childIdx >> 8U) & 0xFFU);
+  buf[23] = static_cast<std::uint8_t>(childIdx & 0xFFU);
+  UtsRngState out{};
+  sha1Compute(buf.data(), buf.size(), out.bytes);
+  return out;
+}
+
+[[nodiscard]] inline std::int32_t rngRand(const UtsRngState &s) noexcept {
+  const std::uint32_t b = (static_cast<std::uint32_t>(s.bytes[16]) << 24U) |
+                          (static_cast<std::uint32_t>(s.bytes[17]) << 16U) |
+                          (static_cast<std::uint32_t>(s.bytes[18]) << 8U) |
+                          static_cast<std::uint32_t>(s.bytes[19]);
+  return static_cast<std::int32_t>(b & 0x7FFFFFFFU);
+}
+
+[[nodiscard]] inline double rngToProb(std::int32_t n) noexcept {
+  return n < 0 ? 0.0 : static_cast<double>(n) / 2147483648.0;
+}
+
+constexpr int kRootB0 = 4;
+constexpr int kMaxDepth = 10;
+constexpr std::uint32_t kRootSeed = 19U;
+constexpr std::int64_t kExpectedNodes = 4'130'071;
+constexpr int kSeqCutoffDepth = 5;
+
+[[nodiscard]] inline int utsNumChildrenGeo(const UtsRngState &state, int depth) noexcept {
+  const double bI = (depth < kMaxDepth) ? static_cast<double>(kRootB0) : 0.0;
+  const double p = 1.0 / (1.0 + bI);
+  const std::int32_t h = rngRand(state);
+  const double u = rngToProb(h);
+  if (bI <= 0.0) {
+    return 0;
+  }
+  return static_cast<int>(std::floor(std::log(1.0 - u) / std::log(1.0 - p)));
+}
+
+[[nodiscard]] std::int64_t utsSeqWalk(const UtsRngState &state, int depth) noexcept {
+  std::int64_t count = 1;
+  const int n = utsNumChildrenGeo(state, depth);
+  for (int i = 0; i < n; ++i) {
+    const UtsRngState child = rngSpawn(state, static_cast<std::uint32_t>(i));
+    count += utsSeqWalk(child, depth + 1);
+  }
+  return count;
+}
+
+tmc::task<std::int64_t> utsHalfWalker(UtsRngState parentState, int parentDepth, int childLo,
+                                      int childHi);
+
+tmc::task<std::int64_t> utsCoro(UtsRngState state, int depth) {
+  if (depth >= kSeqCutoffDepth) {
+    co_return utsSeqWalk(state, depth);
+  }
+  const int n = utsNumChildrenGeo(state, depth);
+  if (n == 0) {
+    co_return 1;
+  }
+  if (n == 1) {
+    const UtsRngState child = rngSpawn(state, 0U);
+    std::int64_t childCount = co_await utsCoro(child, depth + 1);
+    co_return 1 + childCount;
+  }
+  // Bisect children at the midpoint into two half-walker tasks; mirrors the
+  // C++20 parWalk in forkjoin_uts_bench.cpp so the per-iter task graph is
+  // identical to citor / TBB / dispenso runs. tmc's continuation-stealing
+  // model still benefits from the bisection because each half is an
+  // independent continuation.
+  const int mid = n / 2;
+  auto [left, right] = co_await tmc::spawn_tuple(utsHalfWalker(state, depth, 0, mid),
+                                                 utsHalfWalker(state, depth, mid, n));
+  co_return 1 + left + right;
+}
+
+tmc::task<std::int64_t> utsHalfWalker(UtsRngState parentState, int parentDepth, int childLo,
+                                      int childHi) {
+  std::int64_t total = 0;
+  for (int i = childLo; i < childHi; ++i) {
+    const UtsRngState child = rngSpawn(parentState, static_cast<std::uint32_t>(i));
+    total += co_await utsCoro(child, parentDepth + 1);
+  }
+  co_return total;
+}
+
+// ---------------------------------------------------------------------------
+// Pool lifecycle helper. tmc's `cpu_executor()` is a process-wide singleton;
+// the runner inits it with a specific worker count, runs all measurements,
+// and tears it down on exit so the next runner sees a clean state.
+// ---------------------------------------------------------------------------
+
+class TmcExecutorScope {
+public:
+  explicit TmcExecutorScope(std::size_t participants) {
+    tmc::cpu_executor().set_thread_count(participants);
+    tmc::cpu_executor().init();
+  }
+  ~TmcExecutorScope() { tmc::cpu_executor().teardown(); }
+
+  TmcExecutorScope(const TmcExecutorScope &) = delete;
+  TmcExecutorScope(TmcExecutorScope &&) = delete;
+  TmcExecutorScope &operator=(const TmcExecutorScope &) = delete;
+  TmcExecutorScope &operator=(TmcExecutorScope &&) = delete;
+};
+
+} // namespace
+
+BenchRow runTmcFib28(std::size_t participants, const CyclesPerNanosecond &cal) {
+  TmcExecutorScope scope{participants};
+  std::atomic<std::int64_t> sink{0};
+  for (std::size_t i = 0; i < kFibWarmupIterations; ++i) {
+    sink.store(tmc::post_waitable(tmc::cpu_executor(), fibCoro(kFibN)).get(),
+               std::memory_order_relaxed);
+  }
+  std::vector<double> samples;
+  samples.reserve(kFibIterations);
+  for (std::size_t i = 0; i < kFibIterations; ++i) {
+    const std::uint64_t startCycles = readCyclesStart();
+    const std::int64_t value = tmc::post_waitable(tmc::cpu_executor(), fibCoro(kFibN)).get();
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    sink.store(value, std::memory_order_relaxed);
+  }
+  (void)sink.load(std::memory_order_relaxed);
+  return finalizeRow("tmc::cpu_executor", samples);
+}
+
+BenchRow runTmcNQueens12(std::size_t participants, const CyclesPerNanosecond &cal) {
+  TmcExecutorScope scope{participants};
+  const std::vector<QueensRoot> roots = buildQueensRoots(kQueensN);
+
+  auto runOnce = [&]() -> std::int64_t {
+    if (roots.empty()) {
+      return 0;
+    }
+    return tmc::post_waitable(tmc::cpu_executor(),
+                              queensRangeCoro(roots.data(), 0, roots.size(), kQueensN))
+        .get();
+  };
+
+  std::atomic<std::int64_t> sink{0};
+  for (std::size_t i = 0; i < kFibWarmupIterations; ++i) {
+    sink.store(runOnce(), std::memory_order_relaxed);
+  }
+  std::vector<double> samples;
+  samples.reserve(kFibIterations);
+  for (std::size_t i = 0; i < kFibIterations; ++i) {
+    const std::uint64_t startCycles = readCyclesStart();
+    const std::int64_t value = runOnce();
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    sink.store(value, std::memory_order_relaxed);
+  }
+  (void)sink.load(std::memory_order_relaxed);
+  return finalizeRow("tmc::cpu_executor", samples);
+}
+
+BenchRow runTmcUtsT1(std::size_t participants, const CyclesPerNanosecond &cal) {
+  TmcExecutorScope scope{participants};
+  const UtsRngState root = rngInit(kRootSeed);
+
+  auto runOnce = [&]() -> std::int64_t {
+    return tmc::post_waitable(tmc::cpu_executor(), utsCoro(root, 0)).get();
+  };
+
+  std::int64_t parallelCount = 0;
+  for (std::size_t i = 0; i < kUtsWarmupIterations; ++i) {
+    parallelCount = runOnce();
+  }
+  CITOR_ALWAYS_ASSERT(parallelCount == kExpectedNodes);
+
+  std::vector<double> samples;
+  samples.reserve(kUtsIterations);
+  for (std::size_t i = 0; i < kUtsIterations; ++i) {
+    const std::uint64_t startCycles = readCyclesStart();
+    const std::int64_t count = runOnce();
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    CITOR_ALWAYS_ASSERT(count == kExpectedNodes);
+  }
+  return finalizeRow("tmc::cpu_executor", samples);
+}
 
 } // namespace citor::bench
