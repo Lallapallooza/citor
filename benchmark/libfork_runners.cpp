@@ -798,3 +798,300 @@ inline void serialMerge(std::int32_t *src, std::size_t aLo, std::size_t aHi, std
     running += seqMerge(src, aLoK, aHiK, bLoK, bHiK, dst, running);
   }
 }
+
+inline constexpr auto cilksortCoro = [](auto self, std::int32_t *data, std::int32_t *tmp,
+                                        std::size_t lo, std::size_t hi) -> lf::task<void> {
+  const std::size_t n = hi - lo;
+  if (n <= kSeqCutoff) {
+    std::sort(data + lo, data + hi);
+    co_return;
+  }
+  const std::size_t mid = lo + (n / 2U);
+  co_await lf::fork[self](data, tmp, lo, mid);
+  co_await lf::call[self](data, tmp, mid, hi);
+  co_await lf::join;
+  serialMerge(data, lo, mid, mid, hi, tmp, lo);
+  std::copy(tmp + lo, tmp + hi, data + lo);
+};
+
+} // namespace cilksort
+
+BenchRow runLibforkStrassen(std::size_t participants, std::size_t n,
+                            const CyclesPerNanosecond &cal) {
+  using namespace strassen;
+  lf::lazy_pool pool(participants);
+
+  AlignedFloatBuffer aBuf = allocateAlignedFloats(n * n);
+  AlignedFloatBuffer bBuf = allocateAlignedFloats(n * n);
+  AlignedFloatBuffer cBuf = allocateAlignedFloats(n * n);
+  AlignedFloatBuffer refBuf = allocateAlignedFloats(n * n);
+  deterministicFill(aBuf.get(), n * n, 0xc1701U);
+  deterministicFill(bBuf.get(), n * n, 0xc1701U + 1U);
+
+  const Sub aSub{aBuf.get(), n, n};
+  const Sub bSub{bBuf.get(), n, n};
+  const Sub cSub{cBuf.get(), n, n};
+  const Sub refSub{refBuf.get(), n, n};
+  seqMatmul(refSub, aSub, bSub);
+
+  const std::size_t scratchN = scratchBudget(n, 0U);
+  std::vector<float> scratch(scratchN, 0.0F);
+
+  auto verify = [&]() {
+    float maxDiff = 0.0F;
+    const std::size_t total = n * n;
+    for (std::size_t i = 0; i < total; ++i) {
+      const float diff = std::fabs(cBuf.get()[i] - refBuf.get()[i]);
+      if (diff > maxDiff) {
+        maxDiff = diff;
+      }
+    }
+    const float tolerance = strassenTolerance(n);
+    CITOR_ALWAYS_ASSERT(maxDiff <= tolerance);
+  };
+
+  for (std::size_t i = 0; i < kStrassenWarmupIterations; ++i) {
+    lf::sync_wait(pool, strassenCoro, cSub, aSub, bSub, scratch.data(), std::size_t{0});
+    verify();
+  }
+  std::vector<double> samples;
+  samples.reserve(kStrassenIterations);
+  for (std::size_t i = 0; i < kStrassenIterations; ++i) {
+    const std::uint64_t startCycles = readCyclesStart();
+    lf::sync_wait(pool, strassenCoro, cSub, aSub, bSub, scratch.data(), std::size_t{0});
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    verify();
+  }
+  return finalizeRow("libfork", samples);
+}
+
+BenchRow runLibforkCilksort(std::size_t participants, std::size_t n,
+                            const CyclesPerNanosecond &cal) {
+  using namespace cilksort;
+  lf::lazy_pool pool(participants);
+  const std::vector<std::int32_t> input = buildInput(n);
+  std::vector<std::int32_t> reference = input;
+  std::sort(reference.begin(), reference.end());
+  std::vector<std::int32_t> data(n, std::int32_t{0});
+  std::vector<std::int32_t> tmp(n, std::int32_t{0});
+
+  for (std::size_t i = 0; i < kCilksortWarmupIterations; ++i) {
+    data = input;
+    lf::sync_wait(pool, cilksortCoro, data.data(), tmp.data(), std::size_t{0}, n);
+    CITOR_ALWAYS_ASSERT(data == reference);
+  }
+
+  std::vector<double> samples;
+  samples.reserve(kCilksortIterations);
+  for (std::size_t i = 0; i < kCilksortIterations; ++i) {
+    data = input;
+    const std::uint64_t startCycles = readCyclesStart();
+    lf::sync_wait(pool, cilksortCoro, data.data(), tmp.data(), std::size_t{0}, n);
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    CITOR_ALWAYS_ASSERT(data == reference);
+  }
+  return finalizeRow("libfork", samples);
+}
+
+// ---------------------------------------------------------------------------
+// matmul DAC: recursive 2x2 block matmul with 8 sub-products in 2 phases
+// (overwrite + accumulate). Mirrors libfork's `bench/source/matmul/libfork.cpp`
+// exactly: each level 4-forks for the overwrite phase, joins, 4-forks for
+// the accumulate phase, joins. Per the libfork source the 4th call of each
+// phase is `lf::call` (inline on caller) rather than `lf::fork`, which
+// avoids one continuation-steal per level.
+// ---------------------------------------------------------------------------
+
+namespace matmul_dac_lf {
+
+constexpr std::size_t kSeqCutoff = 64;
+constexpr std::size_t kIterations = 10;
+constexpr std::size_t kWarmupIterations = 2;
+
+struct AlignedFloatDeleter {
+  void operator()(float *p) const noexcept {
+    if (p != nullptr) {
+      std::free(p);
+    }
+  }
+};
+
+using AlignedFloatBuffer = std::unique_ptr<float[], AlignedFloatDeleter>;
+
+inline AlignedFloatBuffer allocateAlignedFloats(std::size_t count) {
+  void *raw = nullptr;
+  const std::size_t bytes = ((count * sizeof(float) + 63U) / 64U) * 64U;
+  if (::posix_memalign(&raw, 64U, bytes) != 0) {
+    std::abort();
+  }
+  return AlignedFloatBuffer{static_cast<float *>(raw)};
+}
+
+inline void deterministicFill(float *p, std::size_t count, std::uint32_t seed) noexcept {
+  std::mt19937 rng{seed};
+  std::uniform_real_distribution<float> dist(-1.0F, 1.0F);
+  for (std::size_t i = 0; i < count; ++i) {
+    p[i] = dist(rng);
+  }
+}
+
+inline void leafMultiply(const float *A, const float *B, float *R, std::size_t n,
+                         std::size_t stride, bool add) noexcept {
+  for (std::size_t i = 0; i < n; ++i) {
+    float *rRow = R + (i * stride);
+    if (!add) {
+      for (std::size_t j = 0; j < n; ++j) {
+        rRow[j] = 0.0F;
+      }
+    }
+    for (std::size_t k = 0; k < n; ++k) {
+      const float aik = A[(i * stride) + k];
+      const float *bRow = B + (k * stride);
+      for (std::size_t j = 0; j < n; ++j) {
+        rRow[j] += aik * bRow[j];
+      }
+    }
+  }
+}
+
+inline constexpr auto matmulCoro = [](auto self, const float *A, const float *B, float *R,
+                                      std::size_t n, std::size_t stride,
+                                      bool add) -> lf::task<void> {
+  if (n <= kSeqCutoff) {
+    leafMultiply(A, B, R, n, stride, add);
+    co_return;
+  }
+  const std::size_t m = n / 2U;
+  const std::size_t o00 = 0;
+  const std::size_t o01 = m;
+  const std::size_t o10 = m * stride;
+  const std::size_t o11 = (m * stride) + m;
+
+  // Phase 1: overwrite
+  co_await lf::fork[self](A + o00, B + o00, R + o00, m, stride, add);
+  co_await lf::fork[self](A + o00, B + o01, R + o01, m, stride, add);
+  co_await lf::fork[self](A + o10, B + o00, R + o10, m, stride, add);
+  co_await lf::call[self](A + o10, B + o01, R + o11, m, stride, add);
+  co_await lf::join;
+
+  // Phase 2: accumulate
+  co_await lf::fork[self](A + o01, B + o10, R + o00, m, stride, true);
+  co_await lf::fork[self](A + o01, B + o11, R + o01, m, stride, true);
+  co_await lf::fork[self](A + o11, B + o10, R + o10, m, stride, true);
+  co_await lf::call[self](A + o11, B + o11, R + o11, m, stride, true);
+  co_await lf::join;
+};
+
+} // namespace matmul_dac_lf
+
+BenchRow runLibforkMatmulDac(std::size_t participants, std::size_t n,
+                             const CyclesPerNanosecond &cal) {
+  using namespace matmul_dac_lf;
+  lf::lazy_pool pool(participants);
+
+  AlignedFloatBuffer aBuf = allocateAlignedFloats(n * n);
+  AlignedFloatBuffer bBuf = allocateAlignedFloats(n * n);
+  AlignedFloatBuffer cBuf = allocateAlignedFloats(n * n);
+  AlignedFloatBuffer refBuf = allocateAlignedFloats(n * n);
+  deterministicFill(aBuf.get(), n * n, 0xc1701U);
+  deterministicFill(bBuf.get(), n * n, 0xc1701U + 1U);
+  leafMultiply(aBuf.get(), bBuf.get(), refBuf.get(), n, n, /*add=*/false);
+
+  const float tolerance = 1e-3F * static_cast<float>(n);
+  auto verify = [&]() {
+    float maxDiff = 0.0F;
+    const std::size_t total = n * n;
+    for (std::size_t i = 0; i < total; ++i) {
+      const float diff = std::fabs(cBuf.get()[i] - refBuf.get()[i]);
+      if (diff > maxDiff) {
+        maxDiff = diff;
+      }
+    }
+    CITOR_ALWAYS_ASSERT(maxDiff <= tolerance);
+  };
+
+  for (std::size_t i = 0; i < kWarmupIterations; ++i) {
+    lf::sync_wait(pool, matmulCoro, aBuf.get(), bBuf.get(), cBuf.get(), n, n, /*add=*/false);
+    verify();
+  }
+  std::vector<double> samples;
+  samples.reserve(kIterations);
+  for (std::size_t i = 0; i < kIterations; ++i) {
+    const std::uint64_t startCycles = readCyclesStart();
+    lf::sync_wait(pool, matmulCoro, aBuf.get(), bBuf.get(), cBuf.get(), n, n, /*add=*/false);
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    verify();
+  }
+  return finalizeRow("libfork", samples);
+}
+
+// ---------------------------------------------------------------------------
+// Skynet: 10-way fanout, depth 6, sum 0..(10^6-1). Idiomatic libfork shape:
+// 9 forks + 1 call (last child runs inline on parent).
+// ---------------------------------------------------------------------------
+
+namespace skynet_lf {
+
+constexpr int kFanout = 10;
+constexpr int kDepth = 6;
+constexpr std::int64_t kLeafCount = 1'000'000;
+constexpr std::int64_t kExpectedSum = (kLeafCount * (kLeafCount - 1)) / 2;
+constexpr std::size_t kIterations = 25;
+constexpr std::size_t kWarmupIterations = 3;
+
+inline constexpr auto skynetCoro = [](auto self, std::int64_t label, int depth,
+                                      std::int64_t *out) -> lf::task<void> {
+  if (depth == 0) {
+    *out = label;
+    co_return;
+  }
+  const std::int64_t base = label * kFanout;
+  std::array<std::int64_t, kFanout> partials{};
+  for (int i = 0; i < kFanout - 1; ++i) {
+    co_await lf::fork[self](base + static_cast<std::int64_t>(i), depth - 1,
+                            &partials[static_cast<std::size_t>(i)]);
+  }
+  co_await lf::call[self](base + static_cast<std::int64_t>(kFanout - 1), depth - 1,
+                          &partials[static_cast<std::size_t>(kFanout - 1)]);
+  co_await lf::join;
+  std::int64_t total = 0;
+  for (const std::int64_t v : partials) {
+    total += v;
+  }
+  *out = total;
+};
+
+} // namespace skynet_lf
+
+BenchRow runLibforkSkynet(std::size_t participants, const CyclesPerNanosecond &cal) {
+  using namespace skynet_lf;
+  lf::lazy_pool pool(participants);
+
+  auto runOnce = [&]() -> std::int64_t {
+    std::int64_t result = 0;
+    lf::sync_wait(pool, skynetCoro, std::int64_t{0}, kDepth, &result);
+    return result;
+  };
+
+  std::int64_t result = 0;
+  for (std::size_t i = 0; i < kWarmupIterations; ++i) {
+    result = runOnce();
+  }
+  CITOR_ALWAYS_ASSERT(result == kExpectedSum);
+
+  std::vector<double> samples;
+  samples.reserve(kIterations);
+  for (std::size_t i = 0; i < kIterations; ++i) {
+    const std::uint64_t startCycles = readCyclesStart();
+    result = runOnce();
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    CITOR_ALWAYS_ASSERT(result == kExpectedSum);
+  }
+  return finalizeRow("libfork", samples);
+}
+
+} // namespace citor::bench
