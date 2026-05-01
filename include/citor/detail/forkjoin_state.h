@@ -31,10 +31,24 @@ namespace citor::detail {
 /// Padding-suppression note: the layout keeps every contended atomic on its own
 /// `kCacheLine`-sized line, so the analyser's "excessive padding" warning is the design trade-off
 /// we want -- false-sharing avoidance over byte-tight packing.
-// NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
-struct ForkJoinState {
+// Lower store-queue stalls under recursive spawn:
+// libfork's per-call frame is 36-40 B on a single cache line, no internal alignas
+// padding. citor's prior layout (4 alignas(kCacheLine=128)-separated blocks) issued
+// 3-4 separate Read-For-Ownership transactions per recursive forkJoin -- one per
+// cold cache line touched. Collapsing the contended atomics onto a single line cuts
+// per-call RFOs from 3-4 to 1. False-sharing on the no-cancel/no-throw common path
+// is moot: peer writes to `cancelled`/`firstException` only fire on the cold cancel
+// or throw paths, so the producer's hot `pendingTasks` poll keeps the line stable.
+struct alignas(kCacheLine) ForkJoinState {
   /// Number of participants (producer + background workers) collaborating in the call.
   std::uint32_t participants = 0;
+
+  /// Cancellation flag broadcast by the producer's cancellation observer or by any
+  /// participant that observed an exception. Co-located with `pendingTasks` because
+  /// the steady-state common path never writes it; the no-cancel / no-throw call
+  /// shape leaves the field at 0 throughout, so peer `fetch_sub` traffic on
+  /// `pendingTasks` keeps the line uncontended.
+  std::atomic<std::uint32_t> forkJoinCancelled{0};
 
   /// CCD index for each participant slot; used by the victim-selection RNG to bias stealing
   /// toward same-CCD victims when `Affinity::CcdLocal` is requested. Sized `participants`.
@@ -49,27 +63,15 @@ struct ForkJoinState {
   /// when `forkJoin` is invoked. Workers stop emitting fresh tasks once the token is stopped.
   CancellationToken token;
 
-  /// Outstanding task count.
-  ///
-  /// Producer initializes with the root task pack size (typically the variadic count of `fns...`).
-  /// Each task increments by `1` per child it spawns recursively, then decrements by `1` after
-  /// its body retires. The producer joins on `pendingTasks == 0`.
-  alignas(kCacheLine) std::atomic<std::int64_t> pendingTasks{0};
+  /// Outstanding task count. Producer initializes with the root task pack size; each task
+  /// `fetch_sub(1)` after retiring; the producer's join spins on `<= 0`.
+  std::atomic<std::int64_t> pendingTasks{0};
 
-  /// Cancellation flag broadcast by the producer's cancellation observer.
-  ///
-  /// Set once by the producer when the call's `CancellationToken` transitions to stopped, or
-  /// by any participant that observed an exception (so the stop response is uniform). Worker
-  /// task bodies read this flag at chunk boundaries and either skip or short-circuit, relying on
-  /// the synchronous join contract of `ThreadPool::forkJoin` to rendezvous with the producer.
-  alignas(kCacheLine) std::atomic<std::uint32_t> forkJoinCancelled{0};
-
-  /// First-exception capture slot shared across all participants.
-  ///
-  /// Workers `compare_exchange` this from null to a heap-allocated `std::exception_ptr` to record
-  /// the first failure deterministically; subsequent throws drop. The producer reads the slot
-  /// after joining and rethrows if non-null. Allocation only happens on the cold throw path.
-  alignas(kCacheLine) std::atomic<std::exception_ptr *> firstException{nullptr};
+  /// First-exception capture slot. Workers CAS from null on throw; producer reads after join.
+  /// Allocation only happens on the cold throw path; default-init nullptr keeps the line clean
+  /// for the no-throw common path so peer fetch_sub on `pendingTasks` does not bounce against
+  /// a contended exception slot.
+  std::atomic<std::exception_ptr *> firstException{nullptr};
 };
 
 /// Type-erased recursive task descriptor stored in a worker's Chase-Lev deque.
