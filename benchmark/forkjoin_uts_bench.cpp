@@ -276,9 +276,13 @@ constexpr std::int64_t kExpectedNodes = 4'130'071;
 constexpr int kSeqCutoffDepth = 5;
 
 /// Parallel walker: spawns recursively until |depth| crosses the cutoff,
-/// then drops into `seqWalk`. Children are bisected and each half runs on
-/// a separate task spawned via `recursiveSpawn2` (the two-body sibling of
-/// `recursiveSpawn`). Per-half counts merge after the join.
+/// then drops into `seqWalk`. Each child of the current node becomes its own
+/// stealable task via `recursiveSpawnN`, mirroring the libfork / TBB / TMC
+/// idiomatic shape. The earlier bisection variant capped the per-node fan-out
+/// at 2 stealable units (`2^depth` total decomposition over the recursion's
+/// `kSeqCutoffDepth` levels); for canonical UTS T1 (`b0=4`) that is 4x less
+/// task-graph parallelism than the underlying tree exposes. Per-child counts
+/// land in `partials` and merge after the join.
 template <class Pool> std::int64_t parWalk(Pool &pool, const RngState &state, int depth) {
   if (depth >= kSeqCutoffDepth) {
     return seqWalk(state, depth);
@@ -291,28 +295,16 @@ template <class Pool> std::int64_t parWalk(Pool &pool, const RngState &state, in
     const RngState child = rngSpawn(state, 0U);
     return 1 + parWalk(pool, child, depth + 1);
   }
-  std::int64_t leftCount = 0;
-  std::int64_t rightCount = 0;
-  const int mid = n / 2;
-  recursiveSpawn2(
-      pool,
-      [&](Pool &p) {
-        std::int64_t c = 0;
-        for (int i = 0; i < mid; ++i) {
-          const RngState child = rngSpawn(state, static_cast<std::uint32_t>(i));
-          c += parWalk(p, child, depth + 1);
-        }
-        leftCount = c;
-      },
-      [&](Pool &p) {
-        std::int64_t c = 0;
-        for (int i = mid; i < n; ++i) {
-          const RngState child = rngSpawn(state, static_cast<std::uint32_t>(i));
-          c += parWalk(p, child, depth + 1);
-        }
-        rightCount = c;
-      });
-  return 1 + leftCount + rightCount;
+  std::vector<std::int64_t> partials(static_cast<std::size_t>(n), 0);
+  recursiveSpawnN(pool, static_cast<std::size_t>(n), [&](Pool &p, std::size_t i) {
+    const RngState child = rngSpawn(state, static_cast<std::uint32_t>(i));
+    partials[i] = parWalk(p, child, depth + 1);
+  });
+  std::int64_t total = 1;
+  for (const std::int64_t v : partials) {
+    total += v;
+  }
+  return total;
 }
 
 // ---------------------------------------------------------------------------

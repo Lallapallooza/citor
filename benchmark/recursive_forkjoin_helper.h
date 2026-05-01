@@ -257,4 +257,68 @@ inline void recursiveSpawn2(Pool &pool, Left &&left, Right &&right) {
 #endif
 }
 
+/// Recursively spawn |n| distinct children indexed `[0, n)` and wait for all to join.
+///
+/// N-way sibling of `recursiveSpawn2` for divide-and-conquer workloads where the natural
+/// fan-out is data-dependent (UTS geometric branching, k-way merge sort partitions). Bisecting
+/// those down to two stealable units artificially caps parallel decomposition at `2^depth`
+/// instead of `b0^depth`; libfork's published UTS win is essentially this asymmetry.
+///
+/// The body is invoked as `body(pool, i)` for `i` in `[0, n)`. Each invocation is a separate
+/// stealable task on pools that support N-way fan-out natively; pools without an N-way primitive
+/// fall back to a loop of single-task spawns inside one task-set / arena.
+///
+/// Pool  Pool type satisfying `RecursiveForkJoinTraits<Pool>::supportsRecursiveSpawn`.
+/// Body  Callable invoked as `body(pool, i)`.
+/// pool  Pool reference passed to each child body.
+/// n     Task count.
+/// body  Body invoked once per task index.
+template <class Pool, class Body>
+inline void recursiveSpawnN(Pool &pool, std::size_t n, Body &&body) {
+  if constexpr (!RecursiveForkJoinTraits<Pool>::supportsRecursiveSpawn) {
+    static_assert(detail::AlwaysFalse<Pool>::value,
+                  "Pool does not support recursive spawn; use a different bench shape.");
+  } else if constexpr (std::is_same_v<Pool, ::citor::ThreadPool>) {
+    // citor's runtime-N forkJoinAll: stack-allocates up to 32 tasks, heap-spills beyond.
+    pool.template forkJoinAll<DefaultRecursiveSpawnHints>(
+        n, [&](std::size_t i) { body(pool, i); });
+  }
+#ifdef CITOR_BENCH_HAS_TBB
+  else if constexpr (std::is_same_v<Pool, ::tbb::task_arena>) {
+    pool.execute([&] {
+      ::tbb::task_group g;
+      for (std::size_t i = 0; i < n; ++i) {
+        g.run([&, i] { body(pool, i); });
+      }
+      g.wait();
+    });
+  }
+#endif
+#ifdef CITOR_BENCH_HAS_OPENMP
+  else if constexpr (std::is_same_v<Pool, OpenMpRunner>) {
+    for (std::size_t i = 0; i < n; ++i) {
+#pragma omp task shared(pool, body) firstprivate(i)
+      body(pool, i);
+    }
+#pragma omp taskwait
+  }
+#endif
+#ifdef CITOR_BENCH_HAS_TASKFLOW
+  else if constexpr (std::is_same_v<Pool, ::tf::Subflow>) {
+    for (std::size_t i = 0; i < n; ++i) {
+      pool.emplace([&, i](::tf::Subflow &child) { body(child, i); });
+    }
+    pool.join();
+  }
+#endif
+#ifdef CITOR_BENCH_HAS_DISPENSO
+  else if constexpr (std::is_same_v<Pool, ::dispenso::ThreadPool>) {
+    ::dispenso::TaskSet ts(pool);
+    for (std::size_t i = 0; i < n; ++i) {
+      ts.schedule([&, i]() { body(pool, i); }, ::dispenso::ForceQueuingTag{});
+    }
+  }
+#endif
+}
+
 } // namespace citor::bench
