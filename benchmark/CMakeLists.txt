@@ -243,6 +243,27 @@ if(libfork_ADDED AND NOT TARGET libfork_headers)
     )
 endif()
 
+# TooManyCooks (tzcnt) -- header-only C++20 coroutine work-stealing /
+# continuation-stealing thread pool. Cleaner API than libfork (regular
+# `tmc::task<T> fib(int n)` functions, `co_await tmc::spawn_tuple(a, b)`)
+# and stays at C++20 -- no per-source-file standard override needed.
+# Process-wide `tmc::cpu_executor()` singleton; the runner constructs and
+# tears it down per measurement to size the worker count to `participants`.
+cpmaddpackage(
+    NAME TooManyCooks
+    GITHUB_REPOSITORY tzcnt/TooManyCooks
+    GIT_TAG v1.4.0
+    DOWNLOAD_ONLY YES
+)
+if(TooManyCooks_ADDED AND NOT TARGET tmc_headers)
+    add_library(tmc_headers INTERFACE)
+    target_include_directories(
+        tmc_headers
+        SYSTEM
+        INTERFACE ${TooManyCooks_SOURCE_DIR}/include
+    )
+endif()
+
 find_package(OpenMP QUIET)
 if(OpenMP_CXX_FOUND)
     add_library(parallel_bench_openmp INTERFACE)
@@ -284,6 +305,12 @@ set(_citor_bench_sources
 # stable across C++20-C++23 with the same standard library.
 if(TARGET libfork_headers)
     list(APPEND _citor_bench_sources libfork_runners.cpp)
+endif()
+
+# TooManyCooks compiles at the project default (C++20). One TU must define
+# TMC_IMPL before including the headers; tmc_runners.cpp does this once.
+if(TARGET tmc_headers)
+    list(APPEND _citor_bench_sources tmc_runners.cpp)
 endif()
 
 add_executable(parallel_bench ${_citor_bench_sources})
@@ -376,6 +403,17 @@ if(TARGET libfork_headers)
             COMPILE_OPTIONS
                 "-std=c++23;-Wno-c++23-extensions;-Wno-deprecated-declarations"
             SKIP_LINTING ON
+    )
+endif()
+if(TARGET tmc_headers)
+    target_link_libraries(parallel_bench PRIVATE tmc_headers)
+    target_compile_definitions(parallel_bench PRIVATE CITOR_BENCH_HAS_TMC)
+    # tmc compiles at C++20 (project default). Skip linting on the impl TU --
+    # the TMC_IMPL definitions pull in the full implementation surface and
+    # tidy diagnostics on third-party headers are not actionable here.
+    set_source_files_properties(
+        tmc_runners.cpp
+        PROPERTIES SKIP_LINTING ON
     )
 endif()
 

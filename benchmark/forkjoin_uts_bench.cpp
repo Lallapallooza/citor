@@ -43,6 +43,7 @@
 #include "cycle_clock.h"
 #include "libfork_runners.h"
 #include "recursive_forkjoin_helper.h"
+#include "tmc_runners.h"
 
 #ifdef CITOR_BENCH_HAS_TBB
 #include <oneapi/tbb/task_arena.h>
@@ -455,6 +456,9 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
 #endif
 #ifdef CITOR_BENCH_HAS_LIBFORK
   table.rows.push_back(runLibforkUtsT1(participants, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_TMC
+  table.rows.push_back(runTmcUtsT1(participants, cal));
 #endif
   return table;
 }
