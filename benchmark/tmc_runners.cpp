@@ -19,12 +19,16 @@
 #define TMC_IMPL
 #include "tmc/all_headers.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -285,9 +289,6 @@ constexpr int kSeqCutoffDepth = 5;
   return count;
 }
 
-tmc::task<std::int64_t> utsHalfWalker(UtsRngState parentState, int parentDepth, int childLo,
-                                      int childHi);
-
 tmc::task<std::int64_t> utsCoro(UtsRngState state, int depth) {
   if (depth >= kSeqCutoffDepth) {
     co_return utsSeqWalk(state, depth);
@@ -301,23 +302,20 @@ tmc::task<std::int64_t> utsCoro(UtsRngState state, int depth) {
     std::int64_t childCount = co_await utsCoro(child, depth + 1);
     co_return 1 + childCount;
   }
-  // Bisect children at the midpoint into two half-walker tasks; mirrors the
-  // C++20 parWalk in forkjoin_uts_bench.cpp so the per-iter task graph is
-  // identical to citor / TBB / dispenso runs. tmc's continuation-stealing
-  // model still benefits from the bisection because each half is an
-  // independent continuation.
-  const int mid = n / 2;
-  auto [left, right] = co_await tmc::spawn_tuple(utsHalfWalker(state, depth, 0, mid),
-                                                 utsHalfWalker(state, depth, mid, n));
-  co_return 1 + left + right;
-}
-
-tmc::task<std::int64_t> utsHalfWalker(UtsRngState parentState, int parentDepth, int childLo,
-                                      int childHi) {
-  std::int64_t total = 0;
-  for (int i = childLo; i < childHi; ++i) {
-    const UtsRngState child = rngSpawn(parentState, static_cast<std::uint32_t>(i));
-    total += co_await utsCoro(child, parentDepth + 1);
+  // N-way fan-out via spawn_many, matching libfork's published TMC bench
+  // (build/_deps/libfork-src/bench/source/uts/tmc.cpp:46) and citor's own
+  // forkJoinAll-driven N-way parWalk. Bisecting at the midpoint caps task-
+  // graph parallelism at 2^depth, while N-way exposes b0^depth.
+  std::vector<tmc::task<std::int64_t>> children;
+  children.reserve(static_cast<std::size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    const UtsRngState child = rngSpawn(state, static_cast<std::uint32_t>(i));
+    children.emplace_back(utsCoro(child, depth + 1));
+  }
+  std::vector<std::int64_t> results = co_await tmc::spawn_many(children.data(), n);
+  std::int64_t total = 1;
+  for (std::int64_t v : results) {
+    total += v;
   }
   co_return total;
 }
@@ -331,7 +329,19 @@ tmc::task<std::int64_t> utsHalfWalker(UtsRngState parentState, int parentDepth, 
 class TmcExecutorScope {
 public:
   explicit TmcExecutorScope(std::size_t participants) {
-    tmc::cpu_executor().set_thread_count(participants);
+    // HIERARCHY_MATRIX is TMC's default and is the right choice when there
+    // is no hwloc-backed topology (without TMC_USE_HWLOC every thread lands
+    // in one flat CacheGroup, so HIERARCHY and LATTICE both degenerate to
+    // the same Latin-square). Empirically LATTICE's fallback is bimodal at
+    // j16 (median 349us vs HIERARCHY's 106us). Diagnosed via perf stat:
+    // tmc::post_waitable + std::future::get() parks the producer on a futex
+    // each iteration; at j=16 producer + workers race for 16 logical CPUs
+    // and we see 26x more context switches (91748 vs 3480 at j8). HIERARCHY
+    // recovers most of the slowdown; the structural fix would be to call
+    // tmc::external::sync_await rather than post_waitable+future.get().
+    tmc::cpu_executor()
+        .set_thread_count(participants)
+        .set_work_stealing_strategy(tmc::work_stealing_strategy::HIERARCHY_MATRIX);
     tmc::cpu_executor().init();
   }
   ~TmcExecutorScope() { tmc::cpu_executor().teardown(); }
@@ -343,6 +353,43 @@ public:
 };
 
 } // namespace
+
+tmc::task<std::int64_t> fibCutoffCoro(int n, int cutoff) {
+  if (n <= cutoff) {
+    co_return seqFib(n);
+  }
+  // Mirror tzcnt's published shape (bench/source/fib/tmc.cpp:18-21):
+  // fork() one branch (returns an already-submitted awaitable), serially
+  // run the other branch via co_await on the calling coroutine, then await
+  // the fork. tzcnt's bench uses `run_early()` against an older TMC API;
+  // the v1.4 equivalent on `aw_spawn` is `.fork()` (`spawn.hpp:351`).
+  auto xt = tmc::spawn(fibCutoffCoro(n - 1, cutoff)).fork();
+  std::int64_t y = co_await fibCutoffCoro(n - 2, cutoff);
+  std::int64_t x = co_await std::move(xt);
+  co_return x + y;
+}
+
+BenchRow runTmcFibFine(std::size_t participants, int n, int cutoff,
+                       const CyclesPerNanosecond &cal) {
+  TmcExecutorScope scope{participants};
+  std::atomic<std::int64_t> sink{0};
+  for (std::size_t i = 0; i < kFibWarmupIterations; ++i) {
+    sink.store(tmc::post_waitable(tmc::cpu_executor(), fibCutoffCoro(n, cutoff)).get(),
+               std::memory_order_relaxed);
+  }
+  std::vector<double> samples;
+  samples.reserve(kFibIterations);
+  for (std::size_t i = 0; i < kFibIterations; ++i) {
+    const std::uint64_t startCycles = readCyclesStart();
+    const std::int64_t value =
+        tmc::post_waitable(tmc::cpu_executor(), fibCutoffCoro(n, cutoff)).get();
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    sink.store(value, std::memory_order_relaxed);
+  }
+  (void)sink.load(std::memory_order_relaxed);
+  return finalizeRow("tmc::cpu_executor", samples);
+}
 
 BenchRow runTmcFib28(std::size_t participants, const CyclesPerNanosecond &cal) {
   TmcExecutorScope scope{participants};
@@ -420,4 +467,334 @@ BenchRow runTmcUtsT1(std::size_t participants, const CyclesPerNanosecond &cal) {
   return finalizeRow("tmc::cpu_executor", samples);
 }
 
-} // namespace citor::bench
+// ---------------------------------------------------------------------------
+// Strassen and cilksort: same algorithms as the C++20 references in
+// forkjoin_strassen_bench.cpp / forkjoin_cilksort_bench.cpp. Sub-product /
+// merge state types are duplicated here (anonymous-namespace impl details
+// in the canonical TUs cannot be exposed); the duplication is bounded
+// (one algorithm shape, no data-dependent drift) and keeps the TMC TU
+// self-contained.
+// ---------------------------------------------------------------------------
+
+namespace strassen_tmc {
+
+constexpr std::size_t kSeqCutoff = 64;
+constexpr std::size_t kStrassenParallelDepth = 1;
+constexpr std::size_t kStrassenIterations = 10;
+constexpr std::size_t kStrassenWarmupIterations = 2;
+
+struct Sub {
+  float *data;
+  std::size_t stride;
+  std::size_t n;
+};
+
+struct AlignedFloatDeleter {
+  void operator()(float *p) const noexcept {
+    if (p != nullptr) {
+      std::free(p);
+    }
+  }
+};
+
+using AlignedFloatBuffer = std::unique_ptr<float[], AlignedFloatDeleter>;
+
+inline AlignedFloatBuffer allocateAlignedFloats(std::size_t count) {
+  void *raw = nullptr;
+  const std::size_t bytes = ((count * sizeof(float) + 63U) / 64U) * 64U;
+  if (::posix_memalign(&raw, 64U, bytes) != 0) {
+    std::abort();
+  }
+  return AlignedFloatBuffer{static_cast<float *>(raw)};
+}
+
+inline void deterministicFill(float *p, std::size_t count, std::uint32_t seed) noexcept {
+  std::mt19937 rng{seed};
+  std::uniform_real_distribution<float> dist(-1.0F, 1.0F);
+  for (std::size_t i = 0; i < count; ++i) {
+    p[i] = dist(rng);
+  }
+}
+
+inline void addInto(const Sub &dst, const Sub &a, const Sub &b) noexcept {
+  for (std::size_t i = 0; i < dst.n; ++i) {
+    const float *aRow = a.data + (i * a.stride);
+    const float *bRow = b.data + (i * b.stride);
+    float *dRow = dst.data + (i * dst.stride);
+    for (std::size_t j = 0; j < dst.n; ++j) {
+      dRow[j] = aRow[j] + bRow[j];
+    }
+  }
+}
+
+inline void subInto(const Sub &dst, const Sub &a, const Sub &b) noexcept {
+  for (std::size_t i = 0; i < dst.n; ++i) {
+    const float *aRow = a.data + (i * a.stride);
+    const float *bRow = b.data + (i * b.stride);
+    float *dRow = dst.data + (i * dst.stride);
+    for (std::size_t j = 0; j < dst.n; ++j) {
+      dRow[j] = aRow[j] - bRow[j];
+    }
+  }
+}
+
+inline void addEq(const Sub &dst, const Sub &a) noexcept {
+  for (std::size_t i = 0; i < dst.n; ++i) {
+    const float *aRow = a.data + (i * a.stride);
+    float *dRow = dst.data + (i * dst.stride);
+    for (std::size_t j = 0; j < dst.n; ++j) {
+      dRow[j] += aRow[j];
+    }
+  }
+}
+
+inline void subEq(const Sub &dst, const Sub &a) noexcept {
+  for (std::size_t i = 0; i < dst.n; ++i) {
+    const float *aRow = a.data + (i * a.stride);
+    float *dRow = dst.data + (i * dst.stride);
+    for (std::size_t j = 0; j < dst.n; ++j) {
+      dRow[j] -= aRow[j];
+    }
+  }
+}
+
+inline void seqMatmul(const Sub &c, const Sub &a, const Sub &b) noexcept {
+  for (std::size_t i = 0; i < c.n; ++i) {
+    float *cRow = c.data + (i * c.stride);
+    for (std::size_t j = 0; j < c.n; ++j) {
+      cRow[j] = 0.0F;
+    }
+    for (std::size_t k = 0; k < c.n; ++k) {
+      const float aik = a.data[(i * a.stride) + k];
+      const float *bRow = b.data + (k * b.stride);
+      for (std::size_t j = 0; j < c.n; ++j) {
+        cRow[j] += aik * bRow[j];
+      }
+    }
+  }
+}
+
+[[nodiscard]] inline Sub quadrant(const Sub &m, std::size_t row, std::size_t col) noexcept {
+  const std::size_t half = m.n / 2U;
+  return Sub{
+      .data = m.data + (row * half * m.stride) + (col * half), .stride = m.stride, .n = half};
+}
+
+[[nodiscard]] constexpr std::size_t scratchBudget(std::size_t n, std::size_t depth) noexcept {
+  if (n <= kSeqCutoff) {
+    return 0U;
+  }
+  const std::size_t half = n / 2U;
+  const std::size_t levelSize = 17U * (half * half);
+  const std::size_t childMul = depth < kStrassenParallelDepth ? 7U : 1U;
+  return levelSize + (childMul * scratchBudget(half, depth + 1U));
+}
+
+[[nodiscard]] inline float strassenTolerance(std::size_t n) noexcept {
+  constexpr double kEpsFloat = 1.1920929e-7;
+  constexpr double kHighamScale = 1.5;
+  const double bound =
+      kHighamScale * std::pow(static_cast<double>(n), 2.8073549220576041) * kEpsFloat;
+  return static_cast<float>(bound);
+}
+
+tmc::task<void> strassenCoro(Sub c, Sub a, Sub b, float *scratch, std::size_t depth) {
+  if (c.n <= kSeqCutoff) {
+    seqMatmul(c, a, b);
+    co_return;
+  }
+  const std::size_t half = c.n / 2U;
+  const std::size_t halfSize = half * half;
+
+  float *cursor = scratch;
+  auto take = [&cursor, halfSize]() {
+    float *out = cursor;
+    cursor += halfSize;
+    return out;
+  };
+  std::array<Sub, 7> mBufs{};
+  for (std::size_t k = 0; k < 7; ++k) {
+    mBufs[k] = Sub{.data = take(), .stride = half, .n = half};
+  }
+  Sub t1A{take(), half, half};
+  Sub t1B{take(), half, half};
+  Sub t2A{take(), half, half};
+  Sub t3B{take(), half, half};
+  Sub t4B{take(), half, half};
+  Sub t5A{take(), half, half};
+  Sub t6A{take(), half, half};
+  Sub t6B{take(), half, half};
+  Sub t7A{take(), half, half};
+  Sub t7B{take(), half, half};
+  float *childScratch = cursor;
+
+  const Sub a11 = quadrant(a, 0, 0);
+  const Sub a12 = quadrant(a, 0, 1);
+  const Sub a21 = quadrant(a, 1, 0);
+  const Sub a22 = quadrant(a, 1, 1);
+  const Sub b11 = quadrant(b, 0, 0);
+  const Sub b12 = quadrant(b, 0, 1);
+  const Sub b21 = quadrant(b, 1, 0);
+  const Sub b22 = quadrant(b, 1, 1);
+  const Sub c11 = quadrant(c, 0, 0);
+  const Sub c12 = quadrant(c, 0, 1);
+  const Sub c21 = quadrant(c, 1, 0);
+  const Sub c22 = quadrant(c, 1, 1);
+
+  addInto(t1A, a11, a22);
+  addInto(t1B, b11, b22);
+  addInto(t2A, a21, a22);
+  subInto(t3B, b12, b22);
+  subInto(t4B, b21, b11);
+  addInto(t5A, a11, a12);
+  subInto(t6A, a21, a11);
+  addInto(t6B, b11, b12);
+  subInto(t7A, a12, a22);
+  addInto(t7B, b21, b22);
+
+  const std::size_t childBudget = scratchBudget(half, depth + 1U);
+
+  if (depth < kStrassenParallelDepth) {
+    co_await tmc::spawn_tuple(
+        strassenCoro(mBufs[0], t1A, t1B, childScratch, depth + 1U),
+        strassenCoro(mBufs[1], t2A, b11, childScratch + childBudget, depth + 1U),
+        strassenCoro(mBufs[2], a11, t3B, childScratch + (2U * childBudget), depth + 1U),
+        strassenCoro(mBufs[3], a22, t4B, childScratch + (3U * childBudget), depth + 1U),
+        strassenCoro(mBufs[4], t5A, b22, childScratch + (4U * childBudget), depth + 1U),
+        strassenCoro(mBufs[5], t6A, t6B, childScratch + (5U * childBudget), depth + 1U),
+        strassenCoro(mBufs[6], t7A, t7B, childScratch + (6U * childBudget), depth + 1U));
+  } else {
+    co_await strassenCoro(mBufs[0], t1A, t1B, childScratch, depth + 1U);
+    co_await strassenCoro(mBufs[1], t2A, b11, childScratch, depth + 1U);
+    co_await strassenCoro(mBufs[2], a11, t3B, childScratch, depth + 1U);
+    co_await strassenCoro(mBufs[3], a22, t4B, childScratch, depth + 1U);
+    co_await strassenCoro(mBufs[4], t5A, b22, childScratch, depth + 1U);
+    co_await strassenCoro(mBufs[5], t6A, t6B, childScratch, depth + 1U);
+    co_await strassenCoro(mBufs[6], t7A, t7B, childScratch, depth + 1U);
+  }
+
+  addInto(c11, mBufs[0], mBufs[3]);
+  subEq(c11, mBufs[4]);
+  addEq(c11, mBufs[6]);
+
+  addInto(c12, mBufs[2], mBufs[4]);
+  addInto(c21, mBufs[1], mBufs[3]);
+
+  subInto(c22, mBufs[0], mBufs[1]);
+  addEq(c22, mBufs[2]);
+  addEq(c22, mBufs[5]);
+}
+
+} // namespace strassen_tmc
+
+namespace cilksort_tmc {
+
+constexpr std::size_t kSeqCutoff = 256;
+constexpr std::size_t kMergeBuckets = 64;
+constexpr std::size_t kCilksortIterations = 25;
+constexpr std::size_t kCilksortWarmupIterations = 3;
+
+[[nodiscard]] inline std::vector<std::int32_t> buildInput(std::size_t n) {
+  std::vector<std::int32_t> v(n);
+  std::mt19937 rng{0xc1701U};
+  std::uniform_int_distribution<std::int32_t> dist(std::numeric_limits<std::int32_t>::min(),
+                                                   std::numeric_limits<std::int32_t>::max());
+  for (std::size_t i = 0; i < n; ++i) {
+    v[i] = dist(rng);
+  }
+  return v;
+}
+
+inline std::size_t seqMerge(const std::int32_t *src, std::size_t aLo, std::size_t aHi,
+                            std::size_t bLo, std::size_t bHi, std::int32_t *dst,
+                            std::size_t outLo) noexcept {
+  std::size_t i = aLo;
+  std::size_t j = bLo;
+  std::size_t k = outLo;
+  while (i < aHi && j < bHi) {
+    if (src[i] <= src[j]) {
+      dst[k++] = src[i++];
+    } else {
+      dst[k++] = src[j++];
+    }
+  }
+  while (i < aHi) {
+    dst[k++] = src[i++];
+  }
+  while (j < bHi) {
+    dst[k++] = src[j++];
+  }
+  return k - outLo;
+}
+
+inline void serialMerge(std::int32_t *src, std::size_t aLo, std::size_t aHi, std::size_t bLo,
+                        std::size_t bHi, std::int32_t *dst, std::size_t outLo) {
+  const std::size_t nA = aHi - aLo;
+  const std::size_t nB = bHi - bLo;
+  const std::size_t total = nA + nB;
+  if (total == 0) {
+    return;
+  }
+  if (total < kSeqCutoff) {
+    seqMerge(src, aLo, aHi, bLo, bHi, dst, outLo);
+    return;
+  }
+  const bool aIsLarger = nA >= nB;
+  const std::size_t primLo = aIsLarger ? aLo : bLo;
+  const std::size_t primHi = aIsLarger ? aHi : bHi;
+  const std::size_t secLo = aIsLarger ? bLo : aLo;
+  const std::size_t secHi = aIsLarger ? bHi : aHi;
+  const std::size_t nPrim = primHi - primLo;
+  std::array<std::size_t, kMergeBuckets + 1U> primSplit{};
+  std::array<std::size_t, kMergeBuckets + 1U> secSplit{};
+  primSplit[0] = primLo;
+  primSplit[kMergeBuckets] = primHi;
+  secSplit[0] = secLo;
+  secSplit[kMergeBuckets] = secHi;
+  for (std::size_t k = 1; k < kMergeBuckets; ++k) {
+    primSplit[k] = primLo + ((nPrim * k) / kMergeBuckets);
+    const std::int32_t key = src[primSplit[k]];
+    secSplit[k] = static_cast<std::size_t>(std::lower_bound(src + secLo, src + secHi, key) - src);
+  }
+  std::size_t running = outLo;
+  for (std::size_t k = 0; k < kMergeBuckets; ++k) {
+    const std::size_t aLoK = aIsLarger ? primSplit[k] : secSplit[k];
+    const std::size_t aHiK = aIsLarger ? primSplit[k + 1U] : secSplit[k + 1U];
+    const std::size_t bLoK = aIsLarger ? secSplit[k] : primSplit[k];
+    const std::size_t bHiK = aIsLarger ? secSplit[k + 1U] : primSplit[k + 1U];
+    running += seqMerge(src, aLoK, aHiK, bLoK, bHiK, dst, running);
+  }
+}
+
+tmc::task<void> cilksortCoro(std::int32_t *data, std::int32_t *tmp, std::size_t lo,
+                             std::size_t hi) {
+  const std::size_t n = hi - lo;
+  if (n <= kSeqCutoff) {
+    std::sort(data + lo, data + hi);
+    co_return;
+  }
+  const std::size_t mid = lo + (n / 2U);
+  co_await tmc::spawn_tuple(cilksortCoro(data, tmp, lo, mid),
+                            cilksortCoro(data, tmp, mid, hi));
+  serialMerge(data, lo, mid, mid, hi, tmp, lo);
+  std::copy(tmp + lo, tmp + hi, data + lo);
+}
+
+} // namespace cilksort_tmc
+
+BenchRow runTmcStrassen(std::size_t participants, std::size_t n,
+                        const CyclesPerNanosecond &cal) {
+  using namespace strassen_tmc;
+  TmcExecutorScope scope{participants};
+
+  AlignedFloatBuffer aBuf = allocateAlignedFloats(n * n);
+  AlignedFloatBuffer bBuf = allocateAlignedFloats(n * n);
+  AlignedFloatBuffer cBuf = allocateAlignedFloats(n * n);
+  AlignedFloatBuffer refBuf = allocateAlignedFloats(n * n);
+  deterministicFill(aBuf.get(), n * n, 0xc1701U);
+  deterministicFill(bBuf.get(), n * n, 0xc1701U + 1U);
+  const Sub aSub{aBuf.get(), n, n};
+  const Sub bSub{bBuf.get(), n, n};
+  const Sub cSub{cBuf.get(), n, n};
+  const Sub refSub{refBuf.get(), n, n};
+  seqMatmul(refSub, aSub, bSub);
