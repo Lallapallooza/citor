@@ -333,10 +333,10 @@ public:
     // is no hwloc-backed topology (without TMC_USE_HWLOC every thread lands
     // in one flat CacheGroup, so HIERARCHY and LATTICE both degenerate to
     // the same Latin-square). Empirically LATTICE's fallback is bimodal at
-    // j16 (median 349us vs HIERARCHY's 106us). Diagnosed via perf stat:
+    // j16 was measurably slower than HIERARCHY. Diagnosed via perf stat:
     // tmc::post_waitable + std::future::get() parks the producer on a futex
     // each iteration; at j=16 producer + workers race for 16 logical CPUs
-    // and we see 26x more context switches (91748 vs 3480 at j8). HIERARCHY
+    // and we see many more context switches at j8. HIERARCHY
     // recovers most of the slowdown; the structural fix would be to call
     // tmc::external::sync_await rather than post_waitable+future.get().
     tmc::cpu_executor()
@@ -798,3 +798,256 @@ BenchRow runTmcStrassen(std::size_t participants, std::size_t n,
   const Sub cSub{cBuf.get(), n, n};
   const Sub refSub{refBuf.get(), n, n};
   seqMatmul(refSub, aSub, bSub);
+  const std::size_t scratchN = scratchBudget(n, 0U);
+  std::vector<float> scratch(scratchN, 0.0F);
+
+  auto verify = [&]() {
+    float maxDiff = 0.0F;
+    const std::size_t total = n * n;
+    for (std::size_t i = 0; i < total; ++i) {
+      const float diff = std::fabs(cBuf.get()[i] - refBuf.get()[i]);
+      if (diff > maxDiff) {
+        maxDiff = diff;
+      }
+    }
+    const float tolerance = strassenTolerance(n);
+    CITOR_ALWAYS_ASSERT(maxDiff <= tolerance);
+  };
+
+  for (std::size_t i = 0; i < kStrassenWarmupIterations; ++i) {
+    tmc::post_waitable(tmc::cpu_executor(), strassenCoro(cSub, aSub, bSub, scratch.data(), 0U)).wait();
+    verify();
+  }
+  std::vector<double> samples;
+  samples.reserve(kStrassenIterations);
+  for (std::size_t i = 0; i < kStrassenIterations; ++i) {
+    const std::uint64_t startCycles = readCyclesStart();
+    tmc::post_waitable(tmc::cpu_executor(), strassenCoro(cSub, aSub, bSub, scratch.data(), 0U)).wait();
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    verify();
+  }
+  return finalizeRow("tmc::cpu_executor", samples);
+}
+
+BenchRow runTmcCilksort(std::size_t participants, std::size_t n,
+                        const CyclesPerNanosecond &cal) {
+  using namespace cilksort_tmc;
+  TmcExecutorScope scope{participants};
+  const std::vector<std::int32_t> input = buildInput(n);
+  std::vector<std::int32_t> reference = input;
+  std::sort(reference.begin(), reference.end());
+  std::vector<std::int32_t> data(n, std::int32_t{0});
+  std::vector<std::int32_t> tmp(n, std::int32_t{0});
+
+  for (std::size_t i = 0; i < kCilksortWarmupIterations; ++i) {
+    data = input;
+    tmc::post_waitable(tmc::cpu_executor(), cilksortCoro(data.data(), tmp.data(), 0U, n)).wait();
+    CITOR_ALWAYS_ASSERT(data == reference);
+  }
+
+  std::vector<double> samples;
+  samples.reserve(kCilksortIterations);
+  for (std::size_t i = 0; i < kCilksortIterations; ++i) {
+    data = input;
+    const std::uint64_t startCycles = readCyclesStart();
+    tmc::post_waitable(tmc::cpu_executor(), cilksortCoro(data.data(), tmp.data(), 0U, n)).wait();
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    CITOR_ALWAYS_ASSERT(data == reference);
+  }
+  return finalizeRow("tmc::cpu_executor", samples);
+}
+
+// ---------------------------------------------------------------------------
+// matmul DAC: same shape as forkjoin_matmul_dac_bench.cpp / libfork's
+// reference. Two phases per level (overwrite + accumulate), 4-way fan-out
+// per phase via spawn_tuple.
+// ---------------------------------------------------------------------------
+
+namespace matmul_dac_tmc {
+
+constexpr std::size_t kSeqCutoff = 64;
+constexpr std::size_t kIterations = 10;
+constexpr std::size_t kWarmupIterations = 2;
+
+struct AlignedFloatDeleter {
+  void operator()(float *p) const noexcept {
+    if (p != nullptr) {
+      std::free(p);
+    }
+  }
+};
+
+using AlignedFloatBuffer = std::unique_ptr<float[], AlignedFloatDeleter>;
+
+inline AlignedFloatBuffer allocateAlignedFloats(std::size_t count) {
+  void *raw = nullptr;
+  const std::size_t bytes = ((count * sizeof(float) + 63U) / 64U) * 64U;
+  if (::posix_memalign(&raw, 64U, bytes) != 0) {
+    std::abort();
+  }
+  return AlignedFloatBuffer{static_cast<float *>(raw)};
+}
+
+inline void deterministicFill(float *p, std::size_t count, std::uint32_t seed) noexcept {
+  std::mt19937 rng{seed};
+  std::uniform_real_distribution<float> dist(-1.0F, 1.0F);
+  for (std::size_t i = 0; i < count; ++i) {
+    p[i] = dist(rng);
+  }
+}
+
+inline void leafMultiply(const float *A, const float *B, float *R, std::size_t n,
+                         std::size_t stride, bool add) noexcept {
+  for (std::size_t i = 0; i < n; ++i) {
+    float *rRow = R + (i * stride);
+    if (!add) {
+      for (std::size_t j = 0; j < n; ++j) {
+        rRow[j] = 0.0F;
+      }
+    }
+    for (std::size_t k = 0; k < n; ++k) {
+      const float aik = A[(i * stride) + k];
+      const float *bRow = B + (k * stride);
+      for (std::size_t j = 0; j < n; ++j) {
+        rRow[j] += aik * bRow[j];
+      }
+    }
+  }
+}
+
+tmc::task<void> matmulCoro(const float *A, const float *B, float *R, std::size_t n,
+                           std::size_t stride, bool add) {
+  if (n <= kSeqCutoff) {
+    leafMultiply(A, B, R, n, stride, add);
+    co_return;
+  }
+  const std::size_t m = n / 2U;
+  const std::size_t o00 = 0;
+  const std::size_t o01 = m;
+  const std::size_t o10 = m * stride;
+  const std::size_t o11 = (m * stride) + m;
+
+  // Phase 1: overwrite, 4 sub-products into disjoint quadrants.
+  co_await tmc::spawn_tuple(matmulCoro(A + o00, B + o00, R + o00, m, stride, add),
+                            matmulCoro(A + o00, B + o01, R + o01, m, stride, add),
+                            matmulCoro(A + o10, B + o00, R + o10, m, stride, add),
+                            matmulCoro(A + o10, B + o01, R + o11, m, stride, add));
+
+  // Phase 2: accumulate into the same quadrants.
+  co_await tmc::spawn_tuple(matmulCoro(A + o01, B + o10, R + o00, m, stride, true),
+                            matmulCoro(A + o01, B + o11, R + o01, m, stride, true),
+                            matmulCoro(A + o11, B + o10, R + o10, m, stride, true),
+                            matmulCoro(A + o11, B + o11, R + o11, m, stride, true));
+}
+
+} // namespace matmul_dac_tmc
+
+BenchRow runTmcMatmulDac(std::size_t participants, std::size_t n,
+                         const CyclesPerNanosecond &cal) {
+  using namespace matmul_dac_tmc;
+  TmcExecutorScope scope{participants};
+
+  AlignedFloatBuffer aBuf = allocateAlignedFloats(n * n);
+  AlignedFloatBuffer bBuf = allocateAlignedFloats(n * n);
+  AlignedFloatBuffer cBuf = allocateAlignedFloats(n * n);
+  AlignedFloatBuffer refBuf = allocateAlignedFloats(n * n);
+  deterministicFill(aBuf.get(), n * n, 0xc1701U);
+  deterministicFill(bBuf.get(), n * n, 0xc1701U + 1U);
+  leafMultiply(aBuf.get(), bBuf.get(), refBuf.get(), n, n, /*add=*/false);
+
+  const float tolerance = 1e-3F * static_cast<float>(n);
+  auto verify = [&]() {
+    float maxDiff = 0.0F;
+    const std::size_t total = n * n;
+    for (std::size_t i = 0; i < total; ++i) {
+      const float diff = std::fabs(cBuf.get()[i] - refBuf.get()[i]);
+      if (diff > maxDiff) {
+        maxDiff = diff;
+      }
+    }
+    CITOR_ALWAYS_ASSERT(maxDiff <= tolerance);
+  };
+
+  for (std::size_t i = 0; i < kWarmupIterations; ++i) {
+    tmc::post_waitable(tmc::cpu_executor(),
+                       matmulCoro(aBuf.get(), bBuf.get(), cBuf.get(), n, n, /*add=*/false))
+        .wait();
+    verify();
+  }
+  std::vector<double> samples;
+  samples.reserve(kIterations);
+  for (std::size_t i = 0; i < kIterations; ++i) {
+    const std::uint64_t startCycles = readCyclesStart();
+    tmc::post_waitable(tmc::cpu_executor(),
+                       matmulCoro(aBuf.get(), bBuf.get(), cBuf.get(), n, n, /*add=*/false))
+        .wait();
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    verify();
+  }
+  return finalizeRow("tmc::cpu_executor", samples);
+}
+
+// ---------------------------------------------------------------------------
+// Skynet: 10-way fanout, depth 6. Uses spawn_many over a vector of N tasks
+// to mirror tzcnt's own bench shape.
+// ---------------------------------------------------------------------------
+
+namespace skynet_tmc {
+
+constexpr int kFanout = 10;
+constexpr int kDepth = 6;
+constexpr std::int64_t kLeafCount = 1'000'000;
+constexpr std::int64_t kExpectedSum = (kLeafCount * (kLeafCount - 1)) / 2;
+constexpr std::size_t kIterations = 25;
+constexpr std::size_t kWarmupIterations = 3;
+
+tmc::task<std::int64_t> skynetCoro(std::int64_t label, int depth) {
+  if (depth == 0) {
+    co_return label;
+  }
+  const std::int64_t base = label * kFanout;
+  std::vector<tmc::task<std::int64_t>> children;
+  children.reserve(static_cast<std::size_t>(kFanout));
+  for (int i = 0; i < kFanout; ++i) {
+    children.emplace_back(skynetCoro(base + static_cast<std::int64_t>(i), depth - 1));
+  }
+  std::vector<std::int64_t> results = co_await tmc::spawn_many(children.data(), kFanout);
+  std::int64_t total = 0;
+  for (const std::int64_t v : results) {
+    total += v;
+  }
+  co_return total;
+}
+
+} // namespace skynet_tmc
+
+BenchRow runTmcSkynet(std::size_t participants, const CyclesPerNanosecond &cal) {
+  using namespace skynet_tmc;
+  TmcExecutorScope scope{participants};
+
+  auto runOnce = [&]() -> std::int64_t {
+    return tmc::post_waitable(tmc::cpu_executor(), skynetCoro(std::int64_t{0}, kDepth)).get();
+  };
+
+  std::int64_t result = 0;
+  for (std::size_t i = 0; i < kWarmupIterations; ++i) {
+    result = runOnce();
+  }
+  CITOR_ALWAYS_ASSERT(result == kExpectedSum);
+
+  std::vector<double> samples;
+  samples.reserve(kIterations);
+  for (std::size_t i = 0; i < kIterations; ++i) {
+    const std::uint64_t startCycles = readCyclesStart();
+    result = runOnce();
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    CITOR_ALWAYS_ASSERT(result == kExpectedSum);
+  }
+  return finalizeRow("tmc::cpu_executor", samples);
+}
+
+} // namespace citor::bench
