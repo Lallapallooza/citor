@@ -372,6 +372,40 @@ template <class PoolT>
 }
 #endif
 
+#ifdef CITOR_BENCH_HAS_TASKFLOW
+[[nodiscard]] BenchRow measureTaskflow(std::size_t participants, const CyclesPerNanosecond &cal) {
+  static_assert(RecursiveForkJoinTraits<::tf::Subflow>::supportsRecursiveSpawn,
+                "Taskflow Subflow must opt into recursive spawn for the UTS bench");
+  ::tf::Executor exec(participants);
+  const RngState root = rngInit(kRootSeed);
+
+  auto runOnce = [&]() -> std::int64_t {
+    std::int64_t result = 0;
+    ::tf::Taskflow flow;
+    flow.emplace([&](::tf::Subflow &rootSub) { result = parWalk(rootSub, root, 0); });
+    exec.run(flow).wait();
+    return result;
+  };
+
+  std::int64_t parallelCount = 0;
+  for (std::size_t i = 0; i < kWarmupIterations; ++i) {
+    parallelCount = runOnce();
+  }
+  CITOR_ALWAYS_ASSERT(parallelCount == kExpectedNodes);
+
+  std::vector<double> samples;
+  samples.reserve(kIterations);
+  for (std::size_t i = 0; i < kIterations; ++i) {
+    const std::uint64_t startCycles = readCyclesStart();
+    const std::int64_t count = runOnce();
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    CITOR_ALWAYS_ASSERT(count == kExpectedNodes);
+  }
+  return finalizeRow("Taskflow::Subflow", samples);
+}
+#endif
+
 #ifdef CITOR_BENCH_HAS_OPENMP
 [[nodiscard]] BenchRow measureOmp(std::size_t participants, const CyclesPerNanosecond &cal) {
   static_assert(RecursiveForkJoinTraits<OpenMpRunner>::supportsRecursiveSpawn,
@@ -445,6 +479,9 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
 #endif
 #ifdef CITOR_BENCH_HAS_DISPENSO
   table.rows.push_back(measureDispenso(participants, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_TASKFLOW
+  table.rows.push_back(measureTaskflow(participants, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_LIBFORK
   table.rows.push_back(runLibforkUtsT1(participants, cal));

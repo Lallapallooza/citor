@@ -61,6 +61,13 @@
 #include <oneapi/tbb/task_group.h>
 #endif
 
+#ifdef CITOR_BENCH_HAS_TASKFLOW
+#include <taskflow/taskflow.hpp>
+#endif
+
+#include "libfork_runners.h"
+#include "tmc_runners.h"
+
 namespace citor::bench {
 namespace {
 
@@ -513,6 +520,23 @@ template <class PoolT>
 }
 #endif
 
+// Taskflow Subflow is not wired here. The reference Strassen body
+// at depth=0 issues TWO sequential `recursiveSpawn2` calls on the same Pool
+// reference (groups M1+M2 then groups M3..M7) -- that pattern works for
+// citor / TBB / OpenMP / dispenso whose group primitives can be fanned out
+// repeatedly on the same pool. For Taskflow, recursiveSpawn2(Subflow, ...)
+// emplaces+joins, and `tf::Subflow::join()` is single-shot per Subflow, so
+// the second `recursiveSpawn2` on the same Subflow silently produces a
+// dead-Subflow with no scheduled tasks. The result is that the second wave
+// of sub-products is never dispatched; the merge step then reads
+// uninitialized scratch and the verify gate fires.
+//
+// A Subflow-shaped Strassen would need to fan out all 7 sub-products in
+// ONE Subflow scope (e.g. via `recursiveSpawnN<Subflow>(7, ...)`) rather
+// than chaining two recursiveSpawn2 calls. Implementing that requires
+// restructuring the depth-0 split + scratch-arena partitioning; the work is
+// tractable but not landed here.
+
 #ifdef CITOR_BENCH_HAS_OPENMP
 [[nodiscard]] BenchRow measureOmp(std::size_t participants, std::size_t n,
                                   const CyclesPerNanosecond &cal) {
@@ -605,6 +629,12 @@ BenchTable buildTable(std::size_t participants, StrassenCell cell, const CyclesP
 #endif
 #ifdef CITOR_BENCH_HAS_DISPENSO
   table.rows.push_back(measureDispenso(participants, cell.n, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_LIBFORK
+  table.rows.push_back(runLibforkStrassen(participants, cell.n, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_TMC
+  table.rows.push_back(runTmcStrassen(participants, cell.n, cal));
 #endif
   return table;
 }

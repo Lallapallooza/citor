@@ -19,10 +19,15 @@
 // side-channel asserts >= 1 cancellation firing per timing iteration in
 // `[cancel-on]` mode.
 //
-// Pool eligibility: citor + oneTBB. OpenMP recursive-spawn requires the
-// bench to open a "parallel single" region around the recursion entry;
-// that wrapper is not provided in this TU. Taskflow Subflow is excluded
-// for the same recursiveSpawn deadlock reason BS/dp/task/riften are.
+// Pool eligibility: citor + oneTBB + OpenMP + Taskflow Subflow. OpenMP
+// uses the standard `#pragma omp parallel num_threads(N) single` wrapper
+// to seed the recursive descent. Taskflow Subflow recurses via per-level
+// `tf::Subflow::emplace`; the per-level subflow lifetime owns its
+// children and the surrounding `Executor::run().wait()` blocks the
+// producer until the root finishes. dispenso, libfork, and TMC are
+// excluded -- see dispenso comment below for the cancel-signal
+// propagation issue, and libfork/TMC have no first-class cancellation
+// primitive comparable to citor::CancellationToken.
 
 #include <algorithm>
 #include <array>
@@ -45,6 +50,14 @@
 #ifdef CITOR_BENCH_HAS_TBB
 #include <oneapi/tbb/task_arena.h>
 #include <oneapi/tbb/task_group.h>
+#endif
+
+#ifdef CITOR_BENCH_HAS_OPENMP
+#include <omp.h>
+#endif
+
+#ifdef CITOR_BENCH_HAS_TASKFLOW
+#include <taskflow/taskflow.hpp>
 #endif
 
 namespace citor::bench {
@@ -295,6 +308,170 @@ template <class PoolT>
   return finalizeRow(name, samples);
 }
 
+#ifdef CITOR_BENCH_HAS_OPENMP
+[[nodiscard]] BenchRow measureKnapsackOmp(const char *name, std::size_t participants,
+                                          std::size_t nItems, const CyclesPerNanosecond &cal,
+                                          bool cancellationEnabled) {
+  static_assert(RecursiveForkJoinTraits<OpenMpRunner>::supportsRecursiveSpawn,
+                "OpenMP runner must opt into recursive spawn for knapsack-cancel");
+  OpenMpRunner runner{participants};
+
+  const std::vector<Item> items = buildItems(nItems);
+  int totalWeight = 0;
+  for (const Item &it : items) {
+    totalWeight += it.weight;
+  }
+  const int capacity = totalWeight / 2;
+  std::vector<Item> itemsSorted = items;
+  std::sort(itemsSorted.begin(), itemsSorted.end(), [](const Item &a, const Item &b) {
+    return static_cast<double>(a.value) / a.weight > static_cast<double>(b.value) / b.weight;
+  });
+  const int reference = seqDp(items, capacity);
+
+  auto runOnceOmp = [&](SearchState &state) {
+#pragma omp parallel num_threads(static_cast<int>(participants))
+    {
+#pragma omp single
+      { searchRec(runner, itemsSorted, 0U, capacity, 0, state); }
+    }
+  };
+
+  auto runIter = [&]() -> RunOutput {
+    SearchState state;
+    state.cancellationEnabled = cancellationEnabled;
+    state.token =
+        cancellationEnabled ? citor::CancellationToken::makeOwned() : citor::CancellationToken{};
+    runOnceOmp(state);
+    return RunOutput{state.bestValue.load(std::memory_order_acquire), reference,
+                     state.cancelFirings.load(std::memory_order_relaxed)};
+  };
+
+  RunOutput last{};
+  for (std::size_t i = 0; i < kWarmupIterations; ++i) {
+    last = runIter();
+    CITOR_ALWAYS_ASSERT(last.parallel == reference);
+  }
+
+  std::vector<double> samples;
+  samples.reserve(kIterations);
+  for (std::size_t i = 0; i < kIterations; ++i) {
+    const std::uint64_t startCycles = readCyclesStart();
+    const RunOutput out = runIter();
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    CITOR_ALWAYS_ASSERT(out.parallel == reference);
+    if (cancellationEnabled) {
+      CITOR_ALWAYS_ASSERT(out.firings >= 1U);
+    }
+  }
+  return finalizeRow(name, samples);
+}
+#endif
+
+#ifdef CITOR_BENCH_HAS_TASKFLOW
+// Subflow-specific recursive search: each level emplaces two child Subflows
+// (take + skip) and joins. The cancellation observation works the same way
+// as the helper-driven recursion -- workers polling `tok.stop_requested()`
+// observe peer's `request_stop` between Subflow.emplace boundaries.
+void searchRecSubflow(::tf::Subflow &sub, const std::vector<Item> &items, std::size_t idx,
+                      int remCap, int curValue, SearchState &state) {
+  if (state.cancellationEnabled && state.token.stop_requested()) {
+    state.cancelFirings.fetch_add(1U, std::memory_order_relaxed);
+  }
+  if (idx == items.size() || remCap == 0) {
+    int observed = state.bestValue.load(std::memory_order_relaxed);
+    while (curValue > observed &&
+           !state.bestValue.compare_exchange_weak(observed, curValue, std::memory_order_release,
+                                                  std::memory_order_relaxed)) {
+    }
+    if (state.cancellationEnabled && curValue > observed && observed > 0 &&
+        curValue > observed + (observed / 100)) {
+      state.token.request_stop();
+    }
+    return;
+  }
+  const double bound = upperBound(items, idx, remCap, curValue);
+  const int currentBest = state.bestValue.load(std::memory_order_relaxed);
+  if (bound <= static_cast<double>(currentBest)) {
+    return;
+  }
+  constexpr std::size_t kSeqCutoff = 12;
+  if (items.size() - idx <= kSeqCutoff) {
+    if (items[idx].weight <= remCap) {
+      searchRecSubflow(sub, items, idx + 1U, remCap - items[idx].weight,
+                       curValue + items[idx].value, state);
+    }
+    searchRecSubflow(sub, items, idx + 1U, remCap, curValue, state);
+    return;
+  }
+  const Item it = items[idx];
+  const int takeValue = curValue + it.value;
+  const int takeRemCap = remCap - it.weight;
+  const bool canTake = it.weight <= remCap;
+  sub.emplace([&, idx, takeValue, takeRemCap, canTake](::tf::Subflow &child) {
+    if (canTake) {
+      searchRecSubflow(child, items, idx + 1U, takeRemCap, takeValue, state);
+    }
+  });
+  sub.emplace([&, idx, remCap, curValue](::tf::Subflow &child) {
+    searchRecSubflow(child, items, idx + 1U, remCap, curValue, state);
+  });
+  sub.join();
+}
+
+[[nodiscard]] BenchRow measureKnapsackTaskflow(const char *name, std::size_t participants,
+                                               std::size_t nItems, const CyclesPerNanosecond &cal,
+                                               bool cancellationEnabled) {
+  ::tf::Executor exec(participants);
+
+  const std::vector<Item> items = buildItems(nItems);
+  int totalWeight = 0;
+  for (const Item &it : items) {
+    totalWeight += it.weight;
+  }
+  const int capacity = totalWeight / 2;
+  std::vector<Item> itemsSorted = items;
+  std::sort(itemsSorted.begin(), itemsSorted.end(), [](const Item &a, const Item &b) {
+    return static_cast<double>(a.value) / a.weight > static_cast<double>(b.value) / b.weight;
+  });
+  const int reference = seqDp(items, capacity);
+
+  auto runIter = [&]() -> RunOutput {
+    SearchState state;
+    state.cancellationEnabled = cancellationEnabled;
+    state.token =
+        cancellationEnabled ? citor::CancellationToken::makeOwned() : citor::CancellationToken{};
+    ::tf::Taskflow flow;
+    flow.emplace([&](::tf::Subflow &root) {
+      searchRecSubflow(root, itemsSorted, 0U, capacity, 0, state);
+    });
+    exec.run(flow).wait();
+    return RunOutput{state.bestValue.load(std::memory_order_acquire), reference,
+                     state.cancelFirings.load(std::memory_order_relaxed)};
+  };
+
+  RunOutput last{};
+  for (std::size_t i = 0; i < kWarmupIterations; ++i) {
+    last = runIter();
+    CITOR_ALWAYS_ASSERT(last.parallel == reference);
+  }
+
+  std::vector<double> samples;
+  samples.reserve(kIterations);
+  for (std::size_t i = 0; i < kIterations; ++i) {
+    const std::uint64_t startCycles = readCyclesStart();
+    const RunOutput out = runIter();
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    CITOR_ALWAYS_ASSERT(out.parallel == reference);
+    if (cancellationEnabled) {
+      CITOR_ALWAYS_ASSERT(out.firings >= 1U);
+    }
+  }
+  return finalizeRow(name, samples);
+}
+#endif
+
 struct KnapsackCell {
   std::size_t n;
   const char *suffix;
@@ -324,6 +501,19 @@ BenchTable buildTable(std::size_t participants, KnapsackCell cell, const CyclesP
       "oneTBB[citor::CancellationToken cooperative cancel-on]", participants, cell.n, cal, true));
   table.rows.push_back(
       measureKnapsack<::tbb::task_arena>("oneTBB[cancel-off]", participants, cell.n, cal, false));
+#endif
+#ifdef CITOR_BENCH_HAS_OPENMP
+  table.rows.push_back(measureKnapsackOmp(
+      "OpenMP[citor::CancellationToken cooperative cancel-on]", participants, cell.n, cal, true));
+  table.rows.push_back(
+      measureKnapsackOmp("OpenMP[cancel-off]", participants, cell.n, cal, false));
+#endif
+#ifdef CITOR_BENCH_HAS_TASKFLOW
+  table.rows.push_back(measureKnapsackTaskflow(
+      "Taskflow::Subflow[citor::CancellationToken cooperative cancel-on]", participants, cell.n,
+      cal, true));
+  table.rows.push_back(measureKnapsackTaskflow("Taskflow::Subflow[cancel-off]", participants,
+                                               cell.n, cal, false));
 #endif
   // dispenso is not wired here despite recursive_forkjoin_helper's
   // ForceQueuingTag plumbing forcing concurrent sibling execution. ForceQueuing

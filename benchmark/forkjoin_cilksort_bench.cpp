@@ -59,6 +59,13 @@
 #include <oneapi/tbb/task_group.h>
 #endif
 
+#ifdef CITOR_BENCH_HAS_TASKFLOW
+#include <taskflow/taskflow.hpp>
+#endif
+
+#include "libfork_runners.h"
+#include "tmc_runners.h"
+
 namespace citor::bench {
 namespace {
 
@@ -285,6 +292,21 @@ void parallelMerge(Pool &pool, std::int32_t *src, std::size_t aLo, std::size_t a
     CITOR_ALWAYS_ASSERT(running == total);
   }
 #endif
+#ifdef CITOR_BENCH_HAS_TASKFLOW
+  else if constexpr (std::is_same_v<Pool, ::tf::Subflow>) {
+    // Taskflow Subflow: serial-prefix the offset scan; nesting another
+    // taskflow + scan-emulation inside the recursing Subflow would just
+    // schedule kMergeBuckets independent tasks and pay round-trip dispatch
+    // for a 64-element prefix that completes in nanoseconds serially.
+    (void)pool;
+    std::size_t running = 0;
+    for (std::size_t i = 0; i < kMergeBuckets; ++i) {
+      offsets[i] = running;
+      running += sizes[i];
+    }
+    CITOR_ALWAYS_ASSERT(running == total);
+  }
+#endif
 
   // Stamp the output offsets into each bucket descriptor and dispatch the
   // per-bucket merge via `parallelFor` (one bucket per slot).
@@ -337,6 +359,20 @@ void parallelMerge(Pool &pool, std::int32_t *src, std::size_t aLo, std::size_t a
     // crashes the worker on `parentTaskSet()` TLS access. kMergeBuckets = 32
     // so the merge step is fast enough that single-threaded execution is
     // honest at this scale; the substitution shows on the row label.
+    (void)pool;
+    for (std::size_t k = 0; k < kMergeBuckets; ++k) {
+      const MergeBucket &bk = buckets[k];
+      seqMerge(src, bk.aLo, bk.aHi, bk.bLo, bk.bHi, dst, bk.outOffset);
+    }
+  }
+#endif
+#ifdef CITOR_BENCH_HAS_TASKFLOW
+  else if constexpr (std::is_same_v<Pool, ::tf::Subflow>) {
+    // Taskflow Subflow: serial fallback for the per-bucket merge. The outer
+    // recursiveSpawn2(pool, ...) already calls pool.join() before returning;
+    // tf::Subflow may only be joined once, so we cannot emplace another
+    // wave on the parent Subflow here. kMergeBuckets is small enough that
+    // serial execution is honest at this scale.
     (void)pool;
     for (std::size_t k = 0; k < kMergeBuckets; ++k) {
       const MergeBucket &bk = buckets[k];
@@ -427,6 +463,46 @@ template <class PoolT>
 }
 #endif
 
+#ifdef CITOR_BENCH_HAS_TASKFLOW
+[[nodiscard]] BenchRow measureTaskflow(std::size_t participants, std::size_t n,
+                                       const CyclesPerNanosecond &cal) {
+  static_assert(RecursiveForkJoinTraits<::tf::Subflow>::supportsRecursiveSpawn,
+                "Taskflow Subflow must opt into recursive spawn for the cilksort bench");
+  ::tf::Executor exec(participants);
+  const std::vector<std::int32_t> input = buildInput(n);
+  std::vector<std::int32_t> reference = input;
+  std::sort(reference.begin(), reference.end());
+  std::vector<std::int32_t> data(n, std::int32_t{0});
+  std::vector<std::int32_t> tmp(n, std::int32_t{0});
+
+  auto runOnce = [&]() {
+    data = input;
+    ::tf::Taskflow flow;
+    flow.emplace([&](::tf::Subflow &rootSub) {
+      cilksortRec(rootSub, data.data(), tmp.data(), std::size_t{0}, n);
+    });
+    exec.run(flow).wait();
+  };
+
+  for (std::size_t i = 0; i < kWarmupIterations; ++i) {
+    runOnce();
+    CITOR_ALWAYS_ASSERT(data == reference);
+  }
+
+  std::vector<double> samples;
+  samples.reserve(kIterations);
+  for (std::size_t i = 0; i < kIterations; ++i) {
+    data = input;
+    const std::uint64_t startCycles = readCyclesStart();
+    runOnce();
+    const std::uint64_t endCycles = readCyclesEnd();
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    CITOR_ALWAYS_ASSERT(data == reference);
+  }
+  return finalizeRow("Taskflow::Subflow", samples);
+}
+#endif
+
 // dispenso is not wired here. The cilksort shape combines
 // recursiveSpawn2 (one outer TaskSet on the calling worker) with a per-bucket
 // parallelMerge that on dispenso would either nest a second TaskSet or call
@@ -513,6 +589,15 @@ BenchTable buildTable(std::size_t participants, CilksortCell cell, const CyclesP
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
   table.rows.push_back(measureOmp(participants, cell.n, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_TASKFLOW
+  table.rows.push_back(measureTaskflow(participants, cell.n, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_LIBFORK
+  table.rows.push_back(runLibforkCilksort(participants, cell.n, cal));
+#endif
+#ifdef CITOR_BENCH_HAS_TMC
+  table.rows.push_back(runTmcCilksort(participants, cell.n, cal));
 #endif
   return table;
 }
