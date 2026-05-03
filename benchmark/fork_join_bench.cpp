@@ -143,8 +143,7 @@ constexpr int kQueensRootDepth = 2;
   return b;
 }
 
-template <class Spawn>
-[[nodiscard]] std::int64_t parFibCutoff(int n, int cutoff, Spawn spawn) {
+template <class Spawn> [[nodiscard]] std::int64_t parFibCutoff(int n, int cutoff, Spawn spawn) {
   if (n <= cutoff) {
     return seqFib(n);
   }
@@ -303,14 +302,14 @@ template <class Workload>
 template <class Workload>
 [[nodiscard]] BenchRow measureDispenso(const char *name, std::size_t participants,
                                        const CyclesPerNanosecond &cal, Workload workload) {
-  ::dispenso::ThreadPool pool(participants);
+  auto pool = CompetitorTraits<::dispenso::ThreadPool>::make(participants);
   return measureLoop(name, cal, [&] {
     return workload([&pool](auto &&a, auto &&b) {
       // ForceQueuingTag bypasses dispenso's anti-recursion-flooding throttle;
       // without it both children inline on the calling worker once the queue
       // has > numThreads*1.5 tasks in flight (task_set_impl.h:180-183), which
       // serializes the fork-join and defeats the spawn(a, b) contract.
-      ::dispenso::TaskSet ts(pool);
+      ::dispenso::TaskSet ts(*pool);
       ts.schedule(std::forward<decltype(a)>(a), ::dispenso::ForceQueuingTag{});
       ts.schedule(std::forward<decltype(b)>(b), ::dispenso::ForceQueuingTag{});
     });
@@ -333,12 +332,10 @@ template <class Workload>
 #pragma omp single
       {
         result = workload([](auto &&a, auto &&b) {
-          using A = decltype(a);
-          using B = decltype(b);
 #pragma omp task shared(a)
-          std::forward<A>(a)();
+          a();
 #pragma omp task shared(b)
-          std::forward<B>(b)();
+          b();
 #pragma omp taskwait
         });
       }
@@ -362,12 +359,10 @@ template <class Workload>
   }
   std::int64_t a = 0;
   std::int64_t b = 0;
-  sub.emplace([&a, n, cutoff](::tf::Subflow &child) {
-    a = parFibSubflowCutoff(n - 1, cutoff, child);
-  });
-  sub.emplace([&b, n, cutoff](::tf::Subflow &child) {
-    b = parFibSubflowCutoff(n - 2, cutoff, child);
-  });
+  sub.emplace(
+      [&a, n, cutoff](::tf::Subflow &child) { a = parFibSubflowCutoff(n - 1, cutoff, child); });
+  sub.emplace(
+      [&b, n, cutoff](::tf::Subflow &child) { b = parFibSubflowCutoff(n - 2, cutoff, child); });
   sub.join();
   return a + b;
 }
@@ -383,7 +378,7 @@ template <class Workload>
     std::uint64_t diag2;
   };
   std::vector<State> roots;
-  std::vector<State> frontier{State{0U, 0U, 0U}};
+  std::vector<State> frontier{State{.cols = 0U, .diag1 = 0U, .diag2 = 0U}};
   for (int depth = 0; depth < kQueensRootDepth && !frontier.empty(); ++depth) {
     std::vector<State> next;
     next.reserve(frontier.size() * static_cast<std::size_t>(n));
@@ -410,10 +405,8 @@ template <class Workload>
       return;
     }
     const std::size_t mid = lo + ((hi - lo) / 2);
-    sub.emplace(
-        [&self, lo, mid](::tf::Subflow &child) { self(lo, mid, child, self); });
-    sub.emplace(
-        [&self, mid, hi](::tf::Subflow &child) { self(mid, hi, child, self); });
+    sub.emplace([&self, lo, mid](::tf::Subflow &child) { self(lo, mid, child, self); });
+    sub.emplace([&self, mid, hi](::tf::Subflow &child) { self(mid, hi, child, self); });
     sub.join();
   };
   if (!roots.empty()) {
@@ -602,7 +595,8 @@ BenchTable buildQueensTable(std::size_t participants, const char *suffix,
   table.rows.push_back(measureOmp("OpenMP", participants, cal, queensWorkload()));
 #endif
 #ifdef CITOR_BENCH_HAS_DISPENSO
-  table.rows.push_back(measureDispenso("dispenso::ThreadPool", participants, cal, queensWorkload()));
+  table.rows.push_back(
+      measureDispenso("dispenso::ThreadPool", participants, cal, queensWorkload()));
 #endif
 #ifdef CITOR_BENCH_HAS_TASKFLOW
   table.rows.push_back(measureTaskflowQueens("Taskflow::Subflow", participants, cal));
@@ -619,9 +613,7 @@ BenchTable buildQueensTable(std::size_t participants, const char *suffix,
 
 BenchTable runFibJ8(const CyclesPerNanosecond &cal) { return buildFibTable(8, "j8", cal); }
 BenchTable runFibJ16(const CyclesPerNanosecond &cal) { return buildFibTable(16, "j16", cal); }
-BenchTable runFibFineJ8(const CyclesPerNanosecond &cal) {
-  return buildFibFineTable(8, "j8", cal);
-}
+BenchTable runFibFineJ8(const CyclesPerNanosecond &cal) { return buildFibFineTable(8, "j8", cal); }
 BenchTable runFibFineJ16(const CyclesPerNanosecond &cal) {
   return buildFibFineTable(16, "j16", cal);
 }

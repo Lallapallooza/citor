@@ -185,37 +185,25 @@ template <class RunFn>
 // =============================================================================
 
 template <class HintsT>
+// The pool's thread-local descriptor retains the body address after the synchronous
+// call returns; it is overwritten before any later dispatch can dereference it.
+// NOLINTBEGIN(clang-analyzer-core.StackAddressEscape)
 [[nodiscard]] BenchRow measureCitorWithHint(const char *displayName, std::size_t participants,
-                                             const ParetoData &d, const CyclesPerNanosecond &cal) {
+                                            const ParetoData &d, const CyclesPerNanosecond &cal) {
   ThreadPool pool(participants);
   return measureLoop(
       displayName, cal,
       [&] {
         std::atomic<std::int64_t> sink{0};
-        pool.parallelFor<HintsT>(std::size_t{0}, kN,
-                                  [&d, &cal, &sink](std::size_t lo, std::size_t hi) {
-                                    paretoBlockBody(d, lo, hi, cal, sink);
-                                  });
+        auto body = [&d, &cal, &sink](std::size_t lo, std::size_t hi) {
+          paretoBlockBody(d, lo, hi, cal, sink);
+        };
+        pool.parallelFor<HintsT>(std::size_t{0}, kN, body);
         return sink.load(std::memory_order_relaxed);
       },
       d.totalCostNs);
 }
-
-[[nodiscard]] BenchRow measureCitor(std::size_t participants, const ParetoData &d,
-                                    const CyclesPerNanosecond &cal) {
-  ThreadPool pool(participants);
-  return measureLoop(
-      "citor::ThreadPool::parallelFor", cal,
-      [&] {
-        std::atomic<std::int64_t> sink{0};
-        pool.parallelFor<ParetoBodyHints>(std::size_t{0}, kN,
-                                          [&d, &cal, &sink](std::size_t lo, std::size_t hi) {
-                                            paretoBlockBody(d, lo, hi, cal, sink);
-                                          });
-        return sink.load(std::memory_order_relaxed);
-      },
-      d.totalCostNs);
-}
+// NOLINTEND(clang-analyzer-core.StackAddressEscape)
 
 // =============================================================================
 // Future-pool shims (BS / dp / task / riften) -- block-shaped parallelFor
@@ -390,7 +378,7 @@ template <class HintsT>
         {
           const auto threadCount = static_cast<std::size_t>(omp_get_num_threads());
           const auto threadIdx = static_cast<std::size_t>(omp_get_thread_num());
-          const std::size_t span = static_cast<std::size_t>(n);
+          const auto span = static_cast<std::size_t>(n);
           const std::size_t block = (span + threadCount - 1U) / threadCount;
           const std::size_t lo = std::min(span, threadIdx * block);
           const std::size_t hi = std::min(span, (threadIdx + 1U) * block);
@@ -406,13 +394,13 @@ template <class HintsT>
 
 #ifdef CITOR_BENCH_HAS_LEOPARD
 [[nodiscard]] BenchRow measureLeopard(std::size_t participants, const ParetoData &d,
-                                       const CyclesPerNanosecond &cal) {
-  hmthrp::ThreadPool pool(participants);
+                                      const CyclesPerNanosecond &cal) {
+  hmthrp::ThreadPool pool(static_cast<hmthrp::ThreadPool::size_type>(participants));
   return measureLoop(
       "Leopard::ThreadPool::parallelFor", cal,
       [&] {
         std::atomic<std::int64_t> sink{0};
-        const std::size_t blocks = participants * 2U;
+        const std::size_t blocks = std::max<std::size_t>(1U, participants * 2U);
         const std::size_t block = (kN + blocks - 1U) / blocks;
         std::vector<std::future<void>> futures;
         futures.reserve(blocks);
@@ -436,18 +424,17 @@ template <class HintsT>
 
 #ifdef CITOR_BENCH_HAS_DISPENSO
 [[nodiscard]] BenchRow measureDispenso(std::size_t participants, const ParetoData &d,
-                                        const CyclesPerNanosecond &cal) {
-  dispenso::ThreadPool pool(participants);
+                                       const CyclesPerNanosecond &cal) {
+  auto pool = CompetitorTraits<dispenso::ThreadPool>::make(participants);
   return measureLoop(
       "dispenso::ThreadPool::parallel_for", cal,
       [&] {
         std::atomic<std::int64_t> sink{0};
-        dispenso::TaskSet taskSet(pool);
-        dispenso::parallel_for(
-            taskSet, std::size_t{0}, kN,
-            [&d, &cal, &sink](std::size_t lo, std::size_t hi) {
-              paretoBlockBody(d, lo, hi, cal, sink);
-            });
+        dispenso::TaskSet taskSet(*pool);
+        dispenso::parallel_for(taskSet, std::size_t{0}, kN,
+                               [&d, &cal, &sink](std::size_t lo, std::size_t hi) {
+                                 paretoBlockBody(d, lo, hi, cal, sink);
+                               });
         return sink.load(std::memory_order_relaxed);
       },
       d.totalCostNs);
@@ -462,11 +449,11 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
                       const CyclesPerNanosecond &cal) {
   BenchTable table;
   table.workload = std::string{"pareto_body_for_"} + suffix;
-  ParetoData d = buildData();
-  table.rows.push_back(measureCitorWithHint<citor::StaticHints>(
-      "citor::ThreadPool[Static]", participants, d, cal));
-  table.rows.push_back(measureCitorWithHint<citor::DynamicHints>(
-      "citor::ThreadPool[Dynamic]", participants, d, cal));
+  const ParetoData d = buildData();
+  table.rows.push_back(
+      measureCitorWithHint<citor::StaticHints>("citor::ThreadPool[Static]", participants, d, cal));
+  table.rows.push_back(measureCitorWithHint<citor::DynamicHints>("citor::ThreadPool[Dynamic]",
+                                                                 participants, d, cal));
   table.rows.push_back(measureBs(participants, d, cal));
   table.rows.push_back(measureDp(participants, d, cal));
   table.rows.push_back(measureTask(participants, d, cal));

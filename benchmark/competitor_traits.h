@@ -1266,8 +1266,12 @@ template <> struct CompetitorTraits<hmthrp::ThreadPool> {
 template <> struct CompetitorTraits<dispenso::ThreadPool> {
   static constexpr const char *name = "dispenso::ThreadPool";
 
+  /// Construct a pool with the producer counted in the benchmark's total participant count.
+  /// dispenso's constructor spawns only background workers; `TaskSet::wait()` lets the caller
+  /// drain queued work as an additional participant.
   static auto make(std::size_t participants) {
-    return std::make_unique<dispenso::ThreadPool>(participants);
+    const std::size_t workerCount = participants > 0U ? participants - 1U : 0U;
+    return std::make_unique<dispenso::ThreadPool>(workerCount);
   }
 
   template <class Fn>
