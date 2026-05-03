@@ -25,6 +25,21 @@
 namespace citor::bench {
 namespace {
 
+template <class PoolT> class MeasurementScope {
+public:
+  explicit MeasurementScope(PoolT &) noexcept {}
+};
+
+template <> class MeasurementScope<citor::ThreadPool> {
+public:
+  explicit MeasurementScope(citor::ThreadPool &pool) noexcept
+      : m_producerGuard(pool.bindProducerSlot()), m_latencyGuard(pool.lowLatencyScope()) {}
+
+private:
+  citor::ThreadPool::ProducerAffinityGuard m_producerGuard;
+  citor::ThreadPool::LowLatencyGuard m_latencyGuard;
+};
+
 /// Number of measurement brackets per row. Each bracket times an inner batch
 /// of `kBatchSize` dispatches so the per-bracket wall time stays well above
 /// the host's OS-jitter timescale (~1 kHz timer ticks); the headline is the
@@ -58,7 +73,7 @@ constexpr std::size_t kWarmupIterations = 50;
 /// A populated `BenchRow` ready for the comparison table.
 template <class PoolT, class Dispatch>
 [[nodiscard]] BenchRow measureEmptyFanoutWith(const char *displayName, std::size_t participants,
-                                               const CyclesPerNanosecond &cal, Dispatch dispatch) {
+                                              const CyclesPerNanosecond &cal, Dispatch dispatch) {
   if (!engineEnabled(displayName)) {
     BenchRow row{};
     row.name = displayName;
@@ -72,6 +87,8 @@ template <class PoolT, class Dispatch>
   const auto body = [&sink](std::size_t lo, std::size_t hi) noexcept {
     sink.fetch_add(hi - lo, std::memory_order_relaxed);
   };
+
+  [[maybe_unused]] const MeasurementScope<PoolT> measurementScope(*pool);
 
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     for (std::size_t k = 0; k < kBatchSize; ++k) {
