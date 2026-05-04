@@ -11,7 +11,8 @@
 // ships a native chain primitive with a shared rendezvous; oneTBB has no chain
 // either. Each competitor row simulates via `kStageCount` back-to-back
 // parallel-for waves):
-//   - citor pool              -> `parallelChain<ChainBenchHints>` (native).
+//   - citor pool              -> `parallelChain<ChainBenchHints>` / dynamic-chain hint rows
+//                                (native).
 //   - citor pool baseline     -> `parallelFor` x kStageCount (own apples-to-apples).
 //   - BS::thread_pool          -> `submit_blocks(...).wait()` x kStageCount.
 //   - dp::thread_pool          -> N enqueue futures + join, x kStageCount.
@@ -487,7 +488,9 @@ template <class RunFn>
   return finalizeRow(name, samples);
 }
 
-[[nodiscard]] BenchRow measureCitorChainPareto(std::size_t participants, const ChainParetoData &d,
+template <class ChainHintsT>
+[[nodiscard]] BenchRow measureCitorChainPareto(const char *name, std::size_t participants,
+                                               const ChainParetoData &d,
                                                const CyclesPerNanosecond &cal) {
   ThreadPool pool(participants);
   if (pool.participants() <= 1U) {
@@ -501,14 +504,13 @@ template <class RunFn>
     chainParetoBody(d, stageIdx, lo, hi, accum, cal);
   };
   return measureParetoLoop(
-      "citor::ThreadPool::parallelChain", cal,
+      name, cal,
       [&] {
         accum.store(0, std::memory_order_relaxed);
-        pool.parallelChain<ChainBenchHints>(
-            kPRangeN, globalStage("p0", stageBody), globalStage("p1", stageBody),
-            globalStage("p2", stageBody), globalStage("p3", stageBody),
-            globalStage("p4", stageBody), globalStage("p5", stageBody),
-            globalStage("p6", stageBody));
+        pool.parallelChain<ChainHintsT>(kPRangeN, globalStage("p0", stageBody),
+                                        globalStage("p1", stageBody), globalStage("p2", stageBody),
+                                        globalStage("p3", stageBody), globalStage("p4", stageBody),
+                                        globalStage("p5", stageBody), globalStage("p6", stageBody));
         return accum.load(std::memory_order_relaxed);
       },
       d.referenceTotal);
@@ -545,7 +547,10 @@ BenchTable buildParetoTable(std::size_t participants, const char *suffix,
   BenchTable table;
   table.workload = std::string{"chain_pareto_"} + suffix;
   const ChainParetoData d = buildChainParetoData();
-  table.rows.push_back(measureCitorChainPareto(participants, d, cal));
+  table.rows.push_back(measureCitorChainPareto<ChainBenchHints>(
+      "citor::ThreadPool::parallelChain[Static]", participants, d, cal));
+  table.rows.push_back(measureCitorChainPareto<citor::DynamicChainHints>(
+      "citor::ThreadPool::parallelChain[Dynamic]", participants, d, cal));
   table.rows.push_back(measureChainParetoAdapter<BS::light_thread_pool>(
       "BS::thread_pool[chainAdapter]", participants, d, cal));
   table.rows.push_back(measureChainParetoAdapter<dp::thread_pool<>>("dp::thread_pool[chainAdapter]",
