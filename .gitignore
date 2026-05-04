@@ -42,8 +42,6 @@ tmp/
 # Pre-commit
 .pre-commit-cache/
 
-# autoopt scratch
-/tmp/autoopt*
 
 # Python bytecode
 __pycache__/

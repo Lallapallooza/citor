@@ -29,11 +29,12 @@ struct TsanDynamicHints : HintsDefaults {
   static constexpr std::size_t chunk = 16;
 };
 
-// Randomized parallelFor submissions under TSan. Builds without TSan compile this out, so the
-// dependency on `__SANITIZE_THREAD__` matches the lifecycle test convention. The shape mirrors
-// the rfc's "10000 randomized parallelFor submissions under TSan" criterion at a smaller
-// iteration count to keep ctest snappy; the goal is to surface any race the static / dynamic
-// dispatch tiers introduce.
+// Randomized parallelFor submissions under TSan. Builds without TSan compile
+// this out, so the dependency on `__SANITIZE_THREAD__` matches the lifecycle
+// test convention. The shape is "10000 randomized parallelFor
+// submissions under TSan" criterion at a smaller iteration count to keep ctest
+// snappy; the goal is to surface any race the static / dynamic dispatch tiers
+// introduce.
 TEST(ParallelForTsan, RandomizedSubmissionsAreRaceFree) {
   constexpr int kIterations = 1000;
   ThreadPool pool(8);
@@ -60,7 +61,8 @@ TEST(ParallelForTsan, RandomizedSubmissionsAreRaceFree) {
       pool.parallelFor<TsanDynamicHints>(0, n, body);
     }
   }
-  // Reads are relaxed but stress the loop's writes; TSan's only contract is no race occurred.
+  // Reads are relaxed but stress the loop's writes; TSan's only contract is no
+  // race occurred.
   std::uint64_t total = 0;
   for (auto &c : counts) {
     total += c.load(std::memory_order_relaxed);
