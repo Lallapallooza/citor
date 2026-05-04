@@ -52,6 +52,7 @@ struct CliOptions {
   bool listOnly = false;
   /// When set, populate `BenchRow::tailNs` (p25/p50/p99) on workloads that
   /// support it and emit the three extra columns. Default OFF so existing
+  /// awk parsers downstream of the bench see the pre-tail format unchanged
   /// (they key off `$2` ns/op and `$NF` row name; the tail columns sit
   /// between `err%` and the row name).
   bool withTailPercentiles = false;
@@ -86,6 +87,7 @@ void printUsage(std::ostream &out) {
       << "                           per-iteration raw samples and full provenance\n"
       << "                           (host, kernel, governor, TSC freq, citor commit,\n"
       << "                           checklist gates, etc.). Schema: see\n"
+      << "                           the bench-export documentation. Falls back to\n"
       << "                           CITOR_BENCH_EXPORT=PATH env var. Set\n"
       << "                           CITOR_BENCH_EXPORT_PRETTY=1 for indented JSON.\n";
 }
@@ -255,7 +257,7 @@ int main(int argc, char **argv) {
   // every pool's cold-cell number is comparable. Hot-path cells are not
   // affected by parking choice (workers see the next dispatch before any
   // park budget can fire). The checklist below reports the resulting
-  // blocktime so reviewers see the post-override value, not libomp's
+  // blocktime so the printed value reflects the post-override state, not libomp's
   // default.
   kmp_set_blocktime(0);
 #endif

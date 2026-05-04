@@ -30,7 +30,7 @@ namespace citor::detail {
 /// stack. Because every primitive in v1 is synchronous (the producer joins before returning), the
 /// closure outlives the descriptor by construction.
 ///
-/// The padding overhead is intentional: the layout trades several hundred bytes of stack against
+/// The padding overhead trades several hundred bytes of stack against
 /// MESI cache-coherency traffic on the contended atomics, which is the dominant hot-path cost.
 // NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
 struct alignas(kCacheLine) JobDescriptor {

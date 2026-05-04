@@ -137,7 +137,7 @@ private:
 ///
 /// `Deadline` stores an absolute `__rdtsc` reading at which the deadline expires. `expired()`
 /// compares the current TSC against the threshold. The reading is taken once at construction and
-/// never refreshed; this is intentional, since the only call sites are inside hot worker bodies
+/// never refreshed; the only call sites are inside hot worker bodies
 /// where a syscall-based `clock_gettime` would dominate the budget.
 ///
 /// A default-constructed deadline never expires (threshold is `UINT64_MAX`). `Deadline::expired`

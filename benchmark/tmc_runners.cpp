@@ -333,10 +333,10 @@ public:
     // is no hwloc-backed topology (without TMC_USE_HWLOC every thread lands
     // in one flat CacheGroup, so HIERARCHY and LATTICE both degenerate to
     // the same Latin-square). Empirically LATTICE's fallback is bimodal at
-    // j16 was measurably slower than HIERARCHY. Diagnosed via perf stat:
+    // j16 (median 349us vs HIERARCHY's 106us). Diagnosed via perf stat:
     // tmc::post_waitable + std::future::get() parks the producer on a futex
     // each iteration; at j=16 producer + workers race for 16 logical CPUs
-    // and we see many more context switches at j8. HIERARCHY
+    // and we see 26x more context switches (91748 vs 3480 at j8). HIERARCHY
     // recovers most of the slowdown; the structural fix would be to call
     // tmc::external::sync_await rather than post_waitable+future.get().
     tmc::cpu_executor()
