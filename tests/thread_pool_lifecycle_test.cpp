@@ -186,7 +186,7 @@ TEST(ThreadPoolLifecycle, AutoPinRestoresOriginalAffinityAcrossPoolSwitch) {
   if (CPU_COUNT(&original) < 2) {
     GTEST_SKIP() << "needs >= 2 allowed CPUs to observe pinning behavior";
   }
-  const std::size_t originalCount = static_cast<std::size_t>(CPU_COUNT(&original));
+  const auto originalCount = static_cast<std::size_t>(CPU_COUNT(&original));
 
   {
     ThreadPool p1(2);

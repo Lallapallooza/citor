@@ -3,7 +3,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     set(CITOR_IS_TOP_LEVEL ON)
 endif()
 
-option(CITOR_ENABLE_CLANG_TIDY "Run clang-tidy during build" ${CITOR_IS_TOP_LEVEL})
+option(CITOR_ENABLE_CLANG_TIDY "Run clang-tidy during build" OFF)
 
 if(CITOR_ENABLE_CLANG_TIDY)
     find_program(

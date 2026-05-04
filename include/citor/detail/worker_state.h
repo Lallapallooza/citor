@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -145,7 +146,7 @@ struct WorkerState {
   /// Indexed by `thiefRequestCounter & (kRespSlots - 1)`. Each slot owns its
   /// own cache line via `ResponseSlot::alignas(kCacheLine)`, so concurrent
   /// thieves writing different slots do not contend.
-  ResponseSlot responses[kRespSlots]{};
+  std::array<ResponseSlot, kRespSlots> responses{};
 
   /// Per-worker LTC notebook header; cursors and base pointers only.
   ///

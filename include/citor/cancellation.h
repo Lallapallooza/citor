@@ -62,9 +62,8 @@ public:
   ///
   /// The default-constructed token holds no shared state: `stop_requested()` always returns
   /// `false`, `request_stop()` is a no-op (returns `false`). This is the always-on default for
-  /// call sites that do not need cancellation; the per-dispatch heap allocation +
-  /// shared_ptr dispose/destroy chain (a string of indirect calls per dispatch on the
-  /// j=2 hot path) goes away when the caller does not pass an explicit token.
+  /// call sites that do not need cancellation; the per-dispatch heap allocation and
+  /// `shared_ptr` dispose/destroy chain go away when the caller does not pass an explicit token.
   ///
   /// Callers that need to actually call `request_stop()` from elsewhere must construct via
   /// `makeOwned`, which allocates the shared atomic. Constructing a default-`{}` token and
@@ -92,6 +91,16 @@ public:
     }
     return state->load(std::memory_order_acquire) != 0U;
   }
+
+  /// Report whether this token has shared state that can be stopped.
+  ///
+  /// The default-constructed sentinel has no state and therefore can never
+  /// observe a stop request. Dispatch hot paths use this to select a no-poll
+  /// worker entry for the common "no token supplied" case while preserving
+  /// polling for tokens created via `makeOwned`.
+  ///
+  /// `true` for owned tokens; `false` for the never-stopped sentinel.
+  [[nodiscard]] bool canStop() const noexcept { return m_state != nullptr; }
 
   /// Equality on the underlying control-block pointer. Used by descriptor write elision:
   /// two tokens compare equal when they share the same control block (or both are the
@@ -128,7 +137,7 @@ private:
 ///
 /// `Deadline` stores an absolute `__rdtsc` reading at which the deadline expires. `expired()`
 /// compares the current TSC against the threshold. The reading is taken once at construction and
-/// never refreshed; the only call sites are inside hot worker bodies
+/// never refreshed; this is intentional, since the only call sites are inside hot worker bodies
 /// where a syscall-based `clock_gettime` would dominate the budget.
 ///
 /// A default-constructed deadline never expires (threshold is `UINT64_MAX`). `Deadline::expired`

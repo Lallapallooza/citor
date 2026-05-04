@@ -44,7 +44,7 @@ enum class Determinism : std::uint8_t {
 /// CPU-affinity policy applied to the pool's workers.
 ///
 /// Worker placement on the pool is fixed at construction (one-logical-per-physical-core, all
-/// pinned to slot 0's CCD by default -- see `Affinity::CcdLocal`). The hint controls where
+/// pinned to slot 0's CCD by default; see `Affinity::CcdLocal`). The hint controls where
 /// fork-join steal probes look for victims, NOT where workers spawn.
 ///
 /// - `CcdLocal`: bias steal probes toward same-CCD workers first; fall back to cross-CCD only if
@@ -201,6 +201,29 @@ struct FixedBlockReduceHints : HintsDefaults {
 struct CcdLocalForkJoinHints : HintsDefaults {
   static constexpr Affinity affinity = Affinity::CcdLocal;
 };
+
+namespace detail {
+
+/// Internal adapter that preserves a hint preset while disabling cancellation polls.
+///
+/// Used only after a primitive observes that the supplied `CancellationToken` is the
+/// never-stopped sentinel. The public hint's scheduling, determinism, affinity, priority,
+/// cost model, and chunking semantics are preserved exactly; only the worker-side token poll is
+/// compiled out.
+///
+/// HintsT Source hint preset.
+template <class HintsT> struct NoCancellationHints {
+  static constexpr Balance balance = HintsT::balance;
+  static constexpr Determinism determinism = HintsT::determinism;
+  static constexpr Affinity affinity = HintsT::affinity;
+  static constexpr Priority priority = HintsT::priority;
+  static constexpr double estimatedItemNs = HintsT::estimatedItemNs;
+  static constexpr double minTaskUs = HintsT::minTaskUs;
+  static constexpr std::size_t chunk = HintsT::chunk;
+  static constexpr bool cancellationChecks = false;
+};
+
+} // namespace detail
 
 /// Single stage of a `parallelChain`: a callable plus the barrier following it.
 ///

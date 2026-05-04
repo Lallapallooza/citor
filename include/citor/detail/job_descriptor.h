@@ -30,7 +30,7 @@ namespace citor::detail {
 /// stack. Because every primitive in v1 is synchronous (the producer joins before returning), the
 /// closure outlives the descriptor by construction.
 ///
-/// The padding overhead trades: the layout trades several hundred bytes of stack against
+/// The padding overhead is intentional: the layout trades several hundred bytes of stack against
 /// MESI cache-coherency traffic on the contended atomics, which is the dominant hot-path cost.
 // NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
 struct alignas(kCacheLine) JobDescriptor {
@@ -89,7 +89,7 @@ struct alignas(kCacheLine) JobDescriptor {
   /// Optional monomorphized worker entry. When non-null, workers call this function pointer
   /// instead of `runActiveJob -> runStaticPartition`. Set by `parallelFor<HintsT,F>` to a runner
   /// specialized on (HintsT, F) so token check / try-catch elide via if-constexpr.
-  void (*workerEntry)(JobDescriptor *, std::uint32_t) noexcept = nullptr;
+  void (*workerEntry)(JobDescriptor *, std::uint32_t, std::uint64_t) noexcept = nullptr;
 
   /// Pointer to the pool's `WorkerState` array, set by primitives that opt into producer
   /// cold-collapse (`parallelFor<HintsT, F>` only at present). When non-null, the worker entry

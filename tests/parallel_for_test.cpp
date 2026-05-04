@@ -384,7 +384,7 @@ TEST(ParallelFor, StaticUniformReuseAcrossProducerThreadsRunsCorrectBody) {
   std::thread producerA([&] {
     pool.parallelFor<ReuseRegressionHints>(0, kN, a);
     {
-      const std::lock_guard<std::mutex> lk(mu);
+      const std::scoped_lock lk(mu);
       aFirstDone = true;
     }
     cv.notify_all();
@@ -403,7 +403,7 @@ TEST(ParallelFor, StaticUniformReuseAcrossProducerThreadsRunsCorrectBody) {
     }
     pool.parallelFor<ReuseRegressionHints>(0, kN, b);
     {
-      const std::lock_guard<std::mutex> lk(mu);
+      const std::scoped_lock lk(mu);
       bDone = true;
     }
     cv.notify_all();

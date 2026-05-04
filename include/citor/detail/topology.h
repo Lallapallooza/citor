@@ -39,7 +39,7 @@ struct Topology {
   std::vector<std::uint64_t> l3KibOfCcd;
 
   /// Index into `ccdGroups` of the preferred CCD for small pools that fit in a single L3. Picks
-  /// the largest L3 (= 3D V-Cache CCD where one CCD has a stacked SRAM die);
+  /// the largest L3 (= 3D V-Cache CCD on V-Cache parts, where one CCD has a stacked SRAM die);
   /// breaks ties by lowest index so the choice is deterministic across runs.
   std::uint32_t preferredCcd = 0;
 
@@ -66,8 +66,8 @@ inline std::uint64_t readCacheSizeKib(const std::string &path) noexcept {
   }
   std::uint64_t value = 0U;
   std::size_t i = 0;
-  while (i < token.size() && std::isdigit(static_cast<unsigned char>(token[i]))) {
-    value = value * 10U + static_cast<std::uint64_t>(token[i] - '0');
+  while (i < token.size() && std::isdigit(static_cast<unsigned char>(token[i])) != 0) {
+    value = (value * 10U) + static_cast<std::uint64_t>(token[i] - '0');
     ++i;
   }
   if (i == 0U) {
@@ -78,7 +78,7 @@ inline std::uint64_t readCacheSizeKib(const std::string &path) noexcept {
     if (unit == 'M' || unit == 'm') {
       value *= 1024U;
     } else if (unit == 'G' || unit == 'g') {
-      value *= 1024U * 1024U;
+      value *= std::uint64_t{1024} * 1024U;
     }
     // 'K'/'k' or unknown unit: leave value as-is (sysfs convention is KiB by default).
   }
@@ -248,15 +248,15 @@ inline Topology detectTopology() {
   // (96 MiB on 9950X3D's CCD0 vs 32 MiB on the regular CCD); for workloads whose working set
   // exceeds the smaller L3 but fits the larger, landing on the V-Cache CCD is a 5-10x speedup.
   // We pick the largest-L3 CCD as the default placement target; tie-break by lowest index so
-  // symmetric chips (no V-Cache) still get a deterministic choice across runs.
+  // symmetric Zens (no X3D) still get a deterministic choice across runs.
   topo.l3KibOfCcd.assign(topo.ccdGroups.size(), 0U);
   for (std::size_t ccd = 0; ccd < topo.ccdGroups.size(); ++ccd) {
     if (topo.ccdGroups[ccd].empty()) {
       continue;
     }
     const std::uint32_t rep = topo.ccdGroups[ccd].front();
-    topo.l3KibOfCcd[ccd] = readCacheSizeKib(
-        "/sys/devices/system/cpu/cpu" + std::to_string(rep) + "/cache/index3/size");
+    topo.l3KibOfCcd[ccd] = readCacheSizeKib("/sys/devices/system/cpu/cpu" + std::to_string(rep) +
+                                            "/cache/index3/size");
   }
   std::uint64_t bestKib = 0U;
   std::uint32_t bestIdx = 0;
@@ -279,8 +279,8 @@ inline Topology detectTopology() {
   std::vector<std::uint32_t> reordered;
   reordered.reserve(topo.physicalCores.size());
   for (const auto &group : topo.ccdGroups) {
-    for (auto it = group.rbegin(); it != group.rend(); ++it) {
-      reordered.push_back(*it);
+    for (std::size_t i = group.size(); i > 0U; --i) {
+      reordered.push_back(group[i - 1U]);
     }
   }
   if (reordered.size() == topo.physicalCores.size()) {

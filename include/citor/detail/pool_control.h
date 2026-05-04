@@ -43,7 +43,7 @@ struct PoolControl {
   /// Same-line ack protocol: the producer publishes the new phase with this bit clear; the
   /// worker stamps `mailbox = phase | kDoneBit` after running its share. The producer's join
   /// reads the worker's mailbox (the same line it published to) and waits for the DONE bit
-  /// to appear. Removes the separate `doneEpoch` cache-line transit on the hot path
+  /// to appear. Removes the separate `doneEpoch` cache-line transit on the hot path.
   ///
   /// Lives in the bit-1 slot that was reserved for cancel broadcasts. The cancel path is
   /// carried by `CancellationToken`, not by a generation/mailbox flag, so the bit was free.
@@ -58,9 +58,16 @@ struct PoolControl {
   ///   3. Low-latency scope is active (so workers spin and observe the bit promptly)
   static constexpr std::uint64_t kReuseBit = 1ULL << 2;
 
+  /// Bit set by the producer on low-latency dispatches where every worker has already
+  /// acknowledged hot-spin mode and the fanout is large enough that per-rank cold-collapse
+  /// ownership CAS traffic costs more than it can save. Workers that observe this bit skip the
+  /// `claimedAt` CAS and stamp DONE with a plain release store.
+  static constexpr std::uint64_t kSkipClaimBit = 1ULL << 3;
+
   /// Number of low bits reserved for flags; producer increments `generation` by `1 << kPhaseShift`.
-  /// Bits: 0=shutdown, 1=done (worker->producer ack), 2=reuse (producer->worker hot-path hint).
-  static constexpr std::uint64_t kPhaseShift = 3;
+  /// Bits: 0=shutdown, 1=done (worker->producer ack), 2=reuse (producer->worker hot-path hint),
+  /// 3=skip cold-collapse claim on hot large fanouts.
+  static constexpr std::uint64_t kPhaseShift = 4;
 
   /// Increment applied per published phase so flags survive the bump.
   static constexpr std::uint64_t kPhaseStep = 1ULL << kPhaseShift;
