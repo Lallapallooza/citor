@@ -112,11 +112,9 @@ TEST(PoolGroup, DeadlockGuardFallsThroughToInline) {
 
 TEST(PoolGroup, ReentrancySafe) {
   PoolGroup &group = PoolGroup::global();
-  // Same-pool reentrancy: an arena worker calls `parallelFor` on its own arena. The cross-arena
-  // guard treats every worker-side dispatch as "fall through to inline-on-caller" so the inner
-  // body executes on the calling worker without a fresh dispatch generation. The outer body
-  // gates the inner call on `insidePoolWorker` so the producer slot (which has no worker context)
-  // does not race the in-flight outer dispatch by issuing a second generation.
+  // Same-pool reentrancy: an arena participant calls `parallelFor` on its own arena while the
+  // outer dispatch is still active. The inner call must take a nested same-pool path or a safe
+  // inline fallback, never publish a colliding dispatch generation.
   //
   // Skipped when arena 0 has only one participant: there is no background worker for the inner
   // dispatch to land on, so `insidePoolWorker()` is false on every body invocation and
@@ -143,8 +141,8 @@ TEST(PoolGroup, ReentrancySafe) {
             });
       });
   EXPECT_GT(workerInvocations.load(std::memory_order_acquire), 0U);
-  // Each worker that invoked the inner call must have observed all 32 elements (since it ran
-  // inline on the same thread); total executions = workerInvocations * 32.
+  // Each participant that invoked the inner call must have observed all 32 elements; total
+  // executions = workerInvocations * 32.
   EXPECT_EQ(nestedBodyExecutions.load(std::memory_order_acquire),
             workerInvocations.load(std::memory_order_acquire) * 32U);
 }

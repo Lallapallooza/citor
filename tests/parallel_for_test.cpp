@@ -314,8 +314,8 @@ TEST(ParallelFor, RuntimeHintsMatchCompileTimeHints) {
 }
 
 // A nested `parallelFor` on the same standalone pool from inside an outer body must not
-// deadlock on the dispatch mutex. The inner call falls through to inline execution on the
-// caller thread.
+// deadlock on the dispatch mutex. The inner call may use a nested same-pool path, but it must
+// still finish before the outer call returns.
 TEST(ParallelFor, NestedSamePoolCallDoesNotDeadlock) {
   ThreadPool pool(4);
   constexpr std::size_t kOuter = 4;
@@ -329,6 +329,54 @@ TEST(ParallelFor, NestedSamePoolCallDoesNotDeadlock) {
   });
 
   EXPECT_EQ(innerWork.load(), static_cast<int>(kOuter * kInner));
+}
+
+TEST(ParallelFor, NestedInsideForkJoinCoversRange) {
+  ThreadPool pool(4);
+  constexpr std::size_t kTasks = 4;
+  constexpr std::size_t kInner = 128;
+  std::vector<std::atomic<std::uint32_t>> counts(kTasks * kInner);
+  for (auto &c : counts) {
+    c.store(0, std::memory_order_relaxed);
+  }
+
+  auto runInner = [&](std::size_t task) {
+    pool.parallelFor<HintsDefaults>(std::size_t{0}, kInner, [&](std::size_t lo, std::size_t hi) {
+      for (std::size_t i = lo; i < hi; ++i) {
+        counts[(task * kInner) + i].fetch_add(1, std::memory_order_relaxed);
+      }
+    });
+  };
+
+  pool.forkJoin<HintsDefaults>([&] { runInner(0); }, [&] { runInner(1); }, [&] { runInner(2); },
+                               [&] { runInner(3); });
+
+  for (std::size_t task = 0; task < kTasks; ++task) {
+    for (std::size_t i = 0; i < kInner; ++i) {
+      EXPECT_EQ(counts[(task * kInner) + i].load(std::memory_order_relaxed), 1U)
+          << "task " << task << " index " << i;
+    }
+  }
+}
+
+TEST(ParallelFor, NestedInsideForkJoinHonorsPreCancelledToken) {
+  ThreadPool pool(4);
+  CancellationToken tok = CancellationToken::makeOwned();
+  tok.request_stop();
+  std::atomic<std::uint32_t> bodies{0};
+
+  pool.forkJoin<HintsDefaults>(
+      [&] {
+        pool.parallelFor<HintsDefaults>(
+            std::size_t{0}, std::size_t{128},
+            [&bodies](std::size_t lo, std::size_t hi) {
+              bodies.fetch_add(static_cast<std::uint32_t>(hi - lo), std::memory_order_relaxed);
+            },
+            tok);
+      },
+      [] {});
+
+  EXPECT_EQ(bodies.load(std::memory_order_acquire), 0U);
 }
 
 // Reuse-bit must be invalidated when the SAME thread dispatches the same `parallelFor<H,F>`
