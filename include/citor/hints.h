@@ -77,7 +77,7 @@ enum class Priority : std::uint8_t {
 /// Synchronization barrier inserted between two adjacent stages of `parallelChain`.
 ///
 /// - `None`: worker proceeds to the next stage without synchronizing.
-/// - `Global`: sense-reversing barrier across all `participants`.
+/// - `Global`: rendezvous across all `participants`.
 /// - `DeterministicReduce`: `Global` followed by a chunk-id pairwise-tree reduction.
 /// - `ProducerSerial`: workers other than rank 0 spin on a producer-done flag while rank 0 runs
 ///   the serial body.
@@ -114,12 +114,12 @@ struct Hints {
 ///
 /// User hint presets inherit from this and override only the fields that differ:
 ///
-/// @code
+///
 /// struct MyKahanReduceHints : citor::HintsDefaults {
 ///   static constexpr Determinism determinism = Determinism::KahanCompensated;
 ///   static constexpr double minTaskUs = 25.0;
 /// };
-/// @endcode
+///
 ///
 /// Fields mirror `Hints` one-for-one. The defaults are conservative: `StaticUniform` balance,
 /// `FixedBlockOrder` reductions, no affinity, `Throughput` priority, no estimated cost (the
@@ -268,7 +268,7 @@ struct ChainHints {
   bool pipelineSameChunk = true;
   /// Whether worker bodies must check the cancellation token at chunk boundaries.
   bool cancellationChecks = true;
-  /// Static block grain shared by every stage when `balance == StaticUniform`.
+  /// Dynamic block grain shared by every stage when same-chunk pipelining is disabled.
   std::size_t chunk = 0;
 };
 
@@ -281,6 +281,19 @@ struct ChainHintsDefaults {
   static constexpr bool pipelineSameChunk = true;
   static constexpr bool cancellationChecks = true;
   static constexpr std::size_t chunk = 0;
+};
+
+/// Dynamic per-stage chain preset for globally synchronized, skewed stage bodies.
+///
+/// Same-chunk pipelining keeps a worker on its contiguous slice across every stage. That is ideal
+/// when stages reuse per-slot cache-local state. Dynamic-chain mode opts out of that guarantee for
+/// stage packs where every stage has a global-style barrier: each stage is split into chunks, and
+/// participants claim chunks from a per-stage counter. Mixed packs keep the same-chunk engine so
+/// `BarrierKind::None` and `BarrierKind::ProducerSerial` semantics are preserved. Use this preset
+/// when per-item cost varies enough that fixed slot ownership would create stragglers.
+struct DynamicChainHints : ChainHintsDefaults {
+  static constexpr Balance balance = Balance::DynamicChunked;
+  static constexpr bool pipelineSameChunk = false;
 };
 
 } // namespace citor

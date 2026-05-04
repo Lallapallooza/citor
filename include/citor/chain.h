@@ -15,7 +15,7 @@ namespace citor {
 /// F Deduced callable type.
 /// name Diagnostic identifier surfaced through trace tooling; kept on the stage value for
 ///              future plumbing (the pool does not currently consume it).
-/// fn   Stage body invoked once per slot as `fn(stageIdx, slot, lo, hi)`.
+/// fn   Stage body invoked as `fn(stageIdx, slot, lo, hi)`.
 /// A `Stage<decay_t<F>, BarrierKind::None>` carrying the callable.
 template <class F>
 [[nodiscard]] constexpr auto staticStage([[maybe_unused]] const char *name, F &&fn) noexcept(
@@ -31,7 +31,7 @@ template <class F>
 ///
 /// F Deduced callable type.
 /// name Diagnostic identifier surfaced through trace tooling.
-/// fn   Stage body invoked once per slot.
+/// fn   Stage body invoked as `fn(stageIdx, slot, lo, hi)`.
 /// A `Stage<decay_t<F>, BarrierKind::Global>` carrying the callable.
 template <class F>
 [[nodiscard]] constexpr auto globalStage([[maybe_unused]] const char *name, F &&fn) noexcept(
@@ -50,7 +50,7 @@ template <class F>
 ///
 /// F Deduced callable type.
 /// name Diagnostic identifier surfaced through trace tooling.
-/// fn   Stage body invoked once per slot.
+/// fn   Stage body invoked as `fn(stageIdx, slot, lo, hi)`.
 /// A `Stage<decay_t<F>, BarrierKind::DeterministicReduce>` carrying the callable.
 template <class F>
 [[nodiscard]] constexpr auto reduceStage([[maybe_unused]] const char *name, F &&fn) noexcept(
@@ -67,7 +67,7 @@ template <class F>
 ///
 /// F Deduced callable type.
 /// name Diagnostic identifier surfaced through trace tooling.
-/// fn   Stage body invoked once per slot.
+/// fn   Stage body invoked as `fn(stageIdx, slot, lo, hi)`.
 /// A `Stage<decay_t<F>, BarrierKind::ProducerSerial>` carrying the callable.
 template <class F>
 [[nodiscard]] constexpr auto serialStage([[maybe_unused]] const char *name, F &&fn) noexcept(

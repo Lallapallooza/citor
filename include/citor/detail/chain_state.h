@@ -29,6 +29,18 @@ struct alignas(kCacheLine) ChainDoneSlot {
   std::atomic<std::uint64_t> done{0};
 };
 
+/// Per-stage dynamic-chain claim counter.
+///
+/// Dynamic-chain mode allocates one counter per stage before dispatch. Participants claim blocks
+/// from the current stage's counter, so advancing to the next stage does not require slot 0 to
+/// reset a shared counter and publish a separate ready epoch. Each counter lives on its own line
+/// because it is the only contended atomic while that stage is running.
+// NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
+struct alignas(kCacheLine) ChainDynamicStageCounter {
+  /// Next dynamic block id to claim for this stage.
+  std::atomic<std::size_t> next{0};
+};
+
 /// Stack-resident state shared by the producer and background workers across all stages of a
 ///        single `parallelChain` call.
 ///
@@ -95,6 +107,19 @@ struct ChainState {
   /// elements; reading past that index is undefined.
   ChainDoneSlot *doneSlots = nullptr;
 
+  /// Borrowed pointer to per-stage dynamic block counters.
+  ///
+  /// Present only when dynamic-chain mode is active. The producer owns the stack-resident counter
+  /// array and zeroes every stage before dispatch, so no in-flight participant resets counters
+  /// between stages.
+  ChainDynamicStageCounter *dynamicStageCounters = nullptr;
+
+  /// Dynamic-chain chunk size over `[0, n)`.
+  std::size_t dynamicChunk = 0;
+
+  /// Dynamic-chain number of chunks over `[0, n)`.
+  std::size_t dynamicBlockCount = 0;
+
   /// Per-call base of the pool's monotonic done-epoch counter.
   ///
   /// Stamps are absolute: `done = epochBase + I + 1` where `I` is the just-finished stage index.
@@ -113,6 +138,17 @@ struct ChainState {
   /// Reference to the slot.
   [[nodiscard]] ChainDoneSlot &doneSlot(std::size_t idx) const noexcept { return doneSlots[idx]; }
 
+  /// Subscript a dynamic-stage counter by stage index.
+  ///
+  /// Valid only when dynamic-chain mode is active and `dynamicStageCounters` points at the
+  /// producer-owned counter array.
+  ///
+  /// stage Stage index in `[0, nStages)`.
+  /// Reference to the stage's dynamic claim counter.
+  [[nodiscard]] ChainDynamicStageCounter &dynamicStageCounter(std::size_t stage) const noexcept {
+    return dynamicStageCounters[stage];
+  }
+
   /// Compute a slot's contiguous row range over `[0, n)` using static partitioning.
   ///
   /// The partition is `lo = (n * slot) / participants`, `hi = (n * (slot + 1)) / participants`.
@@ -127,6 +163,20 @@ struct ChainState {
         static_cast<std::size_t>((static_cast<u128>(n) * slot) / participants);
     const std::size_t hi = static_cast<std::size_t>(
         (static_cast<u128>(n) * (slot + 1U)) / participants);
+    return {lo, hi};
+  }
+
+  /// Compute a dynamic-chain block range over `[0, n)`.
+  ///
+  /// Unlike `slotRange`, block identity is not tied to participant identity. Faster slots claim
+  /// additional block ids from that stage's dynamic counter.
+  ///
+  /// block Dynamic block id in `[0, dynamicBlockCount)`.
+  /// `(lo, hi)` pair denoting the block's range over `[0, n)`.
+  [[nodiscard]] std::pair<std::size_t, std::size_t>
+  dynamicBlockRange(std::size_t block) const noexcept {
+    const std::size_t lo = block * dynamicChunk;
+    const std::size_t hi = (dynamicChunk < n - lo) ? lo + dynamicChunk : n;
     return {lo, hi};
   }
 };

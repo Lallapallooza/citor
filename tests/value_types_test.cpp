@@ -54,6 +54,10 @@ static_assert(citor::LatencyHints::priority == Priority::Latency,
               "LatencyHints::priority must be Latency");
 static_assert(citor::ChainHintsDefaults::pipelineSameChunk,
               "ChainHintsDefaults::pipelineSameChunk must be true");
+static_assert(citor::DynamicChainHints::balance == Balance::DynamicChunked,
+              "DynamicChainHints::balance must be DynamicChunked");
+static_assert(!citor::DynamicChainHints::pipelineSameChunk,
+              "DynamicChainHints must opt out of same-chunk pipelining");
 
 // ===== Stage / ChainHints structural sanity =====
 static_assert(Stage<int (*)(std::size_t, std::size_t), BarrierKind::Global>::barrier ==
@@ -133,6 +137,13 @@ TEST(ParallelHints, ChainHintsPodDefaults) {
   EXPECT_EQ(ch.balance, Balance::StaticUniform);
   EXPECT_TRUE(ch.pipelineSameChunk);
   EXPECT_TRUE(ch.cancellationChecks);
+}
+
+TEST(ParallelHints, DynamicChainHintsExposeDocumentedConstants) {
+  using HintsT = citor::DynamicChainHints;
+  EXPECT_EQ(HintsT::balance, Balance::DynamicChunked);
+  EXPECT_FALSE(HintsT::pipelineSameChunk);
+  EXPECT_TRUE(HintsT::cancellationChecks);
 }
 
 // CancellationToken returns false initially; after request_stop, returns true.
