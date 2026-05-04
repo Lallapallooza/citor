@@ -7,6 +7,7 @@
 #include <exception>
 #include <new>
 #include <type_traits>
+#include <utility>
 
 #include "citor/detail/job_descriptor.h"
 #include "citor/detail/worker_state.h"
@@ -321,6 +322,92 @@ template <Balance B, class HintsT, class FOp>
   }
 }
 
+[[gnu::always_inline]] inline std::pair<std::size_t, std::size_t>
+contiguousRankBlockSpan(std::size_t blockCount, std::size_t participants,
+                        std::uint32_t rank) noexcept {
+  if (rank >= participants) [[unlikely]] {
+    return {blockCount, blockCount};
+  }
+  const std::size_t rankU = rank;
+  const std::size_t base = blockCount / participants;
+  const std::size_t extra = blockCount % participants;
+  const std::size_t begin = (rankU * base) + std::min(rankU, extra);
+  const std::size_t end = begin + base + (rankU < extra ? 1U : 0U);
+  return {begin, end};
+}
+
+template <class HintsT, class FOp>
+[[gnu::always_inline]] inline void runContiguousRankPartitionTypedCached(
+    JobDescriptor &desc, std::uint32_t rank, FOp &fn, std::size_t blockCount,
+    std::size_t participants, std::size_t chunk, std::size_t first, std::size_t last) noexcept {
+  const auto [begin, end] = contiguousRankBlockSpan(blockCount, participants, rank);
+
+  constexpr bool kHasCancellation = requires { HintsT::cancellationChecks; };
+  constexpr bool kCancellationActive = []() {
+    if constexpr (kHasCancellation) {
+      return HintsT::cancellationChecks;
+    }
+    return true;
+  }();
+  constexpr bool kPassBlockId = std::is_invocable_v<FOp &, std::size_t, std::size_t, std::size_t>;
+  constexpr bool kBodyNoexcept =
+      kPassBlockId ? std::is_nothrow_invocable_v<FOp &, std::size_t, std::size_t, std::size_t>
+                   : std::is_nothrow_invocable_v<FOp &, std::size_t, std::size_t>;
+
+  auto runBlocks = [&]() {
+    for (std::size_t blockId = begin; blockId < end; ++blockId) {
+      if constexpr (kCancellationActive) {
+        if (desc.token.stop_requested()) [[unlikely]] {
+          return;
+        }
+      }
+      const std::size_t lo = first + (blockId * chunk);
+      const std::size_t hi = std::min(lo + chunk, last);
+      if constexpr (kPassBlockId) {
+        fn(blockId, lo, hi);
+      } else {
+        fn(lo, hi);
+      }
+    }
+  };
+
+  if constexpr (kBodyNoexcept) {
+    runBlocks();
+  } else {
+    if (desc.firstException.load(std::memory_order_acquire) != nullptr) [[unlikely]] {
+      return;
+    }
+    try {
+      runBlocks();
+    } catch (...) {
+      auto *eptr = new (std::nothrow) std::exception_ptr(std::current_exception());
+      if (eptr == nullptr) {
+        std::terminate();
+      }
+      std::exception_ptr *expected = nullptr; // NOLINT(misc-const-correctness)
+      if (!desc.firstException.compare_exchange_strong(expected, eptr, std::memory_order_release,
+                                                       std::memory_order_acquire)) {
+        delete eptr;
+      } else {
+        desc.exceptionWorkerId.store(rank, std::memory_order_release);
+      }
+    }
+  }
+}
+
+template <class HintsT, class FOp>
+[[gnu::always_inline]] inline void
+runContiguousRankPartitionTyped(JobDescriptor &desc, std::uint32_t rank, FOp &fn) noexcept {
+  const std::size_t chunk = desc.chunk;
+  const std::size_t first = desc.first;
+  const std::size_t last = desc.last;
+  const std::size_t blockCount = desc.blockCount;
+  const std::size_t participants = desc.participants;
+
+  runContiguousRankPartitionTypedCached<HintsT>(desc, rank, fn, blockCount, participants, chunk,
+                                                first, last);
+}
+
 /// Per-(HintsT, F) cached job parameters for the typed worker entry. Same-command reuse: when
 /// the producer detects an identical key vs the previous dispatch, it bumps only mailbox.gen
 /// without re-publishing desc fields. Worker reads cached values from TLS instead of the
@@ -450,6 +537,28 @@ template <class HintsT, class F>
 inline void typedStaticUniformWorkerEntry(JobDescriptor *desc, std::uint32_t rankPacked,
                                           std::uint64_t generation) noexcept {
   typedWorkerEntry<Balance::StaticUniform, HintsT, F>(desc, rankPacked, generation);
+}
+
+template <class HintsT, class F>
+inline void typedStaticContiguousWorkerEntry(JobDescriptor *desc, std::uint32_t rankPacked,
+                                             std::uint64_t /*generation*/) noexcept {
+  constexpr std::uint32_t kReuseFlag = 0x80000000U;
+  constexpr std::uint32_t kSkipClaimFlag = 0x40000000U;
+  const bool reuse = (rankPacked & kReuseFlag) != 0U;
+  const std::uint32_t rank = rankPacked & ~(kReuseFlag | kSkipClaimFlag);
+  auto &cache = cachedTypedForSlot<HintsT, F>();
+  if (!reuse || !cache.primed) [[unlikely]] {
+    cache.blockCount = desc->blockCount;
+    cache.participants = desc->participants;
+    cache.chunk = desc->chunk;
+    cache.first = desc->first;
+    cache.last = desc->last;
+    cache.fnPtr = desc->fnPtr;
+    cache.primed = true;
+  }
+  auto &fn = *static_cast<F *>(cache.fnPtr);
+  runContiguousRankPartitionTypedCached<HintsT>(
+      *desc, rank, fn, cache.blockCount, cache.participants, cache.chunk, cache.first, cache.last);
 }
 
 /// Typed worker entry for `Balance::DynamicChunked`. Used by parallelFor's Dynamic dispatcher
