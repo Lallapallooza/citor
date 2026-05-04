@@ -44,3 +44,7 @@ tmp/
 
 # autoopt scratch
 /tmp/autoopt*
+
+# Python bytecode
+__pycache__/
+*.pyc
