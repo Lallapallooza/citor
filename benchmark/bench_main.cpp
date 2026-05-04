@@ -31,11 +31,6 @@
 
 #ifdef CITOR_BENCH_HAS_OPENMP
 #include <omp.h>
-// LLVM libomp's Intel-compatibility extension: lets the runtime's "blocktime"
-// (the duration worker threads spin after completing a parallel region before
-// parking) be set programmatically. Declared as a free C function so we don't
-// pull in `omp-tools.h` for one symbol.
-extern "C" void kmp_set_blocktime(int milliseconds);
 #endif
 
 namespace {
@@ -57,7 +52,6 @@ struct CliOptions {
   bool listOnly = false;
   /// When set, populate `BenchRow::tailNs` (p25/p50/p99) on workloads that
   /// support it and emit the three extra columns. Default OFF so existing
-  /// awk parsers downstream of the bench see the pre-tail format unchanged
   /// (they key off `$2` ns/op and `$NF` row name; the tail columns sit
   /// between `err%` and the row name).
   bool withTailPercentiles = false;
@@ -92,7 +86,6 @@ void printUsage(std::ostream &out) {
       << "                           per-iteration raw samples and full provenance\n"
       << "                           (host, kernel, governor, TSC freq, citor commit,\n"
       << "                           checklist gates, etc.). Schema: see\n"
-      << "                           the bench-export documentation. Falls back to\n"
       << "                           CITOR_BENCH_EXPORT=PATH env var. Set\n"
       << "                           CITOR_BENCH_EXPORT_PRETTY=1 for indented JSON.\n";
 }
@@ -121,7 +114,7 @@ bool parseArgs(int argc, char **argv, CliOptions &opts) {
       continue;
     }
     constexpr std::string_view kFilterPrefix = "--filter=";
-    if (arg.substr(0, kFilterPrefix.size()) == kFilterPrefix) {
+    if (arg.starts_with(kFilterPrefix)) {
       const std::string_view value = arg.substr(kFilterPrefix.size());
       if (value.empty()) {
         std::cerr << "parallel_bench: --filter requires a non-empty substring\n";
@@ -147,7 +140,7 @@ bool parseArgs(int argc, char **argv, CliOptions &opts) {
       continue;
     }
     constexpr std::string_view kExportPrefix = "--export=";
-    if (arg.substr(0, kExportPrefix.size()) == kExportPrefix) {
+    if (arg.starts_with(kExportPrefix)) {
       const std::string_view value = arg.substr(kExportPrefix.size());
       if (value.empty()) {
         std::cerr << "parallel_bench: --export requires a non-empty path\n";
@@ -157,7 +150,7 @@ bool parseArgs(int argc, char **argv, CliOptions &opts) {
       continue;
     }
     constexpr std::string_view kEnginePrefix = "--engine=";
-    if (arg.substr(0, kEnginePrefix.size()) == kEnginePrefix) {
+    if (arg.starts_with(kEnginePrefix)) {
       const std::string_view value = arg.substr(kEnginePrefix.size());
       if (value.empty()) {
         std::cerr << "parallel_bench: --engine requires a non-empty substring\n";
@@ -262,7 +255,7 @@ int main(int argc, char **argv) {
   // every pool's cold-cell number is comparable. Hot-path cells are not
   // affected by parking choice (workers see the next dispatch before any
   // park budget can fire). The checklist below reports the resulting
-  // blocktime so the printed value reflects the post-override state, not libomp's
+  // blocktime so reviewers see the post-override value, not libomp's
   // default.
   kmp_set_blocktime(0);
 #endif
@@ -300,10 +293,9 @@ int main(int argc, char **argv) {
       BenchTable table = reg.run(cal);
       // Drop sentinel rows that were skipped before measurement via
       // `engineEnabled` (populated from `--engine`).
-      table.rows.erase(
-          std::remove_if(table.rows.begin(), table.rows.end(),
-                         [](const BenchRow &row) { return row.skipped; }),
-          table.rows.end());
+      table.rows.erase(std::remove_if(table.rows.begin(), table.rows.end(),
+                                      [](const BenchRow &row) { return row.skipped; }),
+                       table.rows.end());
       if (!table.rows.empty()) {
         formatTable(table, /*baselineName=*/"citor::ThreadPool", std::cout);
       }

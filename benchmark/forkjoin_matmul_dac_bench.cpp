@@ -72,7 +72,7 @@ struct AlignedFloatDeleter {
   }
 };
 
-using AlignedFloatBuffer = std::unique_ptr<float[], AlignedFloatDeleter>;
+using AlignedFloatBuffer = std::unique_ptr<float, AlignedFloatDeleter>;
 
 AlignedFloatBuffer allocateAlignedFloats(std::size_t count) {
   void *raw = nullptr;
@@ -179,10 +179,10 @@ template <class PoolT>
   using Traits = CompetitorTraits<PoolT>;
   auto pool = Traits::make(participants);
 
-  AlignedFloatBuffer aBuf = allocateAlignedFloats(n * n);
-  AlignedFloatBuffer bBuf = allocateAlignedFloats(n * n);
-  AlignedFloatBuffer cBuf = allocateAlignedFloats(n * n);
-  AlignedFloatBuffer refBuf = allocateAlignedFloats(n * n);
+  const AlignedFloatBuffer aBuf = allocateAlignedFloats(n * n);
+  const AlignedFloatBuffer bBuf = allocateAlignedFloats(n * n);
+  const AlignedFloatBuffer cBuf = allocateAlignedFloats(n * n);
+  const AlignedFloatBuffer refBuf = allocateAlignedFloats(n * n);
   deterministicFill(aBuf.get(), n * n, 0xc1701U);
   deterministicFill(bBuf.get(), n * n, 0xc1701U + 1U);
 
@@ -201,9 +201,7 @@ template <class PoolT>
     const std::size_t total = n * n;
     for (std::size_t i = 0; i < total; ++i) {
       const float diff = std::fabs(cBuf.get()[i] - refBuf.get()[i]);
-      if (diff > maxDiff) {
-        maxDiff = diff;
-      }
+      maxDiff = std::max(diff, maxDiff);
     }
     CITOR_ALWAYS_ASSERT(maxDiff <= tolerance);
   };
@@ -253,10 +251,10 @@ template <class PoolT>
                 "OpenMP runner must opt into recursive spawn for matmul-dac");
   OpenMpRunner runner{participants};
 
-  AlignedFloatBuffer aBuf = allocateAlignedFloats(n * n);
-  AlignedFloatBuffer bBuf = allocateAlignedFloats(n * n);
-  AlignedFloatBuffer cBuf = allocateAlignedFloats(n * n);
-  AlignedFloatBuffer refBuf = allocateAlignedFloats(n * n);
+  const AlignedFloatBuffer aBuf = allocateAlignedFloats(n * n);
+  const AlignedFloatBuffer bBuf = allocateAlignedFloats(n * n);
+  const AlignedFloatBuffer cBuf = allocateAlignedFloats(n * n);
+  const AlignedFloatBuffer refBuf = allocateAlignedFloats(n * n);
   deterministicFill(aBuf.get(), n * n, 0xc1701U);
   deterministicFill(bBuf.get(), n * n, 0xc1701U + 1U);
   leafMultiply(aBuf.get(), bBuf.get(), refBuf.get(), n, n, /*add=*/false);
@@ -267,9 +265,7 @@ template <class PoolT>
     const std::size_t total = n * n;
     for (std::size_t i = 0; i < total; ++i) {
       const float diff = std::fabs(cBuf.get()[i] - refBuf.get()[i]);
-      if (diff > maxDiff) {
-        maxDiff = diff;
-      }
+      maxDiff = std::max(diff, maxDiff);
     }
     CITOR_ALWAYS_ASSERT(maxDiff <= tolerance);
   };
@@ -278,7 +274,9 @@ template <class PoolT>
 #pragma omp parallel num_threads(static_cast<int>(participants))
     {
 #pragma omp single
-      { matmulRec(runner, aBuf.get(), bBuf.get(), cBuf.get(), n, n, /*add=*/false); }
+      {
+        matmulRec(runner, aBuf.get(), bBuf.get(), cBuf.get(), n, n, /*add=*/false);
+      }
     }
   };
 

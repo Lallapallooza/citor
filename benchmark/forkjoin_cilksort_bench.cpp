@@ -187,7 +187,7 @@ void parallelMerge(Pool &pool, std::int32_t *src, std::size_t aLo, std::size_t a
   secSplit[0] = secLo;
   secSplit[kMergeBuckets] = secHi;
   for (std::size_t k = 1; k < kMergeBuckets; ++k) {
-    primSplit[k] = primLo + (nPrim * k) / kMergeBuckets;
+    primSplit[k] = primLo + ((nPrim * k) / kMergeBuckets);
     const std::int32_t key = src[primSplit[k]];
     // `lower_bound` finds the first position >= key; this is the partition
     // such that secondary[secLo..pos) is < key and secondary[pos..secHi) is
@@ -346,8 +346,8 @@ void parallelMerge(Pool &pool, std::int32_t *src, std::size_t aLo, std::size_t a
     // threaded on the call site.
     (void)pool;
 #pragma omp taskloop grainsize(1) shared(buckets, src, dst)
-    for (std::ptrdiff_t k = 0; k < static_cast<std::ptrdiff_t>(kMergeBuckets); ++k) {
-      const MergeBucket &bk = buckets[static_cast<std::size_t>(k)];
+    for (std::size_t k = 0; k < kMergeBuckets; ++k) {
+      const MergeBucket &bk = buckets[k];
       seqMerge(src, bk.aLo, bk.aHi, bk.bLo, bk.bHi, dst, bk.outOffset);
     }
   }

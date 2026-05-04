@@ -53,7 +53,7 @@ struct AlignedDoubleDeleter {
   }
 };
 
-using AlignedDoubleBuffer = std::unique_ptr<double[], AlignedDoubleDeleter>;
+using AlignedDoubleBuffer = std::unique_ptr<double, AlignedDoubleDeleter>;
 
 AlignedDoubleBuffer allocateAlignedDoubles(std::size_t count) {
   void *raw = nullptr;
@@ -69,7 +69,7 @@ AlignedDoubleBuffer allocateAlignedDoubles(std::size_t count) {
 void deterministicFill(double *p, std::size_t count, std::uint32_t seed) noexcept {
   std::uint32_t state = seed;
   for (std::size_t i = 0; i < count; ++i) {
-    state = state * 1664525U + 1013904223U;
+    state = (state * 1664525U) + 1013904223U;
     p[i] = static_cast<double>(state >> 12U) * (1.0 / 1048576.0);
   }
 }
@@ -87,8 +87,9 @@ void deterministicFill(double *p, std::size_t count, std::uint32_t seed) noexcep
   for (std::size_t t = 0; t < timesteps; ++t) {
     for (std::size_t i = 1; i < n - 1U; ++i) {
       for (std::size_t j = 1; j < n - 1U; ++j) {
-        uNext.get()[i * n + j] = 0.25 * (u.get()[(i - 1U) * n + j] + u.get()[(i + 1U) * n + j] +
-                                         u.get()[i * n + (j - 1U)] + u.get()[i * n + (j + 1U)]);
+        uNext.get()[(i * n) + j] =
+            0.25 * (u.get()[((i - 1U) * n) + j] + u.get()[((i + 1U) * n) + j] +
+                    u.get()[(i * n) + (j - 1U)] + u.get()[(i * n) + (j + 1U)]);
       }
     }
     std::swap(u, uNext);
@@ -97,7 +98,7 @@ void deterministicFill(double *p, std::size_t count, std::uint32_t seed) noexcep
   double sum = 0.0;
   for (std::size_t i = 1; i < n - 1U; ++i) {
     for (std::size_t j = 1; j < n - 1U; ++j) {
-      sum += u.get()[i * n + j];
+      sum += u.get()[(i * n) + j];
     }
   }
   return sum;
@@ -109,8 +110,8 @@ inline void jacobiRowBlock(std::size_t rowFirst, std::size_t rowLast, std::size_
                            const double *uIn, double *uOut) noexcept {
   for (std::size_t i = rowFirst; i < rowLast; ++i) {
     for (std::size_t j = 1; j < n - 1U; ++j) {
-      uOut[i * n + j] = 0.25 * (uIn[(i - 1U) * n + j] + uIn[(i + 1U) * n + j] +
-                                uIn[i * n + (j - 1U)] + uIn[i * n + (j + 1U)]);
+      uOut[(i * n) + j] = 0.25 * (uIn[((i - 1U) * n) + j] + uIn[((i + 1U) * n) + j] +
+                                  uIn[(i * n) + (j - 1U)] + uIn[(i * n) + (j + 1U)]);
     }
   }
 }
@@ -122,8 +123,8 @@ inline void jacobiRowBlock(std::size_t rowFirst, std::size_t rowLast, std::size_
 /// count argument so its overload signature differs; we wrap that case.
 template <class PoolT, class Dispatch>
 [[nodiscard]] BenchRow measureHeatWith(const char *displayName, std::size_t participants,
-                                        std::size_t n, const CyclesPerNanosecond &cal,
-                                        double referenceChecksum, Dispatch dispatch) {
+                                       std::size_t n, const CyclesPerNanosecond &cal,
+                                       double referenceChecksum, Dispatch dispatch) {
   if (!engineEnabled(displayName)) {
     BenchRow row{};
     row.name = displayName;
@@ -158,7 +159,7 @@ template <class PoolT, class Dispatch>
     double sum = 0.0;
     for (std::size_t i = 1; i < n - 1U; ++i) {
       for (std::size_t j = 1; j < n - 1U; ++j) {
-        sum += u.get()[i * n + j];
+        sum += u.get()[(i * n) + j];
       }
     }
     return sum;
@@ -186,21 +187,20 @@ template <class PoolT>
 [[nodiscard]] BenchRow measureHeat(std::size_t participants, std::size_t n,
                                    const CyclesPerNanosecond &cal, double referenceChecksum) {
   using Traits = CompetitorTraits<PoolT>;
-  return measureHeatWith<PoolT>(
-      Traits::name, participants, n, cal, referenceChecksum,
-      [](PoolT &pool, std::size_t first, std::size_t last, std::size_t p, auto fn) {
-        Traits::parallelFor(pool, first, last, p, fn);
-      });
+  return measureHeatWith<PoolT>(Traits::name, participants, n, cal, referenceChecksum,
+                                [](PoolT &pool, std::size_t first, std::size_t last, std::size_t p,
+                                   auto fn) { Traits::parallelFor(pool, first, last, p, fn); });
 }
 
 template <class HintsT>
 [[nodiscard]] BenchRow measureCitorHeatWithHint(const char *displayName, std::size_t participants,
-                                                 std::size_t n, const CyclesPerNanosecond &cal,
-                                                 double referenceChecksum) {
+                                                std::size_t n, const CyclesPerNanosecond &cal,
+                                                double referenceChecksum) {
   return measureHeatWith<citor::ThreadPool>(
       displayName, participants, n, cal, referenceChecksum,
-      [](citor::ThreadPool &pool, std::size_t first, std::size_t last, std::size_t /*p*/,
-         auto fn) { pool.parallelFor<HintsT>(first, last, fn); });
+      [](citor::ThreadPool &pool, std::size_t first, std::size_t last, std::size_t /*p*/, auto fn) {
+        pool.parallelFor<HintsT>(first, last, fn);
+      });
 }
 
 struct HeatCell {

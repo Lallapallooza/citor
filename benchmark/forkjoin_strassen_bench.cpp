@@ -100,7 +100,7 @@ constexpr std::size_t kParallelDepth = 1;
 /// the inner `parallelFor` does not consume affinity or cancellation polls.
 using StrassenForHints = citor::HintsDefaults;
 
-/// 64-byte aligned `float[]` deleter; pairs with `std::unique_ptr` so the
+/// 64-byte aligned float-buffer deleter; pairs with `std::unique_ptr` so the
 /// buffer is freed automatically.
 struct AlignedFloatDeleter {
   void operator()(float *p) const noexcept {
@@ -110,7 +110,7 @@ struct AlignedFloatDeleter {
   }
 };
 
-using AlignedFloatBuffer = std::unique_ptr<float[], AlignedFloatDeleter>;
+using AlignedFloatBuffer = std::unique_ptr<float, AlignedFloatDeleter>;
 
 /// Allocate an aligned float buffer of `count` elements; aborts on failure.
 AlignedFloatBuffer allocateAlignedFloats(std::size_t count) {
@@ -148,9 +148,9 @@ struct Sub {
 /// helpers are the per-recursion-level constant overhead Strassen pays.
 inline void addInto(const Sub &dst, const Sub &a, const Sub &b) noexcept {
   for (std::size_t i = 0; i < dst.n; ++i) {
-    const float *aRow = a.data + i * a.stride;
-    const float *bRow = b.data + i * b.stride;
-    float *dRow = dst.data + i * dst.stride;
+    const float *aRow = a.data + (i * a.stride);
+    const float *bRow = b.data + (i * b.stride);
+    float *dRow = dst.data + (i * dst.stride);
     for (std::size_t j = 0; j < dst.n; ++j) {
       dRow[j] = aRow[j] + bRow[j];
     }
@@ -160,9 +160,9 @@ inline void addInto(const Sub &dst, const Sub &a, const Sub &b) noexcept {
 /// `dst = src1 - src2`.
 inline void subInto(const Sub &dst, const Sub &a, const Sub &b) noexcept {
   for (std::size_t i = 0; i < dst.n; ++i) {
-    const float *aRow = a.data + i * a.stride;
-    const float *bRow = b.data + i * b.stride;
-    float *dRow = dst.data + i * dst.stride;
+    const float *aRow = a.data + (i * a.stride);
+    const float *bRow = b.data + (i * b.stride);
+    float *dRow = dst.data + (i * dst.stride);
     for (std::size_t j = 0; j < dst.n; ++j) {
       dRow[j] = aRow[j] - bRow[j];
     }
@@ -172,8 +172,8 @@ inline void subInto(const Sub &dst, const Sub &a, const Sub &b) noexcept {
 /// `dst += src`.
 inline void addEq(const Sub &dst, const Sub &a) noexcept {
   for (std::size_t i = 0; i < dst.n; ++i) {
-    const float *aRow = a.data + i * a.stride;
-    float *dRow = dst.data + i * dst.stride;
+    const float *aRow = a.data + (i * a.stride);
+    float *dRow = dst.data + (i * dst.stride);
     for (std::size_t j = 0; j < dst.n; ++j) {
       dRow[j] += aRow[j];
     }
@@ -183,8 +183,8 @@ inline void addEq(const Sub &dst, const Sub &a) noexcept {
 /// `dst -= src`.
 inline void subEq(const Sub &dst, const Sub &a) noexcept {
   for (std::size_t i = 0; i < dst.n; ++i) {
-    const float *aRow = a.data + i * a.stride;
-    float *dRow = dst.data + i * dst.stride;
+    const float *aRow = a.data + (i * a.stride);
+    float *dRow = dst.data + (i * dst.stride);
     for (std::size_t j = 0; j < dst.n; ++j) {
       dRow[j] -= aRow[j];
     }
@@ -196,13 +196,13 @@ inline void subEq(const Sub &dst, const Sub &a) noexcept {
 /// initialized to zero before the accumulating loop.
 inline void seqMatmul(const Sub &c, const Sub &a, const Sub &b) noexcept {
   for (std::size_t i = 0; i < c.n; ++i) {
-    float *cRow = c.data + i * c.stride;
+    float *cRow = c.data + (i * c.stride);
     for (std::size_t j = 0; j < c.n; ++j) {
       cRow[j] = 0.0F;
     }
     for (std::size_t k = 0; k < c.n; ++k) {
-      const float aik = a.data[i * a.stride + k];
-      const float *bRow = b.data + k * b.stride;
+      const float aik = a.data[(i * a.stride) + k];
+      const float *bRow = b.data + (k * b.stride);
       for (std::size_t j = 0; j < c.n; ++j) {
         cRow[j] += aik * bRow[j];
       }
@@ -250,7 +250,7 @@ void parallelMatmul(Pool & /*pool*/, const Sub &c, const Sub &a, const Sub &b) {
   const std::size_t half = n / 2U;
   const std::size_t levelSize = 17U * (half * half);
   const std::size_t childMul = depth < kParallelDepth ? 7U : 1U;
-  return levelSize + childMul * scratchBudget(half, depth + 1U);
+  return levelSize + (childMul * scratchBudget(half, depth + 1U));
 }
 
 /// Componentwise roundoff tolerance for Strassen's NxN multiply on float32.
@@ -292,12 +292,13 @@ void strassenRec(Pool &pool, const Sub &c, const Sub &a, const Sub &b, float *sc
   // Carve 21 contiguous sub-buffers out of the scratch arena.
   float *cursor = scratch;
   auto take = [&cursor, halfSize]() {
-    float *out = cursor;
+    // The returned writable scratch slice is immediately stored in a mutable Sub view.
+    float *const out = cursor; // NOLINT(misc-const-correctness)
     cursor += halfSize;
     return out;
   };
   // Sub-product output buffers M1..M7.
-  Sub mBufs[7];
+  std::array<Sub, 7> mBufs{};
   for (std::size_t k = 0; k < 7; ++k) {
     mBufs[k] = Sub{.data = take(), .stride = half, .n = half};
   }
@@ -435,10 +436,10 @@ template <class PoolT>
   using Traits = CompetitorTraits<PoolT>;
   auto pool = Traits::make(participants);
 
-  AlignedFloatBuffer aBuf = allocateAlignedFloats(n * n);
-  AlignedFloatBuffer bBuf = allocateAlignedFloats(n * n);
-  AlignedFloatBuffer cBuf = allocateAlignedFloats(n * n);
-  AlignedFloatBuffer refBuf = allocateAlignedFloats(n * n);
+  const AlignedFloatBuffer aBuf = allocateAlignedFloats(n * n);
+  const AlignedFloatBuffer bBuf = allocateAlignedFloats(n * n);
+  const AlignedFloatBuffer cBuf = allocateAlignedFloats(n * n);
+  const AlignedFloatBuffer refBuf = allocateAlignedFloats(n * n);
 
   deterministicFill(aBuf.get(), n * n, 0xc1701U);
   deterministicFill(bBuf.get(), n * n, 0xc1701U + 1U);
@@ -472,9 +473,7 @@ template <class PoolT>
     const std::size_t total = n * n;
     for (std::size_t i = 0; i < total; ++i) {
       const float diff = std::fabs(cBuf.get()[i] - refBuf.get()[i]);
-      if (diff > maxDiff) {
-        maxDiff = diff;
-      }
+      maxDiff = std::max(diff, maxDiff);
     }
     const float tolerance = strassenTolerance(n);
     CITOR_ALWAYS_ASSERT(maxDiff <= tolerance);
@@ -546,10 +545,10 @@ template <class PoolT>
   // per iteration; the inner `single` directive funnels the root call.
   OpenMpRunner runner{participants};
 
-  AlignedFloatBuffer aBuf = allocateAlignedFloats(n * n);
-  AlignedFloatBuffer bBuf = allocateAlignedFloats(n * n);
-  AlignedFloatBuffer cBuf = allocateAlignedFloats(n * n);
-  AlignedFloatBuffer refBuf = allocateAlignedFloats(n * n);
+  const AlignedFloatBuffer aBuf = allocateAlignedFloats(n * n);
+  const AlignedFloatBuffer bBuf = allocateAlignedFloats(n * n);
+  const AlignedFloatBuffer cBuf = allocateAlignedFloats(n * n);
+  const AlignedFloatBuffer refBuf = allocateAlignedFloats(n * n);
 
   deterministicFill(aBuf.get(), n * n, 0xc1701U);
   deterministicFill(bBuf.get(), n * n, 0xc1701U + 1U);
@@ -569,9 +568,7 @@ template <class PoolT>
     const std::size_t total = n * n;
     for (std::size_t i = 0; i < total; ++i) {
       const float diff = std::fabs(cBuf.get()[i] - refBuf.get()[i]);
-      if (diff > maxDiff) {
-        maxDiff = diff;
-      }
+      maxDiff = std::max(diff, maxDiff);
     }
     const float tolerance = strassenTolerance(n);
     CITOR_ALWAYS_ASSERT(maxDiff <= tolerance);

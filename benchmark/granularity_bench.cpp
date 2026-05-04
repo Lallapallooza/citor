@@ -105,8 +105,8 @@ inline void spinForNs(double targetNs, const CyclesPerNanosecond &cal) noexcept 
 /// A populated `BenchRow` ready for the comparison table.
 template <class PoolT, class Dispatch>
 [[nodiscard]] BenchRow measureGranularityWith(const char *displayName, std::size_t participants,
-                                               double bodyNs, const CyclesPerNanosecond &cal,
-                                               Dispatch dispatch) {
+                                              double bodyNs, const CyclesPerNanosecond &cal,
+                                              Dispatch dispatch) {
   if (!engineEnabled(displayName)) {
     BenchRow row{};
     row.name = displayName;
@@ -115,7 +115,7 @@ template <class PoolT, class Dispatch>
   }
   using Traits = CompetitorTraits<PoolT>;
   auto pool = Traits::make(participants);
-  [[maybe_unused]] MeasurementScope<PoolT> measurementScope(*pool);
+  [[maybe_unused]] const MeasurementScope<PoolT> measurementScope(*pool);
 
   std::atomic<std::uint64_t> sink{0};
   const auto body = [&sink, bodyNs, &cal](std::size_t lo, std::size_t hi) noexcept {

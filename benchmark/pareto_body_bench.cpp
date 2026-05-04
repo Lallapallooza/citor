@@ -425,12 +425,12 @@ template <class HintsT>
 #ifdef CITOR_BENCH_HAS_DISPENSO
 [[nodiscard]] BenchRow measureDispenso(std::size_t participants, const ParetoData &d,
                                        const CyclesPerNanosecond &cal) {
-  auto pool = CompetitorTraits<dispenso::ThreadPool>::make(participants);
+  dispenso::ThreadPool pool(participants);
   return measureLoop(
       "dispenso::ThreadPool::parallel_for", cal,
       [&] {
         std::atomic<std::int64_t> sink{0};
-        dispenso::TaskSet taskSet(*pool);
+        dispenso::TaskSet taskSet(pool);
         dispenso::parallel_for(taskSet, std::size_t{0}, kN,
                                [&d, &cal, &sink](std::size_t lo, std::size_t hi) {
                                  paretoBlockBody(d, lo, hi, cal, sink);

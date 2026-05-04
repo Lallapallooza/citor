@@ -157,7 +157,7 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
                       const CyclesPerNanosecond &cal) {
   BenchTable table;
   table.workload = std::string{"balance_sweep_pareto_"} + suffix;
-  ParetoData d = buildData();
+  const ParetoData d = buildData();
   table.rows.push_back(measureStatic(participants, d, cal));
   table.rows.push_back(measureDynamic(participants, d, cal));
   return table;

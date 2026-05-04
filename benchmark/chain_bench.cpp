@@ -442,7 +442,7 @@ struct ChainParetoData {
   for (std::size_t s = 0; s < kStageCount; ++s) {
     for (std::size_t i = 0; i < kPRangeN; ++i) {
       const auto cost = static_cast<std::int64_t>(pParetoDrawNs(uni(rng)));
-      d.costs[s * kPRangeN + i] = cost;
+      d.costs[(s * kPRangeN) + i] = cost;
       total += cost;
     }
   }
@@ -458,7 +458,7 @@ inline void chainParetoBody(const ChainParetoData &d, std::size_t stage, std::si
                             const CyclesPerNanosecond &cal) noexcept {
   std::int64_t local = 0;
   for (std::size_t i = lo; i < hi; ++i) {
-    const std::int64_t cost = d.costs[stage * kPRangeN + i];
+    const std::int64_t cost = d.costs[(stage * kPRangeN) + i];
     pSpinForNs(static_cast<double>(cost), cal);
     local += cost;
   }
@@ -544,7 +544,7 @@ BenchTable buildParetoTable(std::size_t participants, const char *suffix,
                             const CyclesPerNanosecond &cal) {
   BenchTable table;
   table.workload = std::string{"chain_pareto_"} + suffix;
-  ChainParetoData d = buildChainParetoData();
+  const ChainParetoData d = buildChainParetoData();
   table.rows.push_back(measureCitorChainPareto(participants, d, cal));
   table.rows.push_back(measureChainParetoAdapter<BS::light_thread_pool>(
       "BS::thread_pool[chainAdapter]", participants, d, cal));
@@ -571,12 +571,12 @@ BenchTable buildParetoTable(std::size_t participants, const char *suffix,
       measureChainParetoAdapter<OpenMpRunner>("OpenMP::parallel_for x7", participants, d, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_LEOPARD
-  table.rows.push_back(measureChainParetoAdapter<hmthrp::ThreadPool>(
-      "Leopard::dispatch x7", participants, d, cal));
+  table.rows.push_back(
+      measureChainParetoAdapter<hmthrp::ThreadPool>("Leopard::dispatch x7", participants, d, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_DISPENSO
-  table.rows.push_back(measureChainParetoAdapter<dispenso::ThreadPool>(
-      "dispenso::parallel_for x7", participants, d, cal));
+  table.rows.push_back(measureChainParetoAdapter<dispenso::ThreadPool>("dispenso::parallel_for x7",
+                                                                       participants, d, cal));
 #endif
   return table;
 }

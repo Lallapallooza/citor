@@ -309,7 +309,7 @@ template <class RunFn>
         }
         exec->run(flow).wait();
         std::int64_t total = 0;
-        for (std::int64_t v : partials) {
+        for (const std::int64_t v : partials) {
           total += v;
         }
         return total;
@@ -350,7 +350,7 @@ template <class RunFn>
         }
         bar.Wait();
         std::int64_t total = 0;
-        for (std::int64_t v : partials) {
+        for (const std::int64_t v : partials) {
           total += v;
         }
         return total;
@@ -388,7 +388,7 @@ template <class RunFn>
           f.get();
         }
         std::int64_t total = 0;
-        for (std::int64_t v : partials) {
+        for (const std::int64_t v : partials) {
           total += v;
         }
         return total;
@@ -423,7 +423,7 @@ template <class RunFn>
           }
         }
         std::int64_t total = 0;
-        for (std::int64_t v : partials) {
+        for (const std::int64_t v : partials) {
           total += v;
         }
         return total;
@@ -445,7 +445,7 @@ template <class RunFn>
         {
           const auto threadCount = static_cast<std::size_t>(omp_get_num_threads());
           const auto threadIdx = static_cast<std::size_t>(omp_get_thread_num());
-          const std::size_t span = static_cast<std::size_t>(n);
+          const auto span = static_cast<std::size_t>(n);
           const std::size_t block = (span + threadCount - 1U) / threadCount;
           const std::size_t lo = std::min(span, threadIdx * block);
           const std::size_t hi = std::min(span, (threadIdx + 1U) * block);
@@ -467,7 +467,7 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
                       const CyclesPerNanosecond &cal) {
   BenchTable table;
   table.workload = std::string{"reduce_pareto_int64_"} + suffix;
-  ParetoData d = buildData();
+  const ParetoData d = buildData();
   table.rows.push_back(measureCitor(participants, d, cal));
   table.rows.push_back(measureBs(participants, d, cal));
   table.rows.push_back(measureDp(participants, d, cal));

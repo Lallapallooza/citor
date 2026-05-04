@@ -58,7 +58,7 @@ namespace {
 /// (32 MiB or 64 MiB per CCD), so the body genuinely traverses DRAM-resident
 /// data and the cross-CCD coherence traffic on the dispatch path is not
 /// hidden by L3 hit rates.
-constexpr std::size_t kElementCount = 16U * 1024U * 1024U;
+constexpr std::size_t kElementCount = std::size_t{16} * 1024U * 1024U;
 
 /// Per-cell sample budget. The body takes a few milliseconds on a typical
 /// host; 30 samples keeps a row under a couple of seconds wall while still
@@ -74,7 +74,7 @@ struct CrossCcdHints : citor::HintsDefaults {
   static constexpr bool cancellationChecks = false;
 };
 
-/// 64-byte aligned `float[]` deleter.
+/// 64-byte aligned `float` buffer deleter.
 struct AlignedFloatDeleter {
   void operator()(float *p) const noexcept {
     if (p != nullptr) {
@@ -83,7 +83,7 @@ struct AlignedFloatDeleter {
   }
 };
 
-using AlignedFloatBuffer = std::unique_ptr<float[], AlignedFloatDeleter>;
+using AlignedFloatBuffer = std::unique_ptr<float, AlignedFloatDeleter>;
 
 [[nodiscard]] AlignedFloatBuffer allocateAlignedFloats(std::size_t count) {
   void *raw = nullptr;
@@ -162,9 +162,9 @@ private:
   citor::ThreadPool &pool = harness.arena(arenaCcd);
   CITOR_ALWAYS_ASSERT(pool.kind() == citor::PoolKind::Arena);
 
-  ScopedThreadPin pin(producerCpu);
+  const ScopedThreadPin pin(producerCpu);
 
-  AlignedFloatBuffer buf = allocateAlignedFloats(kElementCount);
+  const AlignedFloatBuffer buf = allocateAlignedFloats(kElementCount);
   float *const data = buf.get();
 
   // First-touch fill so the buffer pages are resident before the timed

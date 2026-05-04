@@ -302,14 +302,14 @@ template <class Workload>
 template <class Workload>
 [[nodiscard]] BenchRow measureDispenso(const char *name, std::size_t participants,
                                        const CyclesPerNanosecond &cal, Workload workload) {
-  auto pool = CompetitorTraits<::dispenso::ThreadPool>::make(participants);
+  ::dispenso::ThreadPool pool(participants);
   return measureLoop(name, cal, [&] {
     return workload([&pool](auto &&a, auto &&b) {
       // ForceQueuingTag bypasses dispenso's anti-recursion-flooding throttle;
       // without it both children inline on the calling worker once the queue
       // has > numThreads*1.5 tasks in flight (task_set_impl.h:180-183), which
       // serializes the fork-join and defeats the spawn(a, b) contract.
-      ::dispenso::TaskSet ts(*pool);
+      ::dispenso::TaskSet ts(pool);
       ts.schedule(std::forward<decltype(a)>(a), ::dispenso::ForceQueuingTag{});
       ts.schedule(std::forward<decltype(b)>(b), ::dispenso::ForceQueuingTag{});
     });

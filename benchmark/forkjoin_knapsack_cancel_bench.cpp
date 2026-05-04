@@ -97,9 +97,7 @@ struct Item {
       curr[static_cast<std::size_t>(c)] = prev[static_cast<std::size_t>(c)];
       if (c >= it.weight) {
         const int candidate = prev[static_cast<std::size_t>(c - it.weight)] + it.value;
-        if (candidate > curr[static_cast<std::size_t>(c)]) {
-          curr[static_cast<std::size_t>(c)] = candidate;
-        }
+        curr[static_cast<std::size_t>(c)] = std::max(candidate, curr[static_cast<std::size_t>(c)]);
       }
     }
     std::swap(prev, curr);
@@ -112,7 +110,7 @@ struct Item {
 /// so the bound is tight; computed in O(n - idx).
 [[nodiscard]] double upperBound(const std::vector<Item> &items, std::size_t idx, int remCap,
                                 int curValue) noexcept {
-  double bound = static_cast<double>(curValue);
+  auto bound = static_cast<double>(curValue);
   int cap = remCap;
   for (std::size_t i = idx; i < items.size() && cap > 0; ++i) {
     if (items[i].weight <= cap) {
@@ -250,8 +248,9 @@ template <class Pool>
   state.token =
       cancellationEnabled ? citor::CancellationToken::makeOwned() : citor::CancellationToken{};
   searchRec(pool, itemsSorted, 0U, capacity, 0, state);
-  return RunOutput{state.bestValue.load(std::memory_order_acquire), referenceValue,
-                   state.cancelFirings.load(std::memory_order_relaxed)};
+  return RunOutput{.parallel = state.bestValue.load(std::memory_order_acquire),
+                   .reference = referenceValue,
+                   .firings = state.cancelFirings.load(std::memory_order_relaxed)};
 }
 
 template <class PoolT>
@@ -332,7 +331,9 @@ template <class PoolT>
 #pragma omp parallel num_threads(static_cast<int>(participants))
     {
 #pragma omp single
-      { searchRec(runner, itemsSorted, 0U, capacity, 0, state); }
+      {
+        searchRec(runner, itemsSorted, 0U, capacity, 0, state);
+      }
     }
   };
 
@@ -342,8 +343,9 @@ template <class PoolT>
     state.token =
         cancellationEnabled ? citor::CancellationToken::makeOwned() : citor::CancellationToken{};
     runOnceOmp(state);
-    return RunOutput{state.bestValue.load(std::memory_order_acquire), reference,
-                     state.cancelFirings.load(std::memory_order_relaxed)};
+    return RunOutput{.parallel = state.bestValue.load(std::memory_order_acquire),
+                     .reference = reference,
+                     .firings = state.cancelFirings.load(std::memory_order_relaxed)};
   };
 
   RunOutput last{};
@@ -442,12 +444,12 @@ void searchRecSubflow(::tf::Subflow &sub, const std::vector<Item> &items, std::s
     state.token =
         cancellationEnabled ? citor::CancellationToken::makeOwned() : citor::CancellationToken{};
     ::tf::Taskflow flow;
-    flow.emplace([&](::tf::Subflow &root) {
-      searchRecSubflow(root, itemsSorted, 0U, capacity, 0, state);
-    });
+    flow.emplace(
+        [&](::tf::Subflow &root) { searchRecSubflow(root, itemsSorted, 0U, capacity, 0, state); });
     exec.run(flow).wait();
-    return RunOutput{state.bestValue.load(std::memory_order_acquire), reference,
-                     state.cancelFirings.load(std::memory_order_relaxed)};
+    return RunOutput{.parallel = state.bestValue.load(std::memory_order_acquire),
+                     .reference = reference,
+                     .firings = state.cancelFirings.load(std::memory_order_relaxed)};
   };
 
   RunOutput last{};
@@ -503,17 +505,16 @@ BenchTable buildTable(std::size_t participants, KnapsackCell cell, const CyclesP
       measureKnapsack<::tbb::task_arena>("oneTBB[cancel-off]", participants, cell.n, cal, false));
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
-  table.rows.push_back(measureKnapsackOmp(
-      "OpenMP[citor::CancellationToken cooperative cancel-on]", participants, cell.n, cal, true));
-  table.rows.push_back(
-      measureKnapsackOmp("OpenMP[cancel-off]", participants, cell.n, cal, false));
+  table.rows.push_back(measureKnapsackOmp("OpenMP[citor::CancellationToken cooperative cancel-on]",
+                                          participants, cell.n, cal, true));
+  table.rows.push_back(measureKnapsackOmp("OpenMP[cancel-off]", participants, cell.n, cal, false));
 #endif
 #ifdef CITOR_BENCH_HAS_TASKFLOW
-  table.rows.push_back(measureKnapsackTaskflow(
-      "Taskflow::Subflow[citor::CancellationToken cooperative cancel-on]", participants, cell.n,
-      cal, true));
-  table.rows.push_back(measureKnapsackTaskflow("Taskflow::Subflow[cancel-off]", participants,
-                                               cell.n, cal, false));
+  table.rows.push_back(
+      measureKnapsackTaskflow("Taskflow::Subflow[citor::CancellationToken cooperative cancel-on]",
+                              participants, cell.n, cal, true));
+  table.rows.push_back(
+      measureKnapsackTaskflow("Taskflow::Subflow[cancel-off]", participants, cell.n, cal, false));
 #endif
   // dispenso is not wired here despite recursive_forkjoin_helper's
   // ForceQueuingTag plumbing forcing concurrent sibling execution. ForceQueuing

@@ -78,8 +78,9 @@ constexpr int kHdrSigDigits = 3;
 class HdrHistogramHandle {
 public:
   HdrHistogramHandle() {
-    const int rc = ::hdr_init(/*lowest=*/1, kHdrMaxNs, kHdrSigDigits, &m_hist);
-    CITOR_ALWAYS_ASSERT(rc == 0 && m_hist != nullptr);
+    const int rc = ::hdr_init(/*lowest_discernible_value=*/1, kHdrMaxNs, kHdrSigDigits, &m_hist);
+    CITOR_ALWAYS_ASSERT(rc == 0);
+    CITOR_ALWAYS_ASSERT(m_hist != nullptr);
   }
   HdrHistogramHandle(const HdrHistogramHandle &) = delete;
   HdrHistogramHandle &operator=(const HdrHistogramHandle &) = delete;
@@ -118,8 +119,7 @@ private:
 ///                 `tailPercentilesEnabled()` flag is set.
 template <class PoolT, class Dispatch>
 [[nodiscard]] BenchRow measureColdDispatchWith(const char *displayName, std::size_t participants,
-                                                const CyclesPerNanosecond &cal,
-                                                Dispatch dispatch) {
+                                               const CyclesPerNanosecond &cal, Dispatch dispatch) {
   if (!engineEnabled(displayName)) {
     BenchRow row{};
     row.name = displayName;
@@ -151,7 +151,7 @@ template <class PoolT, class Dispatch>
                       static_cast<std::uint64_t>(kWarmupIterations) *
                           static_cast<std::uint64_t>(participants));
 
-  HdrHistogramHandle hist;
+  const HdrHistogramHandle hist;
 
   // Timing window. Samples are pushed into both the sample vector (for the
   // headline p25 + err%) and the HdrHistogram (for the per-row tail). The
@@ -197,7 +197,7 @@ template <class PoolT, class Dispatch>
 /// trait-supplied dispatch. Used for every non-citor row.
 template <class PoolT>
 [[nodiscard]] BenchRow measureColdDispatch(std::size_t participants,
-                                            const CyclesPerNanosecond &cal) {
+                                           const CyclesPerNanosecond &cal) {
   using Traits = CompetitorTraits<PoolT>;
   return measureColdDispatchWith<PoolT>(
       Traits::name, participants, cal,

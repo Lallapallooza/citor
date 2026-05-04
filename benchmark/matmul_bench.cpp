@@ -38,7 +38,7 @@ constexpr std::size_t kIterations = 20;
 /// pool's wake-up plus the first MMU touches on freshly-allocated A/B/C.
 constexpr std::size_t kWarmupIterations = 5;
 
-/// 64-byte aligned `float[]` deleter for the matmul buffers; pairs with a
+/// 64-byte aligned float-buffer deleter for the matmul buffers; pairs with a
 /// `std::unique_ptr` so the `BenchRow` owner does not leak on early return.
 struct AlignedFloatDeleter {
   void operator()(float *p) const noexcept {
@@ -48,7 +48,7 @@ struct AlignedFloatDeleter {
   }
 };
 
-using AlignedFloatBuffer = std::unique_ptr<float[], AlignedFloatDeleter>;
+using AlignedFloatBuffer = std::unique_ptr<float, AlignedFloatDeleter>;
 
 /// Allocate an aligned float buffer of `count` elements; aborts on failure.
 AlignedFloatBuffer allocateAlignedFloats(std::size_t count) {
@@ -60,15 +60,6 @@ AlignedFloatBuffer allocateAlignedFloats(std::size_t count) {
   return AlignedFloatBuffer{static_cast<float *>(raw)};
 }
 
-/// Deterministic LCG-seeded fill so every (pool, N) cell sees the same A/B.
-void deterministicFill(float *p, std::size_t count, std::uint32_t seed) noexcept {
-  std::uint32_t state = seed;
-  for (std::size_t i = 0; i < count; ++i) {
-    state = state * 1664525U + 1013904223U;
-    p[i] = static_cast<float>(state >> 12U) * (1.0F / 1048576.0F);
-  }
-}
-
 /// Per-row-block fill seeded from the row index. Independent across blocks so
 /// the parallel first-touch init can run on each pool's worker partition
 /// without an order-dependent cross-block carry. Stable across participant
@@ -77,9 +68,9 @@ inline void deterministicFillBlock(float *p, std::size_t n, std::size_t rowFirst
                                    std::size_t rowLast, std::uint32_t seed) noexcept {
   for (std::size_t i = rowFirst; i < rowLast; ++i) {
     std::uint32_t state = seed ^ static_cast<std::uint32_t>(i);
-    float *row = p + i * n;
+    float *row = p + (i * n);
     for (std::size_t j = 0; j < n; ++j) {
-      state = state * 1664525U + 1013904223U;
+      state = (state * 1664525U) + 1013904223U;
       row[j] = static_cast<float>(state >> 12U) * (1.0F / 1048576.0F);
     }
   }
@@ -90,13 +81,13 @@ inline void deterministicFillBlock(float *p, std::size_t n, std::size_t rowFirst
 inline void matmulRowBlock(std::size_t rowFirst, std::size_t rowLast, std::size_t n,
                            const float *aBase, const float *bBase, float *cBase) noexcept {
   for (std::size_t i = rowFirst; i < rowLast; ++i) {
-    float *cRow = cBase + i * n;
+    float *cRow = cBase + (i * n);
     for (std::size_t j = 0; j < n; ++j) {
       cRow[j] = 0.0F;
     }
     for (std::size_t k = 0; k < n; ++k) {
-      const float aik = aBase[i * n + k];
-      const float *bRow = bBase + k * n;
+      const float aik = aBase[(i * n) + k];
+      const float *bRow = bBase + (k * n);
       for (std::size_t j = 0; j < n; ++j) {
         cRow[j] += aik * bRow[j];
       }
@@ -115,7 +106,7 @@ template <class Pool> struct MatmulDispatch;
 
 /// Hint preset for the matmul row-block dispatch: cancellation polls disabled.
 struct MatmulHints : citor::HintsDefaults {
-  static constexpr bool cancellationChecks = false;
+  [[maybe_unused]] static constexpr bool cancellationChecks = false;
 };
 
 template <> struct MatmulDispatch<citor::ThreadPool> {
@@ -271,8 +262,8 @@ template <> struct MatmulDispatch<OpenMpRunner> {
     const auto last = static_cast<std::ptrdiff_t>(n);
 #pragma omp parallel num_threads(threads)
     {
-      const std::size_t threadCount = static_cast<std::size_t>(omp_get_num_threads());
-      const std::size_t threadIdx = static_cast<std::size_t>(omp_get_thread_num());
+      const auto threadCount = static_cast<std::size_t>(omp_get_num_threads());
+      const auto threadIdx = static_cast<std::size_t>(omp_get_thread_num());
       const std::size_t block = (n + threadCount - 1) / threadCount;
       const std::size_t lo = std::min(n, threadIdx * block);
       const std::size_t hi = std::min(n, (threadIdx + 1) * block);
@@ -331,8 +322,8 @@ template <> struct MatmulDispatch<dispenso::ThreadPool> {
 /// A populated `BenchRow` ready for the comparison table.
 template <class PoolT, class Dispatch>
 [[nodiscard]] BenchRow measureMatmulWith(const char *displayName, std::size_t participants,
-                                          std::size_t n, const CyclesPerNanosecond &cal,
-                                          Dispatch dispatch) {
+                                         std::size_t n, const CyclesPerNanosecond &cal,
+                                         Dispatch dispatch) {
   if (!engineEnabled(displayName)) {
     BenchRow row{};
     row.name = displayName;
@@ -343,9 +334,9 @@ template <class PoolT, class Dispatch>
   auto pool = Traits::make(participants);
 
   const std::size_t elems = n * n;
-  AlignedFloatBuffer aBuf = allocateAlignedFloats(elems);
-  AlignedFloatBuffer bBuf = allocateAlignedFloats(elems);
-  AlignedFloatBuffer cBuf = allocateAlignedFloats(elems);
+  const AlignedFloatBuffer aBuf = allocateAlignedFloats(elems);
+  const AlignedFloatBuffer bBuf = allocateAlignedFloats(elems);
+  const AlignedFloatBuffer cBuf = allocateAlignedFloats(elems);
 
   float *aMut = aBuf.get();
   float *bMut = bBuf.get();
@@ -354,7 +345,7 @@ template <class PoolT, class Dispatch>
     deterministicFillBlock(aMut, n, lo, hi, 0xA1B2C3D4U);
     deterministicFillBlock(bMut, n, lo, hi, 0x5E6F7081U);
     for (std::size_t i = lo; i < hi; ++i) {
-      float *row = cMut + i * n;
+      float *row = cMut + (i * n);
       for (std::size_t j = 0; j < n; ++j) {
         row[j] = 0.0F;
       }
@@ -384,7 +375,7 @@ template <class PoolT, class Dispatch>
   }
 
   std::atomic_signal_fence(std::memory_order_seq_cst);
-  volatile float sink = cBase[0] + cBase[elems - 1];
+  const volatile float sink = cBase[0] + cBase[elems - 1];
   (void)sink;
 
   return finalizeRow(displayName, samples);
@@ -394,22 +385,20 @@ template <class PoolT>
 [[nodiscard]] BenchRow measureMatmul(std::size_t participants, std::size_t n,
                                      const CyclesPerNanosecond &cal) {
   using Traits = CompetitorTraits<PoolT>;
-  return measureMatmulWith<PoolT>(
-      Traits::name, participants, n, cal,
-      [](PoolT &pool, std::size_t nn, std::size_t p, auto fn) {
-        MatmulDispatch<PoolT>::run(pool, nn, p, fn);
-      });
+  return measureMatmulWith<PoolT>(Traits::name, participants, n, cal,
+                                  [](PoolT &pool, std::size_t nn, std::size_t p, auto fn) {
+                                    MatmulDispatch<PoolT>::run(pool, nn, p, fn);
+                                  });
 }
 
 template <class HintsT>
-[[nodiscard]] BenchRow measureCitorMatmulWithHint(const char *displayName,
-                                                   std::size_t participants, std::size_t n,
-                                                   const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureCitorMatmulWithHint(const char *displayName, std::size_t participants,
+                                                  std::size_t n, const CyclesPerNanosecond &cal) {
   return measureMatmulWith<citor::ThreadPool>(
       displayName, participants, n, cal,
       [](citor::ThreadPool &pool, std::size_t nn, std::size_t /*p*/, auto fn) {
         pool.parallelFor<HintsT>(std::size_t{0}, nn,
-                                  [&fn](std::size_t lo, std::size_t hi) { fn(lo, hi); });
+                                 [&fn](std::size_t lo, std::size_t hi) { fn(lo, hi); });
       });
 }
 
@@ -434,10 +423,10 @@ BenchTable buildTable(std::size_t participants, MatmulCell cell, const CyclesPer
   BenchTable table;
   table.workload = std::string{"matmul_j16_"} + cell.suffix;
 
-  table.rows.push_back(measureCitorMatmulWithHint<citor::StaticHints>(
-      "citor::ThreadPool[Static]", participants, cell.n, cal));
-  table.rows.push_back(measureCitorMatmulWithHint<citor::DynamicHints>(
-      "citor::ThreadPool[Dynamic]", participants, cell.n, cal));
+  table.rows.push_back(measureCitorMatmulWithHint<citor::StaticHints>("citor::ThreadPool[Static]",
+                                                                      participants, cell.n, cal));
+  table.rows.push_back(measureCitorMatmulWithHint<citor::DynamicHints>("citor::ThreadPool[Dynamic]",
+                                                                       participants, cell.n, cal));
   table.rows.push_back(measureMatmul<BS::light_thread_pool>(participants, cell.n, cal));
   table.rows.push_back(measureMatmul<dp::thread_pool<>>(participants, cell.n, cal));
   table.rows.push_back(

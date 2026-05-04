@@ -142,7 +142,7 @@ template <class RunFn>
         }
         pool.runPlex<citor::HintsDefaults>(kPhases, /*n=*/participants, phaseFn);
         std::int64_t total = 0;
-        for (std::int64_t v : slotState) {
+        for (const std::int64_t v : slotState) {
           total += v;
         }
         return total;
@@ -177,7 +177,7 @@ template <class RunFn>
               });
         }
         std::int64_t total = 0;
-        for (std::int64_t v : slotState) {
+        for (const std::int64_t v : slotState) {
           total += v;
         }
         return total;
@@ -208,7 +208,7 @@ template <class RunFn>
               });
         }
         std::int64_t total = 0;
-        for (std::int64_t v : slotState) {
+        for (const std::int64_t v : slotState) {
           total += v;
         }
         return total;
@@ -239,7 +239,7 @@ template <class RunFn>
               });
         }
         std::int64_t total = 0;
-        for (std::int64_t v : slotState) {
+        for (const std::int64_t v : slotState) {
           total += v;
         }
         return total;
@@ -270,7 +270,7 @@ template <class RunFn>
               });
         }
         std::int64_t total = 0;
-        for (std::int64_t v : slotState) {
+        for (const std::int64_t v : slotState) {
           total += v;
         }
         return total;
@@ -301,7 +301,7 @@ template <class RunFn>
               });
         }
         std::int64_t total = 0;
-        for (std::int64_t v : slotState) {
+        for (const std::int64_t v : slotState) {
           total += v;
         }
         return total;
@@ -331,7 +331,7 @@ template <class RunFn>
           }
         }
         std::int64_t total = 0;
-        for (std::int64_t v : slotState) {
+        for (const std::int64_t v : slotState) {
           total += v;
         }
         return total;
@@ -366,7 +366,7 @@ template <class PoolT>
               }
             });
         std::int64_t total = 0;
-        for (std::int64_t v : slotState) {
+        for (const std::int64_t v : slotState) {
           total += v;
         }
         return total;
