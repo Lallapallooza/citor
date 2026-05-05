@@ -1,15 +1,17 @@
 #pragma once
 
-// Shared multi-arena harness for cross-CCD benches that exercise
-// `citor::PoolGroup`. The header re-exports `enumerateCcds`, exposes a
-// `MultiArenaHarness` adapter that hands out per-CCD `ThreadPool` references
-// owned by `PoolGroup::global()`, and a runtime probe that aborts with a
-// diagnostic when the host has fewer than the requested number of CCDs.
+// Multi-arena harness for cross-CCD benches that exercise citor::PoolGroup.
+// Re-exports enumerateCcds, exposes a MultiArenaHarness adapter that owns a
+// scoped per-cell PoolGroup, and a runtime probe that aborts when the host
+// has fewer CCDs than required. Single-CCD hosts must skip registration of
+// these workloads.
 //
-// Consumed by `cross_ccd_parallel_for_bench.cpp` (and any future cross-arena
-// bench TU). Single-CCD hosts must skip registration of these workloads;
-// `requireMultipleCcds()` is the explicit fail-fast probe TUs call from their
-// registrar to avoid silently mismatching the bench's intent.
+// The harness owns a value-typed PoolGroup so each bench cell's arena
+// workers go away with the harness; otherwise the process-wide
+// PoolGroup::global() singleton would leave its (~16 worker) arena fleet
+// alive for the rest of the bench, and any later cell that builds its own
+// ThreadPool(16) would run with 32 workers pinned to 16 CPUs and pay
+// 5-8x slowdown on recursive-task workloads (skynet, strassen DaC, etc.).
 
 #include <cstddef>
 #include <stdexcept>
@@ -22,79 +24,56 @@
 
 namespace citor::bench {
 
-/// Re-export of `citor::detail::enumerateCcds()` so cross-CCD bench TUs
-///        can probe the host's topology without reaching into `detail/`.
-///
-/// The inner vectors are CPU id lists; the outer vector's index is the CCD id.
-/// On a host where sysfs is unavailable, `enumerateCcds()` returns a single
-/// synthetic CCD covering every allowed CPU, so the result is never empty.
+// Re-export of detail::enumerateCcds() so cross-CCD bench TUs can probe the
+// host's topology without reaching into detail/. Inner vectors are CPU id
+// lists; outer index is the CCD id. On a host without sysfs the result is one
+// synthetic CCD covering every allowed CPU.
 [[nodiscard]] inline std::vector<std::vector<unsigned>> enumerateCcds() {
   return citor::detail::enumerateCcds();
 }
 
-/// Runtime probe used by cross-CCD bench TUs from their registrar.
-///
-/// Throws `std::runtime_error` when `enumerateCcds().size() < required`. The
-/// registrar is expected to catch the exception and skip `registerWorkload`,
-/// so a single-CCD host quietly omits the cross-CCD rows from the bench output
-/// instead of running them on a topology that can not satisfy the workload's
-/// intent. The error message names the requested and observed CCD counts so
-/// diagnostics on a constrained host (a single CCD due to taskset) are
-/// unambiguous.
-///
-/// required Minimum CCD count the calling TU needs.
-/// The CCD count when the probe succeeds.
-[[nodiscard]] inline std::size_t requireMultipleCcds(std::size_t required = 2U) {
+// Runtime probe used by cross-CCD bench TUs from their registrar. Throws
+// std::runtime_error when the host has fewer CCDs than |required|; the
+// registrar catches and skips registerWorkload.
+[[nodiscard]] inline std::size_t
+requireMultipleCcds(std::size_t required = 2U) {
   const std::size_t observed = enumerateCcds().size();
   if (observed < required) {
-    throw std::runtime_error{"cross-CCD bench requires at least " + std::to_string(required) +
-                             " CCDs; host reports " + std::to_string(observed)};
+    throw std::runtime_error{"cross-CCD bench requires at least " +
+                             std::to_string(required) + " CCDs; host reports " +
+                             std::to_string(observed)};
   }
   return observed;
 }
 
-/// Per-CCD `ThreadPool` arena adapter backed by `PoolGroup::global()`.
-///
-/// Construction does not own any pools; the underlying arenas live for the
-/// process lifetime as part of the singleton. The harness only forwards
-/// accessors so a bench TU can dispatch into a specific CCD's arena and the
-/// caller can verify each arena's `kind() == PoolKind::Arena`.
-///
-/// The class deliberately exposes no copy: a moved-from harness would carry a
-/// stale arena-count view. Bench TUs should construct one harness per cell.
+// Per-CCD ThreadPool arena adapter that owns a scoped PoolGroup. The
+// underlying arenas are constructed when the harness is constructed and
+// joined when it goes out of scope; bench TUs should construct exactly one
+// harness per cell so the arena workers do not outlive the cell.
 class MultiArenaHarness {
 public:
-  /// Acquire a view over the process-wide `PoolGroup::global()` arenas.
-  ///
-  /// The constructor verifies that every arena reports `PoolKind::Arena` and,
-  /// when |requiredCcds| is non-zero, that the singleton enumerated at least
-  /// that many CCDs. The latter check is structural protection against the
-  /// construction-order trap where `PoolGroup::global()` is first touched
-  /// AFTER the producer has been pinned to a single-CCD subset of cores; the
-  /// topology probe would then collapse to one synthetic CCD and the harness
-  /// would silently report same-CCD numbers under cross-CCD row labels.
-  /// Cross-CCD bench TUs MUST pass `requiredCcds=2U` (or higher) so the
-  /// constructor catches the dynamic-affinity case alongside the static
-  /// `requireMultipleCcds(...)` check at registrar time.
-  ///
-  /// Both failure modes throw `std::runtime_error`; the registrar's catch
-  /// path turns the exception into a `SKIPPED:` row in the bench output.
-  ///
-  /// requiredCcds Minimum CCD count the calling TU needs (0 disables
-  ///                     the topology check).
-  explicit MultiArenaHarness(std::size_t requiredCcds = 0U) : m_group(&citor::PoolGroup::global()) {
-    if (requiredCcds > 0U && m_group->ccdCount() < requiredCcds) {
-      throw std::runtime_error{"MultiArenaHarness constructed with degraded topology; constructed "
-                               "under affinity mask that collapsed PoolGroup::global() to fewer "
-                               "CCDs than required (need " +
-                               std::to_string(requiredCcds) + ", got " +
-                               std::to_string(m_group->ccdCount()) +
-                               "). Construct harness BEFORE pinning the producer thread."};
+  // Construct the per-cell PoolGroup. Verifies every arena reports
+  // PoolKind::Arena and, when |requiredCcds| > 0, that the topology probe
+  // enumerated at least that many CCDs. The latter guards the
+  // construction-order trap: if the harness is constructed AFTER the
+  // producer is pinned to a single-CCD subset, the probe collapses to one
+  // synthetic CCD and the harness would silently report same-CCD numbers.
+  // Cross-CCD bench TUs MUST pass requiredCcds >= 2.
+  explicit MultiArenaHarness(std::size_t requiredCcds = 0U) {
+    if (requiredCcds > 0U && m_group.ccdCount() < requiredCcds) {
+      throw std::runtime_error{
+          "MultiArenaHarness constructed with degraded topology; constructed "
+          "under affinity mask that collapsed PoolGroup to fewer CCDs than "
+          "required (need " +
+          std::to_string(requiredCcds) + ", got " +
+          std::to_string(m_group.ccdCount()) +
+          "). Construct harness BEFORE pinning the producer thread."};
     }
-    for (std::size_t ccd = 0; ccd < m_group->ccdCount(); ++ccd) {
-      if (m_group->arena(ccd).kind() != citor::PoolKind::Arena) {
-        throw std::runtime_error{"MultiArenaHarness: arena " + std::to_string(ccd) +
-                                 " kind() != PoolKind::Arena; PoolGroup state is corrupt"};
+    for (std::size_t ccd = 0; ccd < m_group.ccdCount(); ++ccd) {
+      if (m_group.arena(ccd).kind() != citor::PoolKind::Arena) {
+        throw std::runtime_error{
+            "MultiArenaHarness: arena " + std::to_string(ccd) +
+            " kind() != PoolKind::Arena; PoolGroup state is corrupt"};
       }
     }
   }
@@ -105,27 +84,27 @@ public:
   MultiArenaHarness &operator=(MultiArenaHarness &&) = delete;
   ~MultiArenaHarness() = default;
 
-  /// Number of arenas owned by the underlying `PoolGroup::global()`.
-  [[nodiscard]] std::size_t arenaCount() const noexcept { return m_group->ccdCount(); }
+  // Number of arenas owned by this harness's PoolGroup.
+  [[nodiscard]] std::size_t arenaCount() const noexcept {
+    return m_group.ccdCount();
+  }
 
-  /// Access the per-CCD arena at |ccd|.
-  ///
-  /// ccd Zero-based CCD index; must be `< arenaCount()`.
-  /// Reference to the arena's `ThreadPool`.
-  [[nodiscard]] citor::ThreadPool &arena(std::size_t ccd) noexcept { return m_group->arena(ccd); }
+  // Access the per-CCD arena at |ccd|; |ccd| must be < arenaCount().
+  [[nodiscard]] citor::ThreadPool &arena(std::size_t ccd) noexcept {
+    return m_group.arena(ccd);
+  }
 
-  /// Total participants summed across every arena. Used by bench TUs
-  ///        that want to size workloads relative to the cross-CCD aggregate.
+  // Total participants summed across every arena.
   [[nodiscard]] std::size_t totalParticipants() const noexcept {
     std::size_t sum = 0;
-    for (std::size_t ccd = 0; ccd < m_group->ccdCount(); ++ccd) {
-      sum += m_group->arena(ccd).participants();
+    for (std::size_t ccd = 0; ccd < m_group.ccdCount(); ++ccd) {
+      sum += m_group.arena(ccd).participants();
     }
     return sum;
   }
 
 private:
-  citor::PoolGroup *m_group;
+  citor::PoolGroup m_group;
 };
 
 } // namespace citor::bench

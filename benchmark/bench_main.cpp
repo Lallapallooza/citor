@@ -1,10 +1,10 @@
 // Driver entry point for the parallel pool comparative bench.
 //
 // The bench harness measures dispatch latency for each competitor pool on the
-// same workload using `__rdtscp`-bracketed cycle stamps. The harness deliberately
-// does not use `chrono::steady_clock` for the cycle samples; `clock_gettime` is
-// used only by the calibration step that converts cycle deltas to wall-clock
-// nanoseconds.
+// same workload using `__rdtscp`-bracketed cycle stamps. The harness
+// deliberately does not use `chrono::steady_clock` for the cycle samples;
+// `clock_gettime` is used only by the calibration step that converts cycle
+// deltas to wall-clock nanoseconds.
 //
 // The driver is minimal by design: each workload TU registers its name and
 // runner, the driver iterates them in registration order, prints the resulting
@@ -23,6 +23,10 @@
 #include <thread>
 #include <vector>
 
+#if defined(__linux__) && defined(__GLIBC__)
+#include <malloc.h>
+#endif
+
 #include "bench_export.h"
 #include "bench_format.h"
 #include "bench_registry.h"
@@ -35,8 +39,8 @@
 
 namespace {
 
-/// Print a one-shot calibration banner so users can see what the cycles-per-ns
-/// constant ended up at on their host. Useful when debugging suspect numbers.
+// Print a one-shot calibration banner so users can see what the cycles-per-ns
+// constant ended up at on their host.
 void printCalibrationBanner(const citor::bench::CyclesPerNanosecond &cal) {
   std::cout << "TSC calibration: " << cal.value << " cycles/ns ("
             << (cal.value > 0.0 ? 1000.0 / cal.value : 0.0) << " ns/cycle)\n";
@@ -44,25 +48,18 @@ void printCalibrationBanner(const citor::bench::CyclesPerNanosecond &cal) {
 
 struct CliOptions {
   std::vector<std::string_view> filters;
-  /// Engine-name substring filters. When non-empty, only rows whose `name`
-  /// contains at least one of the substrings are rendered. Measurement still
-  /// runs for every pool (the filter applies at format time so existing
-  /// per-bench `buildTable` code stays untouched).
+  // Engine-name substring filters. When non-empty, only rows whose name
+  // contains at least one substring are rendered; measurement still runs.
   std::vector<std::string_view> engineFilters;
   bool listOnly = false;
-  /// When set, populate `BenchRow::tailNs` (p25/p50/p99) on workloads that
-  /// support it and emit the three extra columns. Default OFF so existing
-  /// awk parsers downstream of the bench see the pre-tail format unchanged
-  /// (they key off `$2` ns/op and `$NF` row name; the tail columns sit
-  /// between `err%` and the row name).
+  // When set, populate BenchRow::tailNs (p25/p50/p99) and emit three extra
+  // columns. Default OFF keeps the pre-tail layout for downstream parsers.
   bool withTailPercentiles = false;
-  /// When non-empty, the bench writes a single JSON document with full
-  /// per-iteration raw samples and provenance to this path at the end of the
-  /// run. The terminal table output is unchanged. Populated from the
-  /// `--export <path>` flag, falling back to the `CITOR_BENCH_EXPORT` env var.
+  // When non-empty, the bench writes a single JSON document with raw samples
+  // and provenance to this path. From --export, fallback CITOR_BENCH_EXPORT.
   std::string exportPath;
-  /// Pretty-print the JSON export (default: compact). Set via the
-  /// `CITOR_BENCH_EXPORT_PRETTY=1` env var.
+  // Pretty-print the JSON export (default compact). Set via
+  // CITOR_BENCH_EXPORT_PRETTY=1.
   bool exportPretty = false;
 };
 
@@ -71,25 +68,35 @@ void printUsage(std::ostream &out) {
       << "                      [--with-tail-percentiles] [--export PATH]\n"
       << "       parallel_bench SUBSTR\n"
       << '\n'
-      << "  --filter SUBSTR          Run only workloads whose name contains SUBSTR.\n"
+      << "  --filter SUBSTR          Run only workloads whose name contains "
+         "SUBSTR.\n"
       << "                           May be repeated; matches are OR-ed.\n"
-      << "  --engine SUBSTR          Only render rows whose engine/pool name contains\n"
-      << "                           SUBSTR. May be repeated; matches are OR-ed.\n"
-      << "                           Substring of the row's display name (e.g.\n"
-      << "                           `citor`, `oneTBB`, `[Static]`). Measurement\n"
+      << "  --engine SUBSTR          Only render rows whose engine/pool name "
+         "contains\n"
+      << "                           SUBSTR. May be repeated; matches are "
+         "OR-ed.\n"
+      << "                           Substring of the row's display name "
+         "(e.g.\n"
+      << "                           `citor`, `oneTBB`, `[Static]`). "
+         "Measurement\n"
       << "                           still runs for every pool.\n"
       << "  --list                   Print matching workload names and exit.\n"
-      << "  --with-tail-percentiles  Populate p25/p50/p99 columns on workloads that\n"
-      << "                           build an `hdr_histogram` over their cycle\n"
+      << "  --with-tail-percentiles  Populate p25/p50/p99 columns on workloads "
+         "that\n"
+      << "                           build an `hdr_histogram` over their "
+         "cycle\n"
       << "                           samples. OFF by default; downstream awk\n"
       << "                           parsers see the pre-tail column layout.\n"
-      << "  --export PATH            Write a single JSON document to PATH carrying\n"
-      << "                           per-iteration raw samples and full provenance\n"
-      << "                           (host, kernel, governor, TSC freq, citor commit,\n"
-      << "                           checklist gates, etc.). Schema: see\n"
-      << "                           the bench-export documentation. Falls back to\n"
+      << "  --export PATH            Write a single JSON document to PATH "
+         "carrying\n"
+      << "                           per-iteration raw samples and full "
+         "provenance\n"
+      << "                           (host, kernel, governor, TSC freq, citor "
+         "commit,\n"
+      << "                           checklist gates, etc.). Falls back to\n"
       << "                           CITOR_BENCH_EXPORT=PATH env var. Set\n"
-      << "                           CITOR_BENCH_EXPORT_PRETTY=1 for indented JSON.\n";
+      << "                           CITOR_BENCH_EXPORT_PRETTY=1 for indented "
+         "JSON.\n";
 }
 
 bool parseArgs(int argc, char **argv, CliOptions &opts) {
@@ -119,7 +126,8 @@ bool parseArgs(int argc, char **argv, CliOptions &opts) {
     if (arg.starts_with(kFilterPrefix)) {
       const std::string_view value = arg.substr(kFilterPrefix.size());
       if (value.empty()) {
-        std::cerr << "parallel_bench: --filter requires a non-empty substring\n";
+        std::cerr
+            << "parallel_bench: --filter requires a non-empty substring\n";
         return false;
       }
       opts.filters.push_back(value);
@@ -155,7 +163,8 @@ bool parseArgs(int argc, char **argv, CliOptions &opts) {
     if (arg.starts_with(kEnginePrefix)) {
       const std::string_view value = arg.substr(kEnginePrefix.size());
       if (value.empty()) {
-        std::cerr << "parallel_bench: --engine requires a non-empty substring\n";
+        std::cerr
+            << "parallel_bench: --engine requires a non-empty substring\n";
         return false;
       }
       opts.engineFilters.push_back(value);
@@ -171,7 +180,8 @@ bool parseArgs(int argc, char **argv, CliOptions &opts) {
   return true;
 }
 
-bool matchesFilters(std::string_view name, const std::vector<std::string_view> &filters) {
+bool matchesFilters(std::string_view name,
+                    const std::vector<std::string_view> &filters) {
   if (filters.empty()) {
     return true;
   }
@@ -257,8 +267,7 @@ int main(int argc, char **argv) {
   // every pool's cold-cell number is comparable. Hot-path cells are not
   // affected by parking choice (workers see the next dispatch before any
   // park budget can fire). The checklist below reports the resulting
-  // blocktime so the printed value reflects the post-override state, not libomp's
-  // default.
+  // blocktime, not libomp's default.
   kmp_set_blocktime(0);
 #endif
 
@@ -267,12 +276,28 @@ int main(int argc, char **argv) {
   printChecklist(std::cout);
   std::cout << '\n';
 
-  // Inter-cell cool-off. After a 100 ms-budget cell that pegged 16 cores, the package
-  // accumulates thermal load and the next cell starts in a different operating point.
-  // Sleeping briefly between cells lets thermals, THP defrag scans, and any pending IRQ
-  // migrations settle so successive cells start from a comparable baseline. The cost is
-  // additive wall time, not bench correctness.
+  // Inter-cell cool-off. After a 100 ms-budget cell that pegged 16 cores, the
+  // package accumulates thermal load and the next cell starts in a different
+  // operating point. Sleeping briefly between cells lets thermals, THP defrag
+  // scans, and any pending IRQ migrations settle so successive cells start from
+  // a comparable baseline. The cost is additive wall time, not bench
+  // correctness.
   constexpr auto kInterCellCoolOff = std::chrono::milliseconds(100);
+  // Inter-cell heap reset. Recursive-task workloads (skynet, strassen DaC,
+  // cilksort) churn millions of small allocations and frees per cell; over a
+  // 90+ cell sweep the glibc arena state fragments enough that successive
+  // recursive-task cells appear 5-10x slower than they do in isolation
+  // (citor's parallelFor/Reduce don't allocate per-task, so they are not
+  // affected; same with oneTBB's task arenas; the symmetry breaks for
+  // libfork, dispenso fork-join, and citor's `forkJoin` recursive children
+  // which DO allocate). `malloc_trim(0)` returns released-but-not-yet-freed
+  // arenas to the OS so each cell starts from a comparable allocator state.
+  // No-op on non-glibc hosts (musl, etc.).
+  const auto resetAllocatorState = []() {
+#if defined(__linux__) && defined(__GLIBC__)
+    (void)malloc_trim(0);
+#endif
+  };
 
   bool anyRan = false;
   bool firstCell = true;
@@ -286,6 +311,7 @@ int main(int argc, char **argv) {
       continue;
     }
     if (!firstCell) {
+      resetAllocatorState();
       std::this_thread::sleep_for(kInterCellCoolOff);
     }
     firstCell = false;
@@ -295,9 +321,10 @@ int main(int argc, char **argv) {
       BenchTable table = reg.run(cal);
       // Drop sentinel rows that were skipped before measurement via
       // `engineEnabled` (populated from `--engine`).
-      table.rows.erase(std::remove_if(table.rows.begin(), table.rows.end(),
-                                      [](const BenchRow &row) { return row.skipped; }),
-                       table.rows.end());
+      table.rows.erase(
+          std::remove_if(table.rows.begin(), table.rows.end(),
+                         [](const BenchRow &row) { return row.skipped; }),
+          table.rows.end());
       if (!table.rows.empty()) {
         formatTable(table, /*baselineName=*/"citor::ThreadPool", std::cout);
       }
@@ -305,19 +332,24 @@ int main(int argc, char **argv) {
         exportTables.push_back(std::move(table));
       }
     } catch (const std::exception &ex) {
-      // A workload may legitimately refuse to run (e.g. when the host's CPU affinity
-      // mask collapses the pool to a single participant and the workload would otherwise
-      // measure the inline-fallback path). Print a sentinel row so the misconfiguration
-      // is visible instead of faking a passing number, and continue with the next workload.
-      std::cout << "workload: " << reg.name << " SKIPPED: " << ex.what() << '\n';
+      // A workload may legitimately refuse to run (e.g. when the host's CPU
+      // affinity mask collapses the pool to a single participant and the
+      // workload would otherwise measure the inline-fallback path). Print a
+      // sentinel row so the misconfiguration is visible instead of faking a
+      // passing number, and continue with the next workload.
+      std::cout << "workload: " << reg.name << " SKIPPED: " << ex.what()
+                << '\n';
     }
     const std::uint64_t rssAfterKb = readPeakRssKb();
     const RusageSample rusageAfter = readRusage();
     const std::uint64_t userDeltaUs = rusageAfter.userUs - rusageBefore.userUs;
-    const std::uint64_t systemDeltaUs = rusageAfter.systemUs - rusageBefore.systemUs;
+    const std::uint64_t systemDeltaUs =
+        rusageAfter.systemUs - rusageBefore.systemUs;
     std::cout << "[METRICS] " << reg.name << "  peak_rss_kb=" << rssAfterKb
-              << " (delta=" << (rssAfterKb >= rssBeforeKb ? rssAfterKb - rssBeforeKb : 0U)
-              << ")  user_us=" << userDeltaUs << "  system_us=" << systemDeltaUs << '\n';
+              << " (delta="
+              << (rssAfterKb >= rssBeforeKb ? rssAfterKb - rssBeforeKb : 0U)
+              << ")  user_us=" << userDeltaUs << "  system_us=" << systemDeltaUs
+              << '\n';
     std::cout << '\n';
     std::cout.flush();
     anyRan = true;
@@ -329,9 +361,11 @@ int main(int argc, char **argv) {
   }
   if (!opts.exportPath.empty()) {
     const ExportContext context = probeContext(cal);
-    const bool ok = writeJsonExport(opts.exportPath, context, exportTables, opts.exportPretty);
+    const bool ok = writeJsonExport(opts.exportPath, context, exportTables,
+                                    opts.exportPretty);
     if (!ok) {
-      std::cerr << "parallel_bench: --export to '" << opts.exportPath << "' failed\n";
+      std::cerr << "parallel_bench: --export to '" << opts.exportPath
+                << "' failed\n";
       return EXIT_FAILURE;
     }
     std::cout << "[EXPORT] wrote " << opts.exportPath << '\n';
