@@ -1,0 +1,85 @@
+# Conan 2.x recipe for citor. Header-library -- no compile, no copy_source.
+#
+# Usage (local recipe, ahead of ConanCenter acceptance):
+#   conan create packaging/conan --version 0.1.0
+#   conan install --requires=citor/0.1.0 --remote=mylocal
+#
+# After ConanCenter acceptance, consumers can do `conan install
+# --requires=citor/0.1.0` against the default ConanCenter remote with no
+# extra setup.
+
+from conan import ConanFile
+from conan.tools.files import copy
+from conan.tools.layout import basic_layout
+import os
+
+
+class CitorConan(ConanFile):
+    name = "citor"
+    version = "0.1.0"
+    license = "MIT"
+    homepage = "https://github.com/Lallapallooza/citor"
+    url = "https://github.com/Lallapallooza/citor"
+    description = (
+        "Header-only C++20 thread pool tuned for sub-microsecond dispatch "
+        "on Linux x86_64 + AVX2."
+    )
+    topics = ("thread-pool", "concurrency", "cpp20", "header-only", "work-stealing")
+
+    settings = "os", "arch", "compiler"
+    package_type = "header-library"
+    no_copy_source = True
+
+    exports_sources = (
+        "include/*",
+        "single_include/*",
+        "CMakeLists.txt",
+        "cmake/*",
+        "LICENSE",
+    )
+
+    def validate(self):
+        if str(self.settings.os) != "Linux":
+            self.output.warning(
+                "citor is currently Linux-only; building on "
+                f"{self.settings.os} is unsupported."
+            )
+        if str(self.settings.arch) not in ("x86_64",):
+            self.output.warning(
+                "citor is currently x86_64-only; building on "
+                f"{self.settings.arch} is unsupported."
+            )
+
+    def package_id(self):
+        # Header-only: package id is independent of compiler/build_type.
+        self.info.clear()
+
+    def layout(self):
+        basic_layout(self, src_folder=".")
+
+    def package(self):
+        copy(
+            self,
+            "*.h",
+            os.path.join(self.source_folder, "include"),
+            os.path.join(self.package_folder, "include"),
+        )
+        copy(
+            self,
+            "*.hpp",
+            os.path.join(self.source_folder, "single_include"),
+            os.path.join(self.package_folder, "include"),
+        )
+        copy(
+            self,
+            "LICENSE",
+            self.source_folder,
+            os.path.join(self.package_folder, "licenses"),
+        )
+
+    def package_info(self):
+        self.cpp_info.set_property("cmake_file_name", "citor")
+        self.cpp_info.set_property("cmake_target_name", "citor::citor")
+        self.cpp_info.bindirs = []
+        self.cpp_info.libdirs = []
+        self.cpp_info.system_libs = ["pthread"]
