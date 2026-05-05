@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+title: "citor: a header-only C++20 thread pool for sub-microsecond dispatch"
+message: "If you use this software, please cite it using the metadata below."
+type: software
+authors:
+  - family-names: Shutov
+    given-names: Vitalii
+    email: vitaly.shutov1@gmail.com
+repository-code: "https://github.com/Lallapallooza/citor"
+license: MIT
+version: 0.1.0
+keywords:
+  - thread-pool
+  - concurrency
+  - cpp20
+  - header-only
+  - work-stealing
+  - parallelism
+abstract: >-
+  citor is a header-only C++20 thread pool tuned for sub-microsecond dispatch
+  on Linux x86_64 + AVX2. It exposes eight cooperating primitives
+  (parallelFor, parallelReduce, parallelScan, parallelChain, runPlex,
+  bulkForQueries, forkJoin, submitDetached) over decentralized per-slot
+  done-epoch barriers, Chase-Lev work-stealing deques, and a per-CCD arena
+  group guarded by a TLS participant token.
