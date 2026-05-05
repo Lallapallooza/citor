@@ -180,16 +180,14 @@ if(Leopard_ADDED AND NOT TARGET leopard_threadpool)
         file(READ ${_leopard_tcc} _leopard_tcc_contents)
         # Idempotent guard: only patch when our marker is absent.
         string(
-            FIND
-            "${_leopard_tcc_contents}"
+            FIND "${_leopard_tcc_contents}"
             "// citor-patched-inline"
             _leopard_marker_pos
         )
         if(_leopard_marker_pos EQUAL -1)
             string(
-                REGEX
-                REPLACE
-                "(\nvoid Conditioner::|\nThreadPool::|\nvoid ThreadPool::|\nbool ThreadPool::|\n[A-Za-z_:]+::size_type ThreadPool::)"
+                REGEX REPLACE
+                    "(\nvoid Conditioner::|\nThreadPool::|\nvoid ThreadPool::|\nbool ThreadPool::|\n[A-Za-z_:]+::size_type ThreadPool::)"
                 "\ninline\\1"
                 _leopard_tcc_contents
                 "${_leopard_tcc_contents}"
@@ -471,10 +469,7 @@ if(TARGET tmc_headers)
     # tmc compiles at C++20 (project default). Skip linting on the impl TU --
     # the TMC_IMPL definitions pull in the full implementation surface and
     # tidy diagnostics on third-party headers are not actionable here.
-    set_source_files_properties(
-        tmc_runners.cpp
-        PROPERTIES SKIP_LINTING ON
-    )
+    set_source_files_properties(tmc_runners.cpp PROPERTIES SKIP_LINTING ON)
 endif()
 
 if(UNIX AND NOT APPLE)
