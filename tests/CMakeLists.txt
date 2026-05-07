@@ -3,26 +3,83 @@ include(GoogleTest)
 
 set(_citor_tests
     bench_format_test
+    bulk_for_queries_cancellation_test
+    bulk_for_queries_cpo_test
     bulk_for_queries_exception_test
-    bulk_for_queries_test
-    chase_lev_deque_test
-    fork_join_test
-    notebook_alloc_test
-    parallel_chain_test
-    parallel_for_test
+    bulk_for_queries_partition_test
+    cancellation_deadline_test
+    cancellation_exception_test
+    cancellation_token_test
+    chase_lev_deque_concurrent_test
+    chase_lev_deque_growth_test
+    chase_lev_deque_single_thread_test
+    fork_join_affinity_test
+    fork_join_cancellation_test
+    fork_join_determinism_test
+    fork_join_edge_test
+    fork_join_errors_test
+    fork_join_spawn_sync_test
+    function_ref_test
+    hints_test
+    parallel_chain_barriers_test
+    parallel_chain_basic_test
+    parallel_chain_cancellation_test
+    parallel_chain_cpo_test
+    parallel_chain_exceptions_test
+    parallel_chain_inline_fallback_test
+    parallel_chain_partition_test
+    parallel_for_blocking_test
+    parallel_for_cancellation_test
+    parallel_for_cpo_test
+    parallel_for_exceptions_test
+    parallel_for_inline_fallback_test
+    parallel_for_nesting_test
+    parallel_for_partition_test
+    parallel_for_reuse_test
     parallel_for_tsan_test
     parallel_pool_deadlock_fuzz_test
-    parallel_pool_tsan_stress_test
+    parallel_pool_tsan_stress_dispatch_serialization_test
+    parallel_pool_tsan_stress_primitives_test
+    parallel_reduce_basic_test
+    parallel_reduce_cancellation_test
+    parallel_reduce_cpo_test
     parallel_reduce_cross_run_determinism_test
+    parallel_reduce_determinism_main_test
     parallel_reduce_determinism_test
-    parallel_reduce_test
-    parallel_scan_test
-    pool_group_test
+    parallel_reduce_exceptions_test
+    parallel_scan_cancellation_test
+    parallel_scan_correctness_test
+    parallel_scan_edge_cases_test
+    parallel_scan_exception_safety_test
+    pool_group_arena_test
+    pool_group_construction_test
+    pool_group_reentrancy_test
+    pool_group_topology_test
     priority_queue_test
-    run_plex_test
-    submit_detached_test
-    thread_pool_lifecycle_test
-    value_types_test
+    regression_auto_pin_test
+    regression_cross_pool_dispatch_test
+    regression_descriptor_reuse_test
+    regression_detached_lifecycle_test
+    regression_fast_range_test
+    regression_inline_fallback_test
+    regression_partition_overflow_test
+    regression_runtime_hints_test
+    regression_tls_context_test
+    run_plex_basic_test
+    run_plex_cancellation_test
+    run_plex_cpo_test
+    run_plex_exceptions_test
+    run_plex_inline_fallback_test
+    run_plex_partition_test
+    submit_detached_dispatch_test
+    submit_detached_lifecycle_test
+    thread_pool_auto_pin_test
+    thread_pool_construction_test
+    thread_pool_counters_test
+    thread_pool_idle_test
+    thread_pool_low_latency_scope_test
+    thread_pool_tls_test
+    thread_pool_tsan_stress_test
 )
 
 foreach(_t IN LISTS _citor_tests)
