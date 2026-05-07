@@ -1,9 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
-#include <chrono>
 #include <cstddef>
-#include <cstdint>
 #include <random>
 #include <thread>
 #include <unordered_set>
@@ -13,38 +11,9 @@
 
 using citor::detail::ChaseLevDeque;
 
-// Owner-side push and pop must return values in LIFO order. The pop sequence on a single thread
-// matches the reverse of the push sequence; the test pins the deque's invariant for the
-// uncontended case.
-TEST(ChaseLevDeque, PushPopLifo) {
-  ChaseLevDeque<int> dq;
-  for (int i = 0; i < 100; ++i) {
-    dq.push(i);
-  }
-  std::vector<int> got;
-  while (true) {
-    auto v = dq.pop();
-    if (!v) {
-      break;
-    }
-    got.push_back(*v);
-  }
-  ASSERT_EQ(got.size(), 100U);
-  for (int i = 0; i < 100; ++i) {
-    EXPECT_EQ(got[static_cast<std::size_t>(i)], 99 - i);
-  }
-}
-
-// pop on an empty deque returns std::nullopt without UB.
-TEST(ChaseLevDeque, PopEmpty) {
-  ChaseLevDeque<int> dq;
-  EXPECT_FALSE(dq.pop().has_value());
-  EXPECT_TRUE(dq.empty());
-  EXPECT_EQ(dq.size(), 0U);
-}
-
 // steal from another thread observes the value the owner pushed earlier.
-TEST(ChaseLevDeque, StealFromOtherThread) {
+TEST(ChaseLevDequeConcurrent,
+     StealerThreadObservesEveryPushedValueExactlyOnce) {
   ChaseLevDeque<int> dq;
   for (int i = 0; i < 100; ++i) {
     dq.push(i);
@@ -79,36 +48,12 @@ TEST(ChaseLevDeque, StealFromOtherThread) {
   }
 }
 
-// Resizing under sustained push: pushing more elements than the initial capacity triggers grow,
-// and every element survives both grow and a subsequent drain via pop.
-TEST(ChaseLevDeque, FullCausesGrowAndPreservesElements) {
-  ChaseLevDeque<int> dq(/*initialCapacity=*/16);
-  EXPECT_GE(dq.capacity(), 16U);
-  const std::size_t initialCap = dq.capacity();
-  // Push past initial capacity to force at least one grow.
-  const int kPushed = static_cast<int>(initialCap * 4);
-  for (int i = 0; i < kPushed; ++i) {
-    dq.push(i);
-  }
-  EXPECT_GT(dq.capacity(), initialCap);
-  std::vector<int> got;
-  while (true) {
-    auto v = dq.pop();
-    if (!v) {
-      break;
-    }
-    got.push_back(*v);
-  }
-  EXPECT_EQ(got.size(), static_cast<std::size_t>(kPushed));
-  for (int i = 0; i < kPushed; ++i) {
-    EXPECT_EQ(got[static_cast<std::size_t>(i)], kPushed - 1 - i);
-  }
-}
-
-// Concurrent push (owner) + steal (multiple stealers): every pushed value is consumed exactly
-// once between pop and the stealers' tally. TSan-clean by construction; the test fails if the
-// deque drops or duplicates values under contention.
-TEST(ChaseLevDeque, ConcurrentPushStealFuzz) {
+// Concurrent push (owner) + steal (multiple stealers): every pushed value is
+// consumed exactly once between pop and the stealers' tally. TSan-clean by
+// construction; the test fails if the deque drops or duplicates values under
+// contention.
+TEST(ChaseLevDequeConcurrent,
+     ConsumesEveryValueExactlyOnceUnderOwnerPushAndMultipleStealers) {
   ChaseLevDeque<int> dq(/*initialCapacity=*/64);
   constexpr int kPerThread = 5000;
   constexpr int kStealers = 4;
@@ -138,7 +83,8 @@ TEST(ChaseLevDeque, ConcurrentPushStealFuzz) {
   std::mt19937_64 rng(0xC0FFEEULL);
   for (int i = 0; i < kPerThread; ++i) {
     dq.push(i);
-    // Occasional owner pop to mix with the steal stream and exercise the last-item race.
+    // Occasional owner pop to mix with the steal stream and exercise the
+    // last-item race.
     if ((rng() & 0x7U) == 0U) {
       auto v = dq.pop();
       if (v) {
@@ -147,7 +93,8 @@ TEST(ChaseLevDeque, ConcurrentPushStealFuzz) {
       }
     }
   }
-  // Drain the remainder from the owner side until empty (race against stealers).
+  // Drain the remainder from the owner side until empty (race against
+  // stealers).
   while (true) {
     auto v = dq.pop();
     if (!v) {
