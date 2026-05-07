@@ -1,149 +1,170 @@
 # citor
 
-Header-only C++20 thread pool tuned for sub-microsecond dispatch on modern x86_64 (Linux + AVX2). Eight cooperating primitives, decentralized barriers, Chase-Lev work-stealing, per-CCD arenas.
+> Header-only C++20 thread pool tuned for sub-microsecond dispatch on Linux x86_64 + AVX2. Eight cooperating primitives, decentralized per-slot done-epoch barriers, Chase-Lev work-stealing, per-CCD arenas. MIT.
 
-The name is from Latin *cito* ("swiftly, quickly").
+[![ci](https://github.com/Lallapallooza/citor/actions/workflows/ci.yml/badge.svg)](https://github.com/Lallapallooza/citor/actions/workflows/ci.yml)
+[![nightly](https://github.com/Lallapallooza/citor/actions/workflows/nightly.yml/badge.svg)](https://github.com/Lallapallooza/citor/actions/workflows/nightly.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 
-## Status
+The name comes from Latin *cito* -- "swiftly, quickly".
 
-Pre-release. Linux x86_64 + AVX2 only. The public API is stable enough to consume; perf numbers and bench harness are still being hardened. macOS / Windows / AArch64 ports are not in scope yet.
+---
 
-## Quickstart
+## Table of contents
+
+- [Contract](#contract)
+- [Install](#install)
+- [Hello world](#hello-world)
+- [Performance](#performance)
+- [Primitives](#primitives)
+  - [`parallelFor`](#parallelfor)
+  - [`parallelReduce`](#parallelreduce)
+  - [`parallelScan`](#parallelscan)
+  - [`parallelChain`](#parallelchain)
+  - [`runPlex`](#runplex)
+  - [`bulkForQueries`](#bulkforqueries)
+  - [`forkJoin`](#forkjoin)
+  - [`submitDetached`](#submitdetached)
+- [Hints reference](#hints-reference)
+- [PoolGroup and per-CCD arenas](#poolgroup-and-per-ccd-arenas)
+- [Cancellation](#cancellation)
+- [Build options](#build-options)
+- [Supported compilers](#supported-compilers)
+- [Non-goals](#non-goals)
+- [Reproducing benchmarks](#reproducing-benchmarks)
+- [License](#license)
+
+---
+
+## Contract
+
+- **Header-only.** Drop `single_include/citor.hpp` into a project, or `find_package(citor)` after `cmake --install`. Linked C++ runtime + `pthread` are the only runtime dependencies.
+- **Linux x86_64 + AVX2 only.** macOS / Windows / AArch64 are explicitly out of scope today; the pool relies on `futex`, sysfs CCD enumeration, and `__rdtsc` directly.
+- **Closure lifetime >= call lifetime.** Every primitive captures the body via a 16-byte non-owning `FunctionRef`. The closure must outlive the synchronous call. Captures in the producer's stack frame satisfy this naturally.
+- **Producer participates as slot 0.** Single-participant pools fall through to the inline path and never wake a worker. `n` participants means `n - 1` background pthreads plus the calling thread.
+- **`PoolGroup::global()` is one arena per CCD.** Cross-arena synchronous calls fall through to inline on the caller (a TLS participant token enforces the rule); they never deadlock.
+- **Nested parallelism is safe everywhere.** `parallelFor` and `forkJoin` have first-class same-pool nested paths (children land on the calling worker's deque). The other synchronous primitives detect same-pool reentrancy and fall through to inline-on-caller -- safe, but the inner call is not parallel.
+
+## Install
+
+Pick whichever path matches your project's existing dependency story.
+
+### 1. Drop-in single header (zero build system)
 
 ```bash
-cmake -S . -B build -G Ninja
-cmake --build build -j
-ctest --test-dir build --output-on-failure
+curl -L -o third_party/citor.hpp \
+  https://raw.githubusercontent.com/Lallapallooza/citor/v0.1.0/single_include/citor.hpp
 ```
 
-Consume from your own CMake project:
+```cpp
+#include "third_party/citor.hpp"
+```
+
+Compile with `-std=c++20 -pthread` and (recommended) `-mavx2 -mfma -DCITOR_USE_AVX2`. Works with any C++20 compiler.
+
+### 2. CMake `FetchContent`
 
 ```cmake
-include(cmake/CPM.cmake)
-CPMAddPackage(NAME citor SOURCE_DIR /path/to/citor)
+include(FetchContent)
+FetchContent_Declare(citor
+  GIT_REPOSITORY https://github.com/Lallapallooza/citor.git
+  GIT_TAG        v0.1.0)
+FetchContent_MakeAvailable(citor)
+
 target_link_libraries(my_app PRIVATE citor::citor)
 ```
 
-## Primitives
+### 3. CPM
 
-| Primitive | Use it for |
-|---|---|
-| `parallelFor` | Bulk fan-out over a uniform range. The headline path. |
-| `parallelReduce` | Deterministic reduction (FixedBlockOrder / KahanCompensated). |
-| `parallelScan` | Two-pass Blelloch inclusive prefix scan. |
-| `parallelChain` | Multi-stage pipeline; one descriptor publish covers every stage. |
-| `runPlex<NPhases>` | Persistent-worker phased loop (sub-microsecond per phase). |
-| `bulkForQueries` | Many-query workload (spatial-index lookups, batched gets). |
-| `forkJoin` | Recursive divide-and-conquer over a Chase-Lev deque. |
-| `submitDetached` | Fire-and-forget; pool waits for in-flight tasks at destruction. |
-
-`PoolGroup::global()` lazily constructs one `ThreadPool` arena per CCD; the participant token enforces "no cross-arena synchronous call" so the model stays deadlock-free without locks.
-
-## Hint API
-
-Every primitive is templated on a `HintsT` policy type. Inherit `citor::HintsDefaults` and override only the fields that differ:
-
-```cpp
-struct MyHints : citor::HintsDefaults {
-  static constexpr citor::Affinity affinity  = citor::Affinity::SplitCcd;
-  static constexpr double          minTaskUs = 25.0;
-};
+```cmake
+CPMAddPackage("gh:Lallapallooza/citor#v0.1.0")
+target_link_libraries(my_app PRIVATE citor::citor)
 ```
 
-A small library of named presets ships in `<citor/hints.h>` alongside `HintsDefaults`: `LatencyHints`, `BulkHints`, `KahanReduceHints`, `FixedBlockReduceHints`, `CcdLocalForkJoinHints`. Chains use `ChainHintsDefaults` the same way.
+### 4. vcpkg (overlay port until upstream merge)
 
-## Benchmarks
+```bash
+vcpkg install citor \
+  --overlay-ports=path/to/citor/packaging/vcpkg/ports
+```
 
-`benchmark/parallel_bench` measures dispatch latency and per-primitive throughput against ten peer pools (twelve in the recursive cells) across the eight primitives' workload shapes. The harness is opt-in via `CITOR_BUILD_BENCHMARK` so a tests-only configure stays fast; first configure with the bench on fetches every peer pool via CPM and takes a few minutes on a cold cache.
+The overlay flag goes away once the microsoft/vcpkg PR is accepted; until then, point vcpkg at this repo's `packaging/vcpkg/ports/` directory.
 
-### Run
+### 5. Conan (Conan 2.x)
+
+```bash
+conan create packaging/conan --version 0.1.0
+conan install --requires=citor/0.1.0 --build=missing
+```
+
+The recipe is `package_type = "header-library"`, `no_copy_source = True`, `package_id().clear()`.
+
+### 6. System install (`cmake --install`)
+
+```bash
+cmake -S . -B build -DCITOR_BUILD_TESTS=OFF -DCITOR_BUILD_BENCHMARK=OFF
+cmake --build build
+sudo cmake --install build
+```
+
+```cmake
+find_package(citor 0.1 REQUIRED)
+target_link_libraries(my_app PRIVATE citor::citor)
+```
+
+## Hello world
+
+```cpp
+#include <citor/cpos/parallel_for.h>
+#include <citor/hints.h>
+#include <citor/thread_pool.h>
+
+#include <vector>
+
+int main() {
+  citor::ThreadPool pool(/*participants=*/8);
+
+  std::vector<int> data(1'000'000, 1);
+
+  pool.parallelFor<citor::HintsDefaults>(
+      0, data.size(),
+      [&](std::size_t lo, std::size_t hi) {
+        for (std::size_t i = lo; i < hi; ++i) {
+          data[i] *= 2;
+        }
+      });
+}
+```
+
+The producer is slot 0. With one participant the call collapses to an inline loop and never wakes a worker. The body lives on the producer's stack for the call.
+
+## Performance
+
+Per-family geomean speedups vs eight competitor pools (BS, dp, task, riften, oneTBB, Taskflow, Eigen, OpenMP) on the citor bench harness. Charts are regenerated by `scripts/plot.py`; the underlying numbers live in `bench_out/<host>/<sha>/results.json`.
+
+| family             | chart                                                        |
+|--------------------|--------------------------------------------------------------|
+| `parallelFor`      | [parallelFor_geomean.svg](docs/bench/parallelFor_geomean.svg) |
+| `parallelReduce`   | [parallelReduce_geomean.svg](docs/bench/parallelReduce_geomean.svg) |
+| `forkJoin`         | [forkJoin_geomean.svg](docs/bench/forkJoin_geomean.svg)       |
+| `parallelChain`    | [parallelChain_geomean.svg](docs/bench/parallelChain_geomean.svg) |
+| `runPlex`          | [runPlex_geomean.svg](docs/bench/runPlex_geomean.svg)         |
+
+Per-workload scatters and the "where citor loses" table live in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md). The README does not embed numbers -- they age out on the next compiler / microarchitecture bump and the commit message that introduces the change is the right home for them.
+
+Reproduce on your hardware:
 
 ```bash
 cmake -S . -B build -G Ninja -DCITOR_BUILD_BENCHMARK=ON
 cmake --build build --target parallel_bench -j
-taskset -c 0-15 ./build/benchmark/parallel_bench
+
+scripts/quickbench.sh                                # ~90s smoke check
+scripts/run_bench.sh --out bench_out/$(hostname -s)  # full sweep, ~2-3h
+scripts/plot.py bench_out/.../results.json --out docs/bench
 ```
 
-`taskset` matters: pinning to a single CPU collapses the topology probe to one allowed core and the dispatch path falls through to the inline fallback. Run unpinned or with a mask wide enough to host every participant the cells request.
+The bench scripts read host invariants (governor, turbo, SMT, ASLR, taskset mask) into a `host.json` next to the results so two runs from different machines stay comparable. See [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for the full methodology and host-disclosure block.
 
-### Pools compared
+---
 
-| Pool | Notes |
-|---|---|
-| `BS::thread_pool` / `dp::thread_pool` / `task_thread_pool` / `riften::Thiefpool` | Small modern pools |
-| `oneTBB` / `Taskflow` / `Eigen::ThreadPool` | Established frameworks |
-| `OpenMP` | Pragma-based baseline |
-| `Leopard::ThreadPool` / `dispenso::ThreadPool` | Newer experimental pools |
-| `libfork` / `TooManyCooks` | Coroutine recursive schedulers; appear in fork-join cells only |
-
-Recursive fork-join cells gate eligibility through `RecursiveForkJoinTraits`: pools that block on `std::future::get()` (BS, dp, task, riften) deadlock on nested spawn and are excluded from those cells. Every other comparison runs the full pool list.
-
-### Workload taxonomy
-
-| Primitive | Cells |
-|---|---|
-| `parallelFor` | empty fan-out, body granularity sweep, cold dispatch, Pareto body, plain matmul, balance sweep (citor only), affinity sweep (citor only), cross-CCD placement (citor only) |
-| `parallelReduce` | sum-int64, plus-double with Kahan, Pareto body |
-| `parallelChain` | pipelined chain, dynamic global chain, Pareto-body 7-stage chain |
-| `parallelScan` | inclusive scan over int64 + double |
-| `runPlex` | stencil sweep, heat-equation iterative |
-| `bulkForQueries` | Q x N x dim search |
-| `forkJoin` | nqueens, skynet, fib, UTS T1, Strassen, cilksort, matmul DAC, knapsack-cancel, mixed detached + sync, cross-CCD PoolGroup |
-| `submitDetached` | covered by mixed detached + sync |
-| differential | byte-equality across pools (correctness-as-bench) |
-
-### Methodology
-
-- **Cycle stamps** via `__rdtscp` + `lfence` bracketed around the timed body. The sampler converts cycles to ns through a startup TSC calibration.
-- **Time-budget sampling**: each cell runs for a fixed wall-clock budget (default 250 ms) instead of a fixed iteration count. Cells with widely varying body times produce comparable sample sizes; the sampler stabilises the median internally.
-- **Headline column is p25** (lower-quartile). p25 is more stable than mean under bimodal cells where one mode dominates the mean.
-- **err% column** is the relative MAD over a centred window around the median; an outlier on either tail does not blow up the column.
-- **One invocation per A/B**: the sampler covers repetition internally; outer repetition only adds host-jitter noise.
-
-`--with-tail-percentiles` adds p25/p50/p99 columns backed by HdrHistogram with bootstrap CI for cells that opt in.
-
-### JSON export and plotting
-
-```bash
-./build/benchmark/parallel_bench --export results.json
-python3 -m tools.plot_bench results.json --out charts/
-```
-
-`--export` writes one record per `(workload, pool, rep)` plus a host-state provenance block (governor, boost, SMT, ASLR, TSan, libomp blocktime). Cycles are emitted as decimal strings (the JSON-no-int64 trap); ns are native numbers. `tools/plot_bench` renders per-workload bar figures plus a multi-workload overview heatmap.
-
-### Two-pool BLAS coexistence
-
-`parallel_bench_two_pool` hosts cells where citor and a competitor pool share the process. Standard `parallel_bench` cannot host two pools without the second pool's worker fleet poisoning the first cell's TLS state and idle-park accounting; the two-pool binary keeps these cells isolated and runs them with a 300 ms inter-cell cool-off so the prior cell's workers park before the next measures.
-
-### Reproducing
-
-For a fair run, disable ASLR, set the performance governor, and disable boost:
-
-```bash
-echo 0    | sudo tee /proc/sys/kernel/randomize_va_space
-echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
-echo 0    | sudo tee /sys/devices/system/cpu/cpufreq/boost   # AMD
-# echo 1  | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo  # Intel
-```
-
-Only one `parallel_bench` process at a time per host: concurrent runs poison each other's TLS state. The full sweep takes 40-50 minutes wall-clock on a 16-core CCD; use `--filter SUBSTR` to scope to one workload family while iterating.
-
-### Caveats
-
-- Linux x86_64 + AVX2 only. Numbers from any other platform are out of scope.
-- The bench harness fetches every peer pool via CPM at configure time and pins each to a commit hash for reproducibility.
-- Continuous-bench services that report retired-instruction counts are the wrong physics for a thread pool. Dispatch latency is futex park/unpark and cache coherency on done-epoch counters, not uops retired.
-
-## Build options
-
-| Option | Default | Effect |
-|---|---|---|
-| `CITOR_BUILD_TESTS` | ON top-level | Build the GTest suite. |
-| `CITOR_BUILD_BENCHMARK` | ON top-level | Build the comparative bench. |
-| `CITOR_USE_AVX2` | ON | Compile with `-mavx2 -mfma`, define `CITOR_USE_AVX2`. |
-| `CITOR_BUILD_WITH_SANITIZER` | OFF | Build with `-fsanitize=thread`. |
-| `CITOR_ENABLE_CLANG_TIDY` | ON top-level | Run clang-tidy in the build. |
-
-## License
-
-MIT. See `LICENSE`.
