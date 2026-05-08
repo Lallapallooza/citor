@@ -26,12 +26,20 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <future>
 #include <numeric>
 #include <string>
 #include <utility>
 #include <vector>
 
+#ifdef CITOR_BENCH_HAS_TBB
+#include <oneapi/tbb/task_arena.h>
+#include <oneapi/tbb/task_group.h>
+#endif
+
+#include "citor/always_assert.h"
 #include "citor/hints.h"
 #include "citor/thread_pool.h"
 
@@ -58,13 +66,18 @@ constexpr std::size_t kWarmupIterations = 30;
 constexpr std::size_t kN = 1'000'000;
 
 /// Generic measurement loop sampling per-call wall time. Each bracket runs
-/// `kBatchSize` scans and reports the average per-scan ns.
-template <class RunFn>
-[[nodiscard]] BenchRow measureLoop(const char *name, const CyclesPerNanosecond &cal, RunFn run) {
+/// `kBatchSize` scans and reports the average per-scan ns. After each batch
+/// (outside the timed window) `validate` is invoked so silent miscomputation
+/// in the scan output aborts the bench instead of reporting fast ns/op on
+/// garbage output.
+template <class RunFn, class ValidateFn>
+[[nodiscard]] BenchRow measureLoop(const char *name, const CyclesPerNanosecond &cal, RunFn run,
+                                   ValidateFn validate) {
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     for (std::size_t k = 0; k < kBatchSize; ++k) {
       run();
     }
+    validate(name);
   }
   std::vector<double> samples;
   samples.reserve(kIterations);
@@ -75,8 +88,36 @@ template <class RunFn>
     }
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal) / static_cast<double>(kBatchSize));
+    validate(name);
   }
   return finalizeRow(name, samples);
+}
+
+/// Print a one-line diagnostic to stderr identifying the first index where the
+/// produced inclusive scan diverges from the sequential reference.
+inline void reportScanMismatch(const char *name, const std::vector<std::int64_t> &reference,
+                               const std::vector<std::int64_t> &actual) {
+  for (std::size_t i = 0; i < actual.size(); ++i) {
+    if (actual[i] != reference[i]) {
+      std::fprintf(stderr, "[%s] scan mismatch at index %zu: expected=%lld actual=%lld\n", name, i,
+                   static_cast<long long>(reference[i]), static_cast<long long>(actual[i]));
+      return;
+    }
+  }
+  std::fprintf(stderr, "[%s] scan size mismatch: expected=%zu actual=%zu\n", name, reference.size(),
+               actual.size());
+}
+
+/// Sequential inclusive prefix-sum reference. `out[i] = sum_{k=0..i} in[k]`.
+[[nodiscard]] inline std::vector<std::int64_t>
+computeInclusiveReference(const std::vector<std::int64_t> &in) {
+  std::vector<std::int64_t> out(in.size(), 0);
+  std::int64_t running = 0;
+  for (std::size_t i = 0; i < in.size(); ++i) {
+    running += in[i];
+    out[i] = running;
+  }
+  return out;
 }
 
 /// Build a deterministic input vector + zero-filled output buffer.
@@ -98,6 +139,13 @@ struct ScanData {
 [[nodiscard]] BenchRow measureNewPool(std::size_t participants, const CyclesPerNanosecond &cal) {
   ThreadPool pool(participants);
   ScanData d = buildData();
+  const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
+  auto validate = [&](const char *poolName) {
+    if (d.out != reference) [[unlikely]] {
+      reportScanMismatch(poolName, reference, d.out);
+    }
+    CITOR_ALWAYS_ASSERT(d.out == reference);
+  };
   // The native pool calls the body twice per slot; we rely on a per-slot pass
   // counter (incremented by the body on entry) to distinguish the two passes.
   // The first `participants` invocations are Pass 1 (compute partial sums);
@@ -126,7 +174,7 @@ struct ScanData {
     totalCalls.store(0, std::memory_order_release);
     (void)pool.parallelScan<citor::HintsDefaults>(kN, std::int64_t{0}, body,
                                                   std::plus<std::int64_t>{});
-  });
+  }, validate);
   // Touch out so the optimizer cannot drop the writes.
   (void)d.out[kN - 1];
   return row;
@@ -173,6 +221,13 @@ inline std::pair<std::size_t, std::size_t> blockRange(std::size_t blockIdx,
 [[nodiscard]] BenchRow measureBsPool(std::size_t participants, const CyclesPerNanosecond &cal) {
   BS::light_thread_pool pool(participants);
   ScanData d = buildData();
+  const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
+  auto validate = [&](const char *poolName) {
+    if (d.out != reference) [[unlikely]] {
+      reportScanMismatch(poolName, reference, d.out);
+    }
+    CITOR_ALWAYS_ASSERT(d.out == reference);
+  };
   BenchRow row = measureLoop("BS::thread_pool::scan_two_wave", cal, [&] {
     runTwoWaveScan(d, participants, [&](std::size_t blocks, auto blockBody) {
       // BS's `submit_blocks(0, n, fn, num_blocks)` invokes `fn(blockLo, blockHi)`,
@@ -187,7 +242,7 @@ inline std::pair<std::size_t, std::size_t> blockRange(std::size_t blockIdx,
               blocks)
           .wait();
     });
-  });
+  }, validate);
   (void)d.out[kN - 1];
   return row;
 }
@@ -197,6 +252,13 @@ template <class Pool, class EnqueueFn>
                                          const CyclesPerNanosecond &cal, Pool &pool,
                                          EnqueueFn enqueue) {
   ScanData d = buildData();
+  const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
+  auto validate = [&](const char *poolName) {
+    if (d.out != reference) [[unlikely]] {
+      reportScanMismatch(poolName, reference, d.out);
+    }
+    CITOR_ALWAYS_ASSERT(d.out == reference);
+  };
   BenchRow row = measureLoop(name, cal, [&] {
     runTwoWaveScan(d, participants, [&](std::size_t blocks, auto blockBody) {
       std::vector<std::future<void>> futs;
@@ -212,7 +274,7 @@ template <class Pool, class EnqueueFn>
         f.get();
       }
     });
-  });
+  }, validate);
   (void)d.out[kN - 1];
   return row;
 }
@@ -240,6 +302,13 @@ template <class Pool, class EnqueueFn>
 [[nodiscard]] BenchRow measureTbbPool(std::size_t participants, const CyclesPerNanosecond &cal) {
   auto arena = CompetitorTraits<::tbb::task_arena>::make(participants);
   ScanData d = buildData();
+  const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
+  auto validate = [&](const char *poolName) {
+    if (d.out != reference) [[unlikely]] {
+      reportScanMismatch(poolName, reference, d.out);
+    }
+    CITOR_ALWAYS_ASSERT(d.out == reference);
+  };
   // `tbb::parallel_scan`'s body has a different shape (`Body::operator()` plus
   // `reverse_join` + `assign`), but the trait wraps it under `parallelScan`
   // taking a single `body` callable that the bench calls per-block. Since
@@ -247,17 +316,24 @@ template <class Pool, class EnqueueFn>
   // two-wave shape using `parallel_for` inside the arena. oneTBB's native
   // `parallel_scan` is documented to be more efficient on cache-friendly data,
   // but for the bench's apples-to-apples shape this is the honest comparison.
+  // One TBB task per block via task_group: the trait's `parallelFor` uses
+  // `auto_partitioner` which slices finer than `blockSize`, causing pass 2
+  // to reset `running` per sub-block and lose the cross-chunk prefix carry.
   BenchRow row = measureLoop("oneTBB::scan_two_wave", cal, [&] {
     runTwoWaveScan(d, participants, [&](std::size_t blocks, auto blockBody) {
-      const std::size_t blockSize = (kN + blocks - 1) / blocks;
-      CompetitorTraits<::tbb::task_arena>::parallelFor(
-          *arena, std::size_t{0}, kN, blockSize,
-          [&blockBody, blockSize](std::size_t lo, std::size_t hi) {
-            const std::size_t blockIdx = lo / blockSize;
-            blockBody(blockIdx, lo, hi);
-          });
+      arena->execute([&] {
+        ::tbb::task_group tg;
+        for (std::size_t b = 0; b < blocks; ++b) {
+          const auto [lo, hi] = blockRange(b, blocks);
+          if (lo == hi) {
+            continue;
+          }
+          tg.run([b, lo, hi, &blockBody] { blockBody(b, lo, hi); });
+        }
+        tg.wait();
+      });
     });
-  });
+  }, validate);
   (void)d.out[kN - 1];
   return row;
 }
@@ -268,17 +344,27 @@ template <class Pool, class EnqueueFn>
                                            const CyclesPerNanosecond &cal) {
   auto exec = CompetitorTraits<::tf::Executor>::make(participants);
   ScanData d = buildData();
+  const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
+  auto validate = [&](const char *poolName) {
+    if (d.out != reference) [[unlikely]] {
+      reportScanMismatch(poolName, reference, d.out);
+    }
+    CITOR_ALWAYS_ASSERT(d.out == reference);
+  };
+  // and aliases multiple sub-blocks onto the same `blockIdx`.
   BenchRow row = measureLoop("Taskflow::scan_two_wave", cal, [&] {
     runTwoWaveScan(d, participants, [&](std::size_t blocks, auto blockBody) {
-      const std::size_t blockSize = (kN + blocks - 1) / blocks;
-      CompetitorTraits<::tf::Executor>::parallelFor(
-          *exec, std::size_t{0}, kN, blocks,
-          [&blockBody, blockSize](std::size_t lo, std::size_t hi) {
-            const std::size_t blockIdx = lo / blockSize;
-            blockBody(blockIdx, lo, hi);
-          });
+      ::tf::Taskflow flow;
+      for (std::size_t b = 0; b < blocks; ++b) {
+        const auto [lo, hi] = blockRange(b, blocks);
+        if (lo == hi) {
+          continue;
+        }
+        flow.emplace([b, lo, hi, &blockBody] { blockBody(b, lo, hi); });
+      }
+      exec->run(flow).wait();
     });
-  });
+  }, validate);
   (void)d.out[kN - 1];
   return row;
 }
@@ -288,17 +374,30 @@ template <class Pool, class EnqueueFn>
 [[nodiscard]] BenchRow measureEigenPool(std::size_t participants, const CyclesPerNanosecond &cal) {
   auto pool = CompetitorTraits<::Eigen::ThreadPool>::make(participants);
   ScanData d = buildData();
+  const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
+  auto validate = [&](const char *poolName) {
+    if (d.out != reference) [[unlikely]] {
+      reportScanMismatch(poolName, reference, d.out);
+    }
+    CITOR_ALWAYS_ASSERT(d.out == reference);
+  };
   BenchRow row = measureLoop("Eigen::ThreadPool::scan_two_wave", cal, [&] {
     runTwoWaveScan(d, participants, [&](std::size_t blocks, auto blockBody) {
-      const std::size_t blockSize = (kN + blocks - 1) / blocks;
-      CompetitorTraits<::Eigen::ThreadPool>::parallelFor(
-          *pool, std::size_t{0}, kN, blocks,
-          [&blockBody, blockSize](std::size_t lo, std::size_t hi) {
-            const std::size_t blockIdx = lo / blockSize;
-            blockBody(blockIdx, lo, hi);
-          });
+      ::Eigen::Barrier bar(static_cast<unsigned int>(blocks));
+      for (std::size_t b = 0; b < blocks; ++b) {
+        const auto [lo, hi] = blockRange(b, blocks);
+        if (lo == hi) {
+          bar.Notify();
+          continue;
+        }
+        pool->Schedule([b, lo, hi, &blockBody, &bar] {
+          blockBody(b, lo, hi);
+          bar.Notify();
+        });
+      }
+      bar.Wait();
     });
-  });
+  }, validate);
   (void)d.out[kN - 1];
   return row;
 }
@@ -309,17 +408,29 @@ template <class Pool, class EnqueueFn>
                                           const CyclesPerNanosecond &cal) {
   auto pool = CompetitorTraits<hmthrp::ThreadPool>::make(participants);
   ScanData d = buildData();
+  const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
+  auto validate = [&](const char *poolName) {
+    if (d.out != reference) [[unlikely]] {
+      reportScanMismatch(poolName, reference, d.out);
+    }
+    CITOR_ALWAYS_ASSERT(d.out == reference);
+  };
   BenchRow row = measureLoop("Leopard::scan_two_wave", cal, [&] {
     runTwoWaveScan(d, participants, [&](std::size_t blocks, auto blockBody) {
-      const std::size_t blockSize = (kN + blocks - 1) / blocks;
-      CompetitorTraits<hmthrp::ThreadPool>::parallelFor(
-          *pool, std::size_t{0}, kN, blocks,
-          [&blockBody, blockSize](std::size_t lo, std::size_t hi) {
-            const std::size_t blockIdx = lo / blockSize;
-            blockBody(blockIdx, lo, hi);
-          });
+      std::vector<std::future<void>> futs;
+      futs.reserve(blocks);
+      for (std::size_t b = 0; b < blocks; ++b) {
+        const auto [lo, hi] = blockRange(b, blocks);
+        if (lo == hi) {
+          continue;
+        }
+        futs.emplace_back(pool->dispatch(false, [b, lo, hi, &blockBody] { blockBody(b, lo, hi); }));
+      }
+      for (auto &f : futs) {
+        f.get();
+      }
     });
-  });
+  }, validate);
   (void)d.out[kN - 1];
   return row;
 }
@@ -330,17 +441,26 @@ template <class Pool, class EnqueueFn>
                                            const CyclesPerNanosecond &cal) {
   auto pool = CompetitorTraits<dispenso::ThreadPool>::make(participants);
   ScanData d = buildData();
+  const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
+  auto validate = [&](const char *poolName) {
+    if (d.out != reference) [[unlikely]] {
+      reportScanMismatch(poolName, reference, d.out);
+    }
+    CITOR_ALWAYS_ASSERT(d.out == reference);
+  };
   BenchRow row = measureLoop("dispenso::scan_two_wave", cal, [&] {
     runTwoWaveScan(d, participants, [&](std::size_t blocks, auto blockBody) {
-      const std::size_t blockSize = (kN + blocks - 1) / blocks;
-      CompetitorTraits<dispenso::ThreadPool>::parallelFor(
-          *pool, std::size_t{0}, kN, blocks,
-          [&blockBody, blockSize](std::size_t lo, std::size_t hi) {
-            const std::size_t blockIdx = lo / blockSize;
-            blockBody(blockIdx, lo, hi);
-          });
+      dispenso::TaskSet ts(*pool);
+      for (std::size_t b = 0; b < blocks; ++b) {
+        const auto [lo, hi] = blockRange(b, blocks);
+        if (lo == hi) {
+          continue;
+        }
+        ts.schedule([b, lo, hi, &blockBody] { blockBody(b, lo, hi); });
+      }
+      ts.wait();
     });
-  });
+  }, validate);
   (void)d.out[kN - 1];
   return row;
 }
@@ -349,6 +469,13 @@ template <class Pool, class EnqueueFn>
 #ifdef CITOR_BENCH_HAS_OPENMP
 [[nodiscard]] BenchRow measureOpenMpPool(std::size_t participants, const CyclesPerNanosecond &cal) {
   ScanData d = buildData();
+  const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
+  auto validate = [&](const char *poolName) {
+    if (d.out != reference) [[unlikely]] {
+      reportScanMismatch(poolName, reference, d.out);
+    }
+    CITOR_ALWAYS_ASSERT(d.out == reference);
+  };
   BenchRow row = measureLoop("OpenMP::scan_two_wave", cal, [&] {
     runTwoWaveScan(d, participants, [&](std::size_t blocks, auto blockBody) {
       const auto threads = static_cast<int>(blocks);
@@ -364,7 +491,7 @@ template <class Pool, class EnqueueFn>
         }
       }
     });
-  });
+  }, validate);
   (void)d.out[kN - 1];
   return row;
 }
