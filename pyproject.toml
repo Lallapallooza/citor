@@ -5,7 +5,12 @@ description = "Dev-side hooks and tooling for the citor C++ library."
 requires-python = ">=3.10"
 
 [dependency-groups]
-dev = ["pre-commit>=4.0", "commitizen>=4.0"]
+dev = [
+    "pre-commit>=4.0",
+    "commitizen>=4.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
 plot = ["matplotlib>=3.8", "numpy>=1.26", "pandas>=2.1", "pandas-stubs>=2.1"]
 
 [tool.commitizen]
@@ -28,3 +33,48 @@ version_files = [
     "packaging/vcpkg/ports/citor/vcpkg.json:\"version\"",
     "packaging/conan/conanfile.py:^    version",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["build*", ".cache", "single_include"]
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "N",     # pep8-naming
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "A",     # flake8-builtins
+    "C4",    # flake8-comprehensions
+    "SIM",   # flake8-simplify
+    "RET",   # flake8-return
+    "RUF",   # ruff-specific
+    "FA",    # flake8-future-annotations -- bans `from __future__ import annotations`
+    "PTH",   # flake8-use-pathlib
+    "PL",    # pylint
+    "PERF",  # perflint
+    "ERA",   # eradicate (commented-out code)
+    "TID",   # flake8-tidy-imports
+]
+ignore = [
+    "PLR0913", # too many arguments
+    "PLR2004", # magic value -- bench scripts use literal thresholds
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+exclude = ["build.*", "\\.cache", "single_include"]
+explicit_package_bases = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true

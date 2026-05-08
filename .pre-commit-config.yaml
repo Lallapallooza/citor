@@ -22,6 +22,19 @@ repos:
     hooks:
       - id: gersemi
 
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.11.2
+    hooks:
+      - id: mypy
+        additional_dependencies: []
+
   - repo: https://github.com/commitizen-tools/commitizen
     rev: v4.13.10
     hooks:
@@ -30,11 +43,11 @@ repos:
 
   - repo: local
     hooks:
-      - id: amalgamate-check
-        name: amalgamate-check
-        entry: python3 tools/amalgamate.py --check
+      - id: amalgamate-regenerate
+        name: amalgamate-regenerate
+        entry: scripts/amalgamate_hook.py
         language: system
-        files: ^(include/citor/.*\.h|tools/amalgamate\.py|single_include/citor\.hpp)$
+        files: ^(include/citor/.*\.h|tools/amalgamate\.py)$
         pass_filenames: false
 
       - id: clang-tidy

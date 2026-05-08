@@ -20,11 +20,8 @@
 #
 # Run with the repo root as CWD or pass `--repo-root` to override.
 
-from __future__ import annotations
-
 import argparse
 import datetime
-import os
 import re
 import subprocess
 import sys
@@ -32,33 +29,25 @@ from pathlib import Path
 
 REPO_ROOT_DEFAULT = Path(__file__).resolve().parent.parent
 
-# Public entry-point headers. Anything reachable through the include graph from
-# this set is pulled into the amalgamation; private detail/ headers are reached
-# transitively through the public surface.
-ENTRY_RELATIVE = [
-    "citor/version.h",
-    "citor/always_assert.h",
-    "citor/function_ref.h",
-    "citor/cancellation.h",
-    "citor/hints.h",
-    "citor/chain.h",
-    "citor/thread_pool.h",
-    "citor/pool_group.h",
-    "citor/cpos/parallel_for.h",
-    "citor/cpos/parallel_reduce.h",
-    "citor/cpos/parallel_scan.h",
-    "citor/cpos/parallel_chain.h",
-    "citor/cpos/run_plex.h",
-    "citor/cpos/bulk_for_queries.h",
-    "citor/cpos/fork_join.h",
-    "citor/cpos/submit_detached.h",
-]
+
+def discover_entry_headers(include_dir: Path) -> list[str]:
+    """Return repo-relative paths to every public entry header.
+
+    Public surface = every `.h` directly under `include/citor/` plus every
+    `.h` under `include/citor/cpos/`. The `include/citor/detail/` subtree
+    is reached transitively through the include graph and excluded here.
+    """
+    base = include_dir
+    top = sorted(p for p in (base / "citor").glob("*.h") if p.is_file())
+    cpos = sorted(p for p in (base / "citor" / "cpos").glob("*.h") if p.is_file())
+    return [str(p.relative_to(base).as_posix()) for p in top + cpos]
+
 
 # Lines starting with these patterns are dropped during the merge (system
 # includes are emitted in the prologue, project includes have already been
 # merged inline, and `#pragma once` is emitted once at the top).
 RE_PROJECT_INCLUDE = re.compile(r'^\s*#\s*include\s*"((?:citor)/[^"]+)"\s*$')
-RE_SYSTEM_INCLUDE = re.compile(r'^\s*#\s*include\s*<([^>]+)>\s*$')
+RE_SYSTEM_INCLUDE = re.compile(r"^\s*#\s*include\s*<([^>]+)>\s*$")
 RE_PRAGMA_ONCE = re.compile(r"^\s*#\s*pragma\s+once\s*$")
 
 
@@ -173,12 +162,10 @@ def render(
 
     c_headers, cxx_headers = sort_system_includes(sorted(system_set))
     if c_headers:
-        for h in c_headers:
-            parts.append(f"#include <{h}>")
+        parts.extend(f"#include <{h}>" for h in c_headers)
         parts.append("")
     if cxx_headers:
-        for h in cxx_headers:
-            parts.append(f"#include <{h}>")
+        parts.extend(f"#include <{h}>" for h in cxx_headers)
         parts.append("")
 
     for rel in order:
@@ -194,26 +181,28 @@ def render(
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--repo-root", default=str(REPO_ROOT_DEFAULT))
-    p.add_argument("--output", default=None,
-                   help="output path (default: <repo>/single_include/citor.hpp)")
-    p.add_argument("--check", action="store_true",
-                   help="exit nonzero if on-disk file differs from generated")
+    p.add_argument(
+        "--output", default=None, help="output path (default: <repo>/single_include/citor.hpp)"
+    )
+    p.add_argument(
+        "--check", action="store_true", help="exit nonzero if on-disk file differs from generated"
+    )
     args = p.parse_args()
 
     repo_root = Path(args.repo_root).resolve()
     include_dir = repo_root / "include"
-    output_path = Path(args.output) if args.output else (
-        repo_root / "single_include" / "citor.hpp"
-    )
+    output_path = Path(args.output) if args.output else (repo_root / "single_include" / "citor.hpp")
 
     visited: set[str] = set()
     order: list[str] = []
     system_set: set[str] = set()
-    for rel in ENTRY_RELATIVE:
+    for rel in discover_entry_headers(include_dir):
         dfs(rel, include_dir, visited, order, system_set)
 
     rendered = render(
-        order, include_dir, system_set,
+        order,
+        include_dir,
+        system_set,
         project_version(repo_root),
         git_sha(repo_root),
     )
@@ -234,7 +223,10 @@ def main() -> int:
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(rendered, encoding="utf-8")
-    rel_out = os.path.relpath(output_path, repo_root)
+    try:
+        rel_out = output_path.relative_to(repo_root)
+    except ValueError:
+        rel_out = output_path
     print(f"amalgamate: wrote {rel_out} ({output_path.stat().st_size} bytes)")
     return 0
 

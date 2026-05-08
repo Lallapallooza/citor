@@ -8,10 +8,11 @@
 # --requires=citor/0.1.0` against the default ConanCenter remote with no
 # extra setup.
 
+from pathlib import Path
+
 from conan import ConanFile
 from conan.tools.files import copy
 from conan.tools.layout import basic_layout
-import os
 
 
 class CitorConan(ConanFile):
@@ -21,8 +22,7 @@ class CitorConan(ConanFile):
     homepage = "https://github.com/Lallapallooza/citor"
     url = "https://github.com/Lallapallooza/citor"
     description = (
-        "Header-only C++20 thread pool tuned for sub-microsecond dispatch "
-        "on Linux x86_64 + AVX2."
+        "Header-only C++20 thread pool tuned for sub-microsecond dispatch on Linux x86_64 + AVX2."
     )
     topics = ("thread-pool", "concurrency", "cpp20", "header-only", "work-stealing")
 
@@ -41,13 +41,11 @@ class CitorConan(ConanFile):
     def validate(self):
         if str(self.settings.os) != "Linux":
             self.output.warning(
-                "citor is currently Linux-only; building on "
-                f"{self.settings.os} is unsupported."
+                f"citor is currently Linux-only; building on {self.settings.os} is unsupported."
             )
         if str(self.settings.arch) not in ("x86_64",):
             self.output.warning(
-                "citor is currently x86_64-only; building on "
-                f"{self.settings.arch} is unsupported."
+                f"citor is currently x86_64-only; building on {self.settings.arch} is unsupported."
             )
 
     def package_id(self):
@@ -58,24 +56,11 @@ class CitorConan(ConanFile):
         basic_layout(self, src_folder=".")
 
     def package(self):
-        copy(
-            self,
-            "*.h",
-            os.path.join(self.source_folder, "include"),
-            os.path.join(self.package_folder, "include"),
-        )
-        copy(
-            self,
-            "*.hpp",
-            os.path.join(self.source_folder, "single_include"),
-            os.path.join(self.package_folder, "include"),
-        )
-        copy(
-            self,
-            "LICENSE",
-            self.source_folder,
-            os.path.join(self.package_folder, "licenses"),
-        )
+        src = Path(self.source_folder)
+        pkg = Path(self.package_folder)
+        copy(self, "*.h", str(src / "include"), str(pkg / "include"))
+        copy(self, "*.hpp", str(src / "single_include"), str(pkg / "include"))
+        copy(self, "LICENSE", str(src), str(pkg / "licenses"))
 
     def package_info(self):
         self.cpp_info.set_property("cmake_file_name", "citor")

@@ -10,7 +10,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-CLANG_TIDY_NAMES = ("clang-tidy", "clang-tidy-21", "clang-tidy-20", "clang-tidy-19", "clang-tidy-18")
+CLANG_TIDY_NAMES = (
+    "clang-tidy",
+    "clang-tidy-21",
+    "clang-tidy-20",
+    "clang-tidy-19",
+    "clang-tidy-18",
+)
 
 
 def find_clang_tidy() -> str:
@@ -18,7 +24,8 @@ def find_clang_tidy() -> str:
         path = shutil.which(name)
         if path:
             return path
-    sys.stderr.write("clang-tidy not found on PATH; install one of: " + ", ".join(CLANG_TIDY_NAMES) + "\n")
+    names = ", ".join(CLANG_TIDY_NAMES)
+    sys.stderr.write(f"clang-tidy not found on PATH; install one of: {names}\n")
     sys.exit(2)
 
 
@@ -39,7 +46,8 @@ def main(argv: list[str]) -> int:
     db_dir = find_compile_db()
     if db_dir is None:
         sys.stderr.write(
-            "clang-tidy: no build/compile_commands.json found; configure once with `cmake -S . -B build` to enable the pre-commit check\n"
+            "clang-tidy: no build/compile_commands.json found; "
+            "configure once with `cmake -S . -B build` to enable the pre-commit check\n"
         )
         return 0
     failures = 0
