@@ -71,7 +71,8 @@ constexpr std::size_t kWarmupIterations = 5;
 constexpr std::size_t kPhases = 30;
 constexpr double kBodyNs = 5'000.0;
 
-inline void spinForNs(double targetNs, const CyclesPerNanosecond &cal) noexcept {
+inline void spinForNs(double targetNs,
+                      const CyclesPerNanosecond &cal) noexcept {
   if (targetNs <= 0.0) {
     return;
   }
@@ -79,13 +80,13 @@ inline void spinForNs(double targetNs, const CyclesPerNanosecond &cal) noexcept 
       cal.value > 0.0 ? static_cast<std::uint64_t>(targetNs * cal.value) : 0ULL;
   const std::uint64_t start = readCyclesStart();
   while ((readCyclesEnd() - start) < cycles) {
-    // Tight spin; empty body.
+    // Tight spin; intentional empty body.
   }
 }
 
 /// Closed-form expected final-phase checksum across slots.
-[[nodiscard]] constexpr std::int64_t expectedFinalChecksum(std::size_t participants,
-                                                           std::size_t nPhases) noexcept {
+[[nodiscard]] constexpr std::int64_t
+expectedFinalChecksum(std::size_t participants, std::size_t nPhases) noexcept {
   const auto p = static_cast<std::int64_t>(participants);
   const auto nph = static_cast<std::int64_t>(nPhases);
   // sum_{slot=0..P-1} slot = P*(P-1)/2
@@ -94,15 +95,18 @@ inline void spinForNs(double targetNs, const CyclesPerNanosecond &cal) noexcept 
   return (p * (p - 1) / 2) + (p * (nph - 1) * nph / 2);
 }
 
-/// Per-phase per-slot value: slot + sum_{k=0..phase} k = slot + phase*(phase+1)/2.
-/// The body computes this iteratively from the previous phase's value:
+/// Per-phase per-slot value: slot + sum_{k=0..phase} k = slot +
+/// phase*(phase+1)/2. The body computes this iteratively from the previous
+/// phase's value:
 ///   v(phase, slot) = v(phase-1, slot) + phase
-[[nodiscard]] inline std::int64_t advance(std::int64_t prevValue, std::size_t phase) noexcept {
+[[nodiscard]] inline std::int64_t advance(std::int64_t prevValue,
+                                          std::size_t phase) noexcept {
   return prevValue + static_cast<std::int64_t>(phase);
 }
 
 template <class RunFn>
-[[nodiscard]] BenchRow measureLoop(const char *name, const CyclesPerNanosecond &cal, RunFn run,
+[[nodiscard]] BenchRow measureLoop(const char *name,
+                                   const CyclesPerNanosecond &cal, RunFn run,
                                    std::int64_t referenceTotal) {
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     const std::int64_t v = run();
@@ -124,13 +128,14 @@ template <class RunFn>
 // citor pool -- native runPlex
 // =============================================================================
 
-[[nodiscard]] BenchRow measureCitor(std::size_t participants, std::int64_t referenceTotal,
+[[nodiscard]] BenchRow measureCitor(std::size_t participants,
+                                    std::int64_t referenceTotal,
                                     const CyclesPerNanosecond &cal) {
   ThreadPool pool(participants);
   // Per-slot scratch: holds the running "previous phase" value for that slot.
   std::vector<std::int64_t> slotState(participants, 0);
-  auto phaseFn = [&slotState, &cal](std::size_t phaseIdx, std::uint32_t slot, std::size_t /*lo*/,
-                                    std::size_t /*hi*/, void * /*tlsArena*/) {
+  auto phaseFn = [&slotState, &cal](std::size_t phaseIdx, std::uint32_t slot,
+                                    std::size_t /*lo*/, std::size_t /*hi*/) {
     spinForNs(kBodyNs, cal);
     slotState[slot] = advance(slotState[slot], phaseIdx);
   };
@@ -140,7 +145,8 @@ template <class RunFn>
         for (std::size_t s = 0; s < participants; ++s) {
           slotState[s] = static_cast<std::int64_t>(s);
         }
-        pool.runPlex<citor::HintsDefaults>(kPhases, /*n=*/participants, phaseFn);
+        pool.runPlex<citor::HintsDefaults>(kPhases, /*n=*/participants,
+                                           phaseFn);
         std::int64_t total = 0;
         for (const std::int64_t v : slotState) {
           total += v;
@@ -156,7 +162,8 @@ template <class RunFn>
 // =============================================================================
 
 #ifdef CITOR_BENCH_HAS_TBB
-[[nodiscard]] BenchRow measureTbb(std::size_t participants, std::int64_t referenceTotal,
+[[nodiscard]] BenchRow measureTbb(std::size_t participants,
+                                  std::int64_t referenceTotal,
                                   const CyclesPerNanosecond &cal) {
   auto arena = CompetitorTraits<::tbb::task_arena>::make(participants);
   std::vector<std::int64_t> slotState(participants, 0);
@@ -187,7 +194,8 @@ template <class RunFn>
 #endif
 
 #ifdef CITOR_BENCH_HAS_TASKFLOW
-[[nodiscard]] BenchRow measureTaskflow(std::size_t participants, std::int64_t referenceTotal,
+[[nodiscard]] BenchRow measureTaskflow(std::size_t participants,
+                                       std::int64_t referenceTotal,
                                        const CyclesPerNanosecond &cal) {
   auto exec = CompetitorTraits<::tf::Executor>::make(participants);
   std::vector<std::int64_t> slotState(participants, 0);
@@ -218,7 +226,8 @@ template <class RunFn>
 #endif
 
 #ifdef CITOR_BENCH_HAS_EIGEN_THREADPOOL
-[[nodiscard]] BenchRow measureEigen(std::size_t participants, std::int64_t referenceTotal,
+[[nodiscard]] BenchRow measureEigen(std::size_t participants,
+                                    std::int64_t referenceTotal,
                                     const CyclesPerNanosecond &cal) {
   auto pool = CompetitorTraits<::Eigen::ThreadPool>::make(participants);
   std::vector<std::int64_t> slotState(participants, 0);
@@ -249,7 +258,8 @@ template <class RunFn>
 #endif
 
 #ifdef CITOR_BENCH_HAS_LEOPARD
-[[nodiscard]] BenchRow measureLeopard(std::size_t participants, std::int64_t referenceTotal,
+[[nodiscard]] BenchRow measureLeopard(std::size_t participants,
+                                      std::int64_t referenceTotal,
                                       const CyclesPerNanosecond &cal) {
   auto pool = CompetitorTraits<hmthrp::ThreadPool>::make(participants);
   std::vector<std::int64_t> slotState(participants, 0);
@@ -280,7 +290,8 @@ template <class RunFn>
 #endif
 
 #ifdef CITOR_BENCH_HAS_DISPENSO
-[[nodiscard]] BenchRow measureDispenso(std::size_t participants, std::int64_t referenceTotal,
+[[nodiscard]] BenchRow measureDispenso(std::size_t participants,
+                                       std::int64_t referenceTotal,
                                        const CyclesPerNanosecond &cal) {
   auto pool = CompetitorTraits<dispenso::ThreadPool>::make(participants);
   std::vector<std::int64_t> slotState(participants, 0);
@@ -311,7 +322,8 @@ template <class RunFn>
 #endif
 
 #ifdef CITOR_BENCH_HAS_OPENMP
-[[nodiscard]] BenchRow measureOpenMp(std::size_t participants, std::int64_t referenceTotal,
+[[nodiscard]] BenchRow measureOpenMp(std::size_t participants,
+                                     std::int64_t referenceTotal,
                                      const CyclesPerNanosecond &cal) {
   std::vector<std::int64_t> slotState(participants, 0);
   const auto threads = static_cast<int>(participants);
@@ -345,7 +357,8 @@ template <class RunFn>
 // =============================================================================
 
 template <class PoolT>
-[[nodiscard]] BenchRow measureFutureChain(const char *name, std::size_t participants,
+[[nodiscard]] BenchRow measureFutureChain(const char *name,
+                                          std::size_t participants,
                                           std::int64_t referenceTotal,
                                           const CyclesPerNanosecond &cal) {
   using Traits = CompetitorTraits<PoolT>;
@@ -359,7 +372,8 @@ template <class PoolT>
         }
         Traits::parallelChain(
             *pool, std::size_t{0}, participants, participants, kPhases,
-            [&slotState, &cal](std::size_t phase, std::size_t lo, std::size_t hi) {
+            [&slotState, &cal](std::size_t phase, std::size_t lo,
+                               std::size_t hi) {
               for (std::size_t i = lo; i < hi; ++i) {
                 spinForNs(kBodyNs, cal);
                 slotState[i] = advance(slotState[i], phase);
@@ -382,16 +396,17 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
                       const CyclesPerNanosecond &cal) {
   BenchTable table;
   table.workload = std::string{"runplex_stencil_"} + suffix;
-  const std::int64_t referenceTotal = expectedFinalChecksum(participants, kPhases);
+  const std::int64_t referenceTotal =
+      expectedFinalChecksum(participants, kPhases);
   table.rows.push_back(measureCitor(participants, referenceTotal, cal));
   table.rows.push_back(measureFutureChain<BS::light_thread_pool>(
       "BS::thread_pool[chainAdapter]", participants, referenceTotal, cal));
-  table.rows.push_back(measureFutureChain<dp::thread_pool<>>("dp::thread_pool[chainAdapter]",
-                                                             participants, referenceTotal, cal));
+  table.rows.push_back(measureFutureChain<dp::thread_pool<>>(
+      "dp::thread_pool[chainAdapter]", participants, referenceTotal, cal));
   table.rows.push_back(measureFutureChain<::task_thread_pool::task_thread_pool>(
       "task_thread_pool[chainAdapter]", participants, referenceTotal, cal));
-  table.rows.push_back(measureFutureChain<riften::Thiefpool>("riften::Thiefpool[chainAdapter]",
-                                                             participants, referenceTotal, cal));
+  table.rows.push_back(measureFutureChain<riften::Thiefpool>(
+      "riften::Thiefpool[chainAdapter]", participants, referenceTotal, cal));
 #ifdef CITOR_BENCH_HAS_TBB
   table.rows.push_back(measureTbb(participants, referenceTotal, cal));
 #endif
@@ -423,8 +438,10 @@ BenchTable runStencilJ16(const CyclesPerNanosecond &cal) {
 
 struct StencilRegistrar {
   StencilRegistrar() {
-    registerWorkload({.name = "runplex_stencil_j8_30phases_5us", .run = &runStencilJ8});
-    registerWorkload({.name = "runplex_stencil_j16_30phases_5us", .run = &runStencilJ16});
+    registerWorkload(
+        {.name = "runplex_stencil_j8_30phases_5us", .run = &runStencilJ8});
+    registerWorkload(
+        {.name = "runplex_stencil_j16_30phases_5us", .run = &runStencilJ16});
   }
 };
 
