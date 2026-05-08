@@ -366,8 +366,9 @@ template <class RunFn>
   return measureLoop(
       "Leopard::reduce_two_wave", cal,
       [&] {
-        // Direct dispatch (not Traits::parallelFor) so partials sizing matches block count
-        // breaks `partials[blockIdx]` when callers expect 1:1 block-to-partial mapping.
+        // Direct dispatch (not Traits::parallelFor) so the kernel's per-block result lands at
+        // the matching `partials[b]`. Bypassing the trait decouples the shim from the trait's
+        // block sizing.
         const std::size_t blocks = participants;
         std::vector<std::int64_t> partials(blocks, 0);
         const std::size_t span = kN;

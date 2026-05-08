@@ -427,8 +427,8 @@ template <class T, class Kernel>
 template <class T, class Kernel>
 [[nodiscard]] T runEigenTwoWave(::Eigen::ThreadPool &pool, const std::vector<T> &in,
                                 std::size_t blocks, Kernel kernel) {
-  // its block count internally; routing through it would alias multiple sub-blocks
-  // onto the same `partials[blockIdx]` and silently overwrite (off-by-half).
+  // One Eigen Schedule per partial slot via Barrier. Direct dispatch decouples
+  // the shim from `Traits::parallelFor`'s block sizing.
   std::vector<T> partials(blocks, T{0});
   const std::size_t blockSize = (kN + blocks - 1) / blocks;
   ::Eigen::Barrier bar(static_cast<unsigned int>(blocks));
@@ -480,7 +480,8 @@ template <class T, class Kernel>
 [[nodiscard]] T runLeopardTwoWave(hmthrp::ThreadPool &pool, const std::vector<T> &in,
                                   std::size_t blocks, Kernel kernel) {
   // Direct dispatch -- one block per partial -- so the kernel's per-block result lands at the
-  // balance and would map two trait-blocks to the same partial slot.
+  // matching `partials[b]`. Bypassing `Traits::parallelFor` decouples the shim from the trait's
+  // block sizing.
   std::vector<T> partials(blocks, T{0});
   const std::size_t blockSize = (kN + blocks - 1) / blocks;
   std::vector<std::future<void>> futures;

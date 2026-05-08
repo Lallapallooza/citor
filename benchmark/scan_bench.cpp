@@ -351,7 +351,8 @@ template <class Pool, class EnqueueFn>
     }
     CITOR_ALWAYS_ASSERT(d.out == reference);
   };
-  // and aliases multiple sub-blocks onto the same `blockIdx`.
+  // One Taskflow task per block. Direct emplace keeps the two-wave layout in
+  // lockstep with `participants`-sized `partials` / `excl` arrays.
   BenchRow row = measureLoop("Taskflow::scan_two_wave", cal, [&] {
     runTwoWaveScan(d, participants, [&](std::size_t blocks, auto blockBody) {
       ::tf::Taskflow flow;
@@ -381,6 +382,8 @@ template <class Pool, class EnqueueFn>
     }
     CITOR_ALWAYS_ASSERT(d.out == reference);
   };
+  // One Eigen Schedule per block via Barrier; the per-block index drives
+  // pass 1 / pass 2 of the two-wave layout directly.
   BenchRow row = measureLoop("Eigen::ThreadPool::scan_two_wave", cal, [&] {
     runTwoWaveScan(d, participants, [&](std::size_t blocks, auto blockBody) {
       ::Eigen::Barrier bar(static_cast<unsigned int>(blocks));
@@ -415,6 +418,8 @@ template <class Pool, class EnqueueFn>
     }
     CITOR_ALWAYS_ASSERT(d.out == reference);
   };
+  // One Leopard dispatch per block returning a future; the per-block index
+  // drives pass 1 / pass 2 of the two-wave layout directly.
   BenchRow row = measureLoop("Leopard::scan_two_wave", cal, [&] {
     runTwoWaveScan(d, participants, [&](std::size_t blocks, auto blockBody) {
       std::vector<std::future<void>> futs;
@@ -448,6 +453,8 @@ template <class Pool, class EnqueueFn>
     }
     CITOR_ALWAYS_ASSERT(d.out == reference);
   };
+  // One dispenso TaskSet schedule per block; the per-block index drives
+  // pass 1 / pass 2 of the two-wave layout directly.
   BenchRow row = measureLoop("dispenso::scan_two_wave", cal, [&] {
     runTwoWaveScan(d, participants, [&](std::size_t blocks, auto blockBody) {
       dispenso::TaskSet ts(*pool);
