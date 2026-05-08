@@ -26,6 +26,7 @@ The name comes from Latin *cito* -- "swiftly, quickly".
   - [`bulkForQueries`](#bulkforqueries)
   - [`forkJoin`](#forkjoin)
   - [`submitDetached`](#submitdetached)
+- [Common patterns](#common-patterns)
 - [Hints reference](#hints-reference)
 - [PoolGroup and per-CCD arenas](#poolgroup-and-per-ccd-arenas)
 - [Cancellation](#cancellation)
@@ -631,6 +632,158 @@ void scheduleBackground(citor::ThreadPool &pool) {
 **Exception handling**: a throw from a detached body is captured into a per-pool slot and surfaced via `pool.lastDetachedException()`. Subsequent throws drop. The pool does not call `std::terminate` on a detached throw.
 
 **When to use it**: tear-down work whose completion is not needed on the caller's join path, but whose retirement is needed before the pool itself can go away (logging flush, async finalisation). For anything the caller actually waits on, use a synchronous primitive.
+
+---
+
+## Common patterns
+
+Worked examples for common conversions and compositions. Each snippet assumes a `citor::ThreadPool pool;` is in scope.
+
+### Serial loop -> `parallelFor`
+
+The serial loop's body becomes a half-open block range; the inner iteration body is unchanged.
+
+```cpp
+// before
+for (std::size_t i = 0; i < n; ++i) {
+  out[i] = f(in[i]);
+}
+
+// after
+pool.parallelFor<citor::HintsDefaults>(
+    0, n, [&](std::size_t lo, std::size_t hi) {
+      for (std::size_t i = lo; i < hi; ++i) {
+        out[i] = f(in[i]);
+      }
+    });
+```
+
+Two pitfalls: the body must be re-entrant (it runs on multiple threads), and the captured state must outlive the call (closures on the producer's stack satisfy this automatically). Reach for `parallelReduce` when the loop accumulates into a shared variable; reach for `bulkForQueries` when the body is per-query, not per-element.
+
+### Recursive divide-and-conquer with `forkJoin`
+
+`forkJoin` runs two children in parallel and re-enters itself for the recursive case. Workers steal sub-tasks via Chase-Lev deques so an unbalanced tree (Pareto, sort, NQueens) doesn't stall on the slowest leaf.
+
+```cpp
+#include <citor/cpos/fork_join.h>
+
+std::int64_t treeSum(citor::ThreadPool &pool, Node *root) {
+  if (root == nullptr) {
+    return 0;
+  }
+  if (root->isLeaf()) {
+    return root->value;
+  }
+  std::int64_t left{};
+  std::int64_t right{};
+  pool.forkJoin(
+      [&] { left  = treeSum(pool, root->left);  },
+      [&] { right = treeSum(pool, root->right); });
+  return left + right + root->value;
+}
+```
+
+`forkJoin` switches to inline-on-caller below the engine's grain threshold, so the recursion bottoms out cheaply once subtrees are small.
+
+### Nested parallelism: `parallelFor` inside a `forkJoin` body
+
+A `forkJoin` body may call back into the same pool. The inner call participates as a regular dispatch with its own block partition.
+
+```cpp
+pool.forkJoin(
+    [&] {
+      pool.parallelFor<citor::HintsDefaults>(
+          0, leftHalfSize,
+          [&](std::size_t lo, std::size_t hi) { transform(left, lo, hi); });
+    },
+    [&] {
+      pool.parallelFor<citor::HintsDefaults>(
+          0, rightHalfSize,
+          [&](std::size_t lo, std::size_t hi) { transform(right, lo, hi); });
+    });
+```
+
+The producer of the inner `parallelFor` is whichever worker is running that branch of the outer `forkJoin`. The TLS participant token prevents cross-arena dispatch from deadlocking; if you swap `pool` for a sibling arena from `PoolGroup::global()`, the inner call falls through to the inline path on the caller (does not submit to the sibling arena).
+
+### Multi-stage pipeline with `parallelChain`
+
+`parallelChain` publishes one descriptor that drives every stage of a multi-pass kernel. Workers cross stage boundaries via the per-slot done-epoch barrier without going through the pool's main dispatch path again.
+
+```cpp
+#include <citor/cpos/parallel_chain.h>
+#include <citor/chain.h>
+
+pool.parallelChain<citor::ChainHintsDefaults>(
+    n,
+    citor::globalStage("normalize",
+        [&](std::size_t /*stage*/, std::uint32_t /*slot*/,
+            std::size_t lo, std::size_t hi) {
+          normalize(buf, lo, hi);
+        }),
+    citor::globalStage("transform",
+        [&](std::size_t /*stage*/, std::uint32_t /*slot*/,
+            std::size_t lo, std::size_t hi) {
+          transform(buf, lo, hi);
+        }),
+    citor::globalStage("reduce",
+        [&](std::size_t /*stage*/, std::uint32_t /*slot*/,
+            std::size_t lo, std::size_t hi) {
+          accumulate(buf, partials, lo, hi);
+        }));
+```
+
+Same-chunk pipelining (the default for `globalStage`) keeps a worker on its contiguous slice across every stage, so cache lines warmed in stage 1 stay hot in stages 2 and 3. For uneven stage costs, switch to `dynamicStage(...)` so faster slots claim more blocks from the laggard's tail.
+
+### Iterative kernel with `runPlex`
+
+`runPlex` keeps workers persistent across `nPhases`, so the per-phase rendezvous stays in spin-wait. Use it when the same partition runs N times with a small per-phase body (Jacobi, Gauss-Seidel, stencil sweeps, Game-of-Life ticks).
+
+```cpp
+#include <citor/cpos/run_plex.h>
+
+void jacobi(citor::ThreadPool &pool, std::vector<float> &grid,
+            std::size_t iterations) {
+  pool.runPlex<citor::HintsDefaults>(
+      iterations, grid.size(),
+      [&](std::size_t /*phaseIdx*/, std::uint32_t /*slot*/,
+          std::size_t lo, std::size_t hi) {
+        for (std::size_t i = (lo == 0 ? 1 : lo);
+             i < (hi == grid.size() ? hi - 1 : hi); ++i) {
+          grid[i] = 0.5f * grid[i] + 0.25f * (grid[i - 1] + grid[i + 1]);
+        }
+      });
+}
+```
+
+Per-phase wall time is captured between two `currentPhase` epoch publishes, so the bench harness reports the inter-phase transition latency, not the body cost. Compare to N back-to-back `parallelFor` calls: those pay the worker wake / join round-trip per call; `runPlex` amortises that into one publish for the entire chain.
+
+### Cancellation across primitives
+
+Every primitive accepts an optional `CancellationToken`. Stopping the source token transitions to the stopped state and every primitive observing it exits at the next chunk boundary. Cancellation propagates through nested calls when you pass the same token down.
+
+```cpp
+#include <citor/cancellation.h>
+
+citor::CancellationSource src;
+auto tok = src.token();
+
+std::thread watchdog([&] {
+  if (deadline_passed()) {
+    src.request_stop();
+  }
+});
+
+pool.parallelFor<citor::HintsDefaults>(
+    0, n,
+    [&](std::size_t lo, std::size_t hi) {
+      pool.forkJoin(
+          [&] { search_left(lo, hi, tok);  },
+          [&] { search_right(lo, hi, tok); });
+    },
+    tok);
+```
+
+The outer `parallelFor` polls `tok` between blocks; a stop request mid-body lets the current block finish but no new blocks are admitted. The inner `forkJoin` propagates the same token down. For cancellation-hot inner loops set `HintsT::cancellationChecks = true` (default) so worker bodies poll the token at chunk boundaries instead of waiting for the next dispatch.
 
 ---
 
