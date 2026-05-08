@@ -46,4 +46,3 @@ tmp/
 # Python bytecode
 __pycache__/
 *.pyc
-single_include/citor.hpp
