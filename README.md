@@ -1,6 +1,6 @@
 # citor
 
-> Header-only C++20 thread pool tuned for sub-microsecond dispatch on Linux x86_64 + AVX2. Eight cooperating primitives, decentralized per-slot done-epoch barriers, Chase-Lev work-stealing, per-CCD arenas. MIT.
+> Header-only C++20 thread pool tuned for sub-microsecond dispatch. Eight cooperating primitives, decentralized per-slot done-epoch barriers, Chase-Lev work-stealing, per-CCD arenas. MIT.
 
 [![ci](https://github.com/Lallapallooza/citor/actions/workflows/ci.yml/badge.svg)](https://github.com/Lallapallooza/citor/actions/workflows/ci.yml)
 [![nightly](https://github.com/Lallapallooza/citor/actions/workflows/nightly.yml/badge.svg)](https://github.com/Lallapallooza/citor/actions/workflows/nightly.yml)

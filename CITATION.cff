@@ -17,9 +17,9 @@ keywords:
   - work-stealing
   - parallelism
 abstract: >-
-  citor is a header-only C++20 thread pool tuned for sub-microsecond dispatch
-  on Linux x86_64 + AVX2. It exposes eight cooperating primitives
-  (parallelFor, parallelReduce, parallelScan, parallelChain, runPlex,
-  bulkForQueries, forkJoin, submitDetached) over decentralized per-slot
-  done-epoch barriers, Chase-Lev work-stealing deques, and a per-CCD arena
-  group guarded by a TLS participant token.
+  citor is a header-only C++20 thread pool tuned for sub-microsecond dispatch.
+  It exposes eight cooperating primitives (parallelFor, parallelReduce,
+  parallelScan, parallelChain, runPlex, bulkForQueries, forkJoin,
+  submitDetached) over decentralized per-slot done-epoch barriers, Chase-Lev
+  work-stealing deques, and a per-CCD arena group guarded by a TLS
+  participant token.

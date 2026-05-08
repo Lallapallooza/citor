@@ -21,9 +21,7 @@ class CitorConan(ConanFile):
     license = "MIT"
     homepage = "https://github.com/Lallapallooza/citor"
     url = "https://github.com/Lallapallooza/citor"
-    description = (
-        "Header-only C++20 thread pool tuned for sub-microsecond dispatch on Linux x86_64 + AVX2."
-    )
+    description = "Header-only C++20 thread pool tuned for sub-microsecond dispatch."
     topics = ("thread-pool", "concurrency", "cpp20", "header-only", "work-stealing")
 
     settings = "os", "arch", "compiler"
