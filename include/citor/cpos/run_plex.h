@@ -36,7 +36,7 @@ struct RunPlexFn {
   /// HintsT  Hint type whose `static constexpr` members drive compile-time policy.
   /// Pool    Executor type.
   /// Phase   Phase callable: `void(std::size_t phaseIdx, std::uint32_t slot,
-  ///                                       std::size_t lo, std::size_t hi, void* tlsArena)`.
+  ///                                       std::size_t lo, std::size_t hi)`.
   /// pool     Executor instance.
   /// nPhases  Number of phases to run; `0` is a no-op.
   /// n        Row-range upper bound; partitioned across slots as
@@ -56,8 +56,8 @@ struct RunPlexFn {
 ///
 /// Calling `runPlex<HintsT>(pool, nPhases, n, phaseFn)` dispatches through unqualified
 /// `tag_invoke`; the executor's overload runs `nPhases` phases in order. Each phase invokes
-/// `phaseFn(phaseIdx, slot, lo, hi, tlsArena)` once per participant slot, where `(lo, hi)` is the
-/// slot's contiguous range over `[0, n)`. The producer participates as slot 0.
+/// `phaseFn(phaseIdx, slot, lo, hi)` once per participant slot, where `(lo, hi)` is the slot's
+/// contiguous range over `[0, n)`. The producer participates as slot 0.
 ///
 /// The plex stays in user-space spin-wait between phases (no futex round-trip per phase), so
 /// inter-phase transition latency is dominated by cache-coherency on the per-worker `done` flags.
