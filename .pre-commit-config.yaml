@@ -36,3 +36,11 @@ repos:
         language: system
         files: ^(include/citor/.*\.h|tools/amalgamate\.py|single_include/citor\.hpp)$
         pass_filenames: false
+
+      - id: clang-tidy
+        name: clang-tidy
+        entry: python3 scripts/run_clang_tidy.py
+        language: system
+        types_or: [c++, c]
+        exclude: ^single_include/
+        pass_filenames: true

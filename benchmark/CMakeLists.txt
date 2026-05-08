@@ -479,8 +479,6 @@ if(UNIX AND NOT APPLE)
     )
 endif()
 
-citor_enable_tidy(parallel_bench)
-
 # Two-pool BLAS-coexistence bench. Lives in a SEPARATE executable target
 # because libomp's `KMP_BLOCKTIME` and `omp_set_num_threads(...)` are
 # process-wide globals; sharing a process with the standard `parallel_bench`
@@ -509,5 +507,4 @@ if(TARGET parallel_bench_openmp)
     if(CITOR_IS_TOP_LEVEL)
         target_link_libraries(parallel_bench_two_pool PRIVATE citor_warnings)
     endif()
-    citor_enable_tidy(parallel_bench_two_pool)
 endif()
