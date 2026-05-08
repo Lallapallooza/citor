@@ -11,20 +11,28 @@
 // Per-pool primitive mapping (every competitor lacks a native plex; the
 // natural shape-equivalent is "N back-to-back parallelFor waves"):
 //   - citor pool              -> `runPlex<citor::HintsDefaults>` (native plex).
-//   - BS::thread_pool          -> N back-to-back `submit_blocks(0, j, body, j).wait()`.
-//   - dp::thread_pool          -> N back-to-back fanouts of j enqueue futures + join.
-//   - task_thread_pool         -> N back-to-back fanouts of j submit futures + join.
-//   - riften::Thiefpool        -> N back-to-back fanouts of j enqueue futures + join.
-//   - oneTBB                   -> N back-to-back `tbb::parallel_for` waves via arena.
-//   - Taskflow                 -> N back-to-back taskflow runs (j tasks per flow).
+//   - BS::thread_pool          -> N back-to-back `submit_blocks(0, j, body,
+//   j).wait()`.
+//   - dp::thread_pool          -> N back-to-back fanouts of j enqueue futures +
+//   join.
+//   - task_thread_pool         -> N back-to-back fanouts of j submit futures +
+//   join.
+//   - riften::Thiefpool        -> N back-to-back fanouts of j enqueue futures +
+//   join.
+//   - oneTBB                   -> N back-to-back `tbb::parallel_for` waves via
+//   arena.
+//   - Taskflow                 -> N back-to-back taskflow runs (j tasks per
+//   flow).
 //   - Eigen::ThreadPool        -> N back-to-back `Schedule + Barrier` waves.
-//   - OpenMP                   -> N back-to-back `#pragma omp parallel for` regions.
+//   - OpenMP                   -> N back-to-back `#pragma omp parallel for`
+//   regions.
 
 #include <BS_thread_pool.hpp>
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <future>
 #include <string>
 #include <utility>
@@ -38,6 +46,8 @@
 #include "competitor_traits.h"
 #include "cycle_clock.h"
 
+#include "citor/always_assert.h"
+
 namespace citor::bench {
 namespace {
 
@@ -50,31 +60,59 @@ constexpr std::size_t kWarmupIterations = 5;
 /// Phases driven per plex call.
 constexpr std::size_t kPlexPhases = 30;
 
-/// Synthetic per-slot body cost in nanoseconds; ~5 microseconds.
+// Synthetic per-slot body cost in nanoseconds.
 constexpr double kBodyNs = 5'000.0;
 
-/// Spin on the TSC for at least |targetNs| wall-time nanoseconds.
-inline void spinForNs(double targetNs, const CyclesPerNanosecond &cal) noexcept {
+// Spin on the TSC for at least |targetNs| wall-time nanoseconds.
+inline void spinForNs(double targetNs,
+                      const CyclesPerNanosecond &cal) noexcept {
   const std::uint64_t cycles =
       cal.value > 0.0 ? static_cast<std::uint64_t>(targetNs * cal.value) : 0ULL;
   const std::uint64_t start = readCyclesStart();
   while ((readCyclesEnd() - start) < cycles) {
-    // Tight spin; empty body.
+    // Tight spin; intentional empty body.
   }
 }
 
 /// Convert a measured per-call wall time (`callNs`) into a per-phase
 /// transition latency by subtracting the known body cost (one body per phase
-/// runs in parallel across slots, so total body time is `kPlexPhases * kBodyNs`)
-/// and dividing by the phase count.
+/// runs in parallel across slots, so total body time is `kPlexPhases *
+/// kBodyNs`) and dividing by the phase count.
 [[nodiscard]] inline double toTransitionNs(double callNs) noexcept {
   const double bodyNs = static_cast<double>(kPlexPhases) * kBodyNs;
   return (callNs - bodyNs) / static_cast<double>(kPlexPhases);
 }
 
+/// Expected `sink` value after one full measureLoop run.
+///
+/// Each phase calls the body once per slot in `[0, participants)`, each adding
+/// `slot` (citor) or `i` (competitors); both sum to `participants * (participants - 1) / 2`
+/// per phase. Mismatch means a phase was skipped or an extra invocation slipped
+/// through and the timing column is bogus.
+[[nodiscard]] inline std::uint64_t expectedSink(std::size_t participants) noexcept {
+  return static_cast<std::uint64_t>(kWarmupIterations + kIterations) * kPlexPhases *
+         participants * (participants - 1) / 2;
+}
+
+/// Compare the post-loop sink against the closed-form expected sum and abort
+/// with a one-line diagnostic when they diverge. Centralises the per-pool
+/// boilerplate that would otherwise duplicate the assert across 9 measure*
+/// functions.
+inline void assertExpectedSink(const char *name, std::size_t participants,
+                               const std::atomic<std::uint64_t> &sink) {
+  const std::uint64_t expected = expectedSink(participants);
+  const std::uint64_t actual = sink.load(std::memory_order_relaxed);
+  if (actual != expected) [[unlikely]] {
+    std::fprintf(stderr, "[%s] plex sink mismatch: expected=%llu actual=%llu\n", name,
+                 static_cast<unsigned long long>(expected), static_cast<unsigned long long>(actual));
+  }
+  CITOR_ALWAYS_ASSERT(actual == expected);
+}
+
 /// Generic measurement loop sampling per-call wall time.
 template <class RunFn>
-[[nodiscard]] BenchRow measureLoop(const char *name, const CyclesPerNanosecond &cal, RunFn run) {
+[[nodiscard]] BenchRow measureLoop(const char *name,
+                                   const CyclesPerNanosecond &cal, RunFn run) {
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     run();
   }
@@ -89,22 +127,25 @@ template <class RunFn>
   return finalizeRow(name, samples);
 }
 
-[[nodiscard]] BenchRow measureNewPool(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureNewPool(std::size_t participants,
+                                      const CyclesPerNanosecond &cal) {
   ThreadPool pool(participants);
   std::atomic<std::uint64_t> sink{0};
-  auto phaseFn = [&sink, &cal](std::size_t /*phaseIdx*/, std::uint32_t slot, std::size_t /*lo*/,
-                               std::size_t /*hi*/, void * /*tlsArena*/) {
+  auto phaseFn = [&sink, &cal](std::size_t /*phaseIdx*/, std::uint32_t slot,
+                               std::size_t /*lo*/, std::size_t /*hi*/) {
     spinForNs(kBodyNs, cal);
     sink.fetch_add(slot, std::memory_order_relaxed);
   };
   BenchRow row = measureLoop("citor::ThreadPool::runPlex", cal, [&] {
-    pool.runPlex<citor::HintsDefaults>(kPlexPhases, /*n=*/participants, phaseFn);
+    pool.runPlex<citor::HintsDefaults>(kPlexPhases, /*n=*/participants,
+                                       phaseFn);
   });
-  (void)sink.load(std::memory_order_relaxed);
+  assertExpectedSink(row.name.c_str(), participants, sink);
   return row;
 }
 
-[[nodiscard]] BenchRow measureBsPool(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureBsPool(std::size_t participants,
+                                     const CyclesPerNanosecond &cal) {
   BS::light_thread_pool pool(participants);
   std::atomic<std::uint64_t> sink{0};
   auto bodyChunk = [&sink, &cal](std::size_t lo, std::size_t hi) {
@@ -115,10 +156,11 @@ template <class RunFn>
   };
   BenchRow row = measureLoop("BS::thread_pool::submit_blocks x30", cal, [&] {
     for (std::size_t p = 0; p < kPlexPhases; ++p) {
-      pool.submit_blocks(std::size_t{0}, participants, bodyChunk, participants).wait();
+      pool.submit_blocks(std::size_t{0}, participants, bodyChunk, participants)
+          .wait();
     }
   });
-  (void)sink.load(std::memory_order_relaxed);
+  assertExpectedSink(row.name.c_str(), participants, sink);
   return row;
 }
 
@@ -126,9 +168,10 @@ template <class RunFn>
 /// task per slot and joins. Documented per-row substitution: these pools have
 /// no native multi-block primitive.
 template <class Pool, class EnqueueFn>
-[[nodiscard]] BenchRow measureFutureFanoutPool(const char *name, std::size_t participants,
-                                               const CyclesPerNanosecond &cal, Pool &pool,
-                                               EnqueueFn enqueue) {
+[[nodiscard]] BenchRow measureFutureFanoutPool(const char *name,
+                                               std::size_t participants,
+                                               const CyclesPerNanosecond &cal,
+                                               Pool &pool, EnqueueFn enqueue) {
   std::atomic<std::uint64_t> sink{0};
   auto slotBody = [&sink, &cal](std::size_t slot) {
     spinForNs(kBodyNs, cal);
@@ -139,32 +182,39 @@ template <class Pool, class EnqueueFn>
       std::vector<std::future<void>> futs;
       futs.reserve(participants);
       for (std::size_t slot = 0; slot < participants; ++slot) {
-        futs.emplace_back(enqueue(pool, [slot, &slotBody]() { slotBody(slot); }));
+        futs.emplace_back(
+            enqueue(pool, [slot, &slotBody]() { slotBody(slot); }));
       }
       for (auto &f : futs) {
         f.get();
       }
     }
   });
-  (void)sink.load(std::memory_order_relaxed);
+  assertExpectedSink(row.name.c_str(), participants, sink);
   return row;
 }
 
-[[nodiscard]] BenchRow measureDpPool(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureDpPool(std::size_t participants,
+                                     const CyclesPerNanosecond &cal) {
   dp::thread_pool<> pool(static_cast<unsigned int>(participants));
   return measureFutureFanoutPool(
       "dp::thread_pool::enqueue x30j", participants, cal, pool,
       [](dp::thread_pool<> &p, auto fn) { return p.enqueue(std::move(fn)); });
 }
 
-[[nodiscard]] BenchRow measureTaskPool(std::size_t participants, const CyclesPerNanosecond &cal) {
-  ::task_thread_pool::task_thread_pool pool(static_cast<unsigned int>(participants));
+[[nodiscard]] BenchRow measureTaskPool(std::size_t participants,
+                                       const CyclesPerNanosecond &cal) {
+  ::task_thread_pool::task_thread_pool pool(
+      static_cast<unsigned int>(participants));
   return measureFutureFanoutPool(
       "task_thread_pool::submit x30j", participants, cal, pool,
-      [](::task_thread_pool::task_thread_pool &p, auto fn) { return p.submit(std::move(fn)); });
+      [](::task_thread_pool::task_thread_pool &p, auto fn) {
+        return p.submit(std::move(fn));
+      });
 }
 
-[[nodiscard]] BenchRow measureRiftenPool(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureRiftenPool(std::size_t participants,
+                                         const CyclesPerNanosecond &cal) {
   riften::Thiefpool pool(participants);
   return measureFutureFanoutPool(
       "riften::Thiefpool::enqueue x30j", participants, cal, pool,
@@ -172,7 +222,8 @@ template <class Pool, class EnqueueFn>
 }
 
 #ifdef CITOR_BENCH_HAS_TBB
-[[nodiscard]] BenchRow measureTbbPool(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureTbbPool(std::size_t participants,
+                                      const CyclesPerNanosecond &cal) {
   auto arena = CompetitorTraits<::tbb::task_arena>::make(participants);
   std::atomic<std::uint64_t> sink{0};
   auto bodyChunk = [&sink, &cal](std::size_t lo, std::size_t hi) {
@@ -183,11 +234,11 @@ template <class Pool, class EnqueueFn>
   };
   BenchRow row = measureLoop("oneTBB::parallel_for x30", cal, [&] {
     for (std::size_t p = 0; p < kPlexPhases; ++p) {
-      CompetitorTraits<::tbb::task_arena>::parallelFor(*arena, std::size_t{0}, participants, 1,
-                                                       bodyChunk);
+      CompetitorTraits<::tbb::task_arena>::parallelFor(
+          *arena, std::size_t{0}, participants, 1, bodyChunk);
     }
   });
-  (void)sink.load(std::memory_order_relaxed);
+  assertExpectedSink(row.name.c_str(), participants, sink);
   return row;
 }
 #endif
@@ -205,17 +256,18 @@ template <class Pool, class EnqueueFn>
   };
   BenchRow row = measureLoop("Taskflow::run x30", cal, [&] {
     for (std::size_t p = 0; p < kPlexPhases; ++p) {
-      CompetitorTraits<::tf::Executor>::parallelFor(*exec, std::size_t{0}, participants,
-                                                    participants, bodyChunk);
+      CompetitorTraits<::tf::Executor>::parallelFor(
+          *exec, std::size_t{0}, participants, participants, bodyChunk);
     }
   });
-  (void)sink.load(std::memory_order_relaxed);
+  assertExpectedSink(row.name.c_str(), participants, sink);
   return row;
 }
 #endif
 
 #ifdef CITOR_BENCH_HAS_EIGEN_THREADPOOL
-[[nodiscard]] BenchRow measureEigenPool(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureEigenPool(std::size_t participants,
+                                        const CyclesPerNanosecond &cal) {
   auto pool = CompetitorTraits<::Eigen::ThreadPool>::make(participants);
   std::atomic<std::uint64_t> sink{0};
   auto bodyChunk = [&sink, &cal](std::size_t lo, std::size_t hi) {
@@ -226,11 +278,11 @@ template <class Pool, class EnqueueFn>
   };
   BenchRow row = measureLoop("Eigen::ThreadPool::Schedule x30", cal, [&] {
     for (std::size_t p = 0; p < kPlexPhases; ++p) {
-      CompetitorTraits<::Eigen::ThreadPool>::parallelFor(*pool, std::size_t{0}, participants,
-                                                         participants, bodyChunk);
+      CompetitorTraits<::Eigen::ThreadPool>::parallelFor(
+          *pool, std::size_t{0}, participants, participants, bodyChunk);
     }
   });
-  (void)sink.load(std::memory_order_relaxed);
+  assertExpectedSink(row.name.c_str(), participants, sink);
   return row;
 }
 #endif
@@ -248,11 +300,11 @@ template <class Pool, class EnqueueFn>
   };
   BenchRow row = measureLoop("Leopard::dispatch x30", cal, [&] {
     for (std::size_t p = 0; p < kPlexPhases; ++p) {
-      CompetitorTraits<hmthrp::ThreadPool>::parallelFor(*pool, std::size_t{0}, participants,
-                                                        participants, bodyChunk);
+      CompetitorTraits<hmthrp::ThreadPool>::parallelFor(
+          *pool, std::size_t{0}, participants, participants, bodyChunk);
     }
   });
-  (void)sink.load(std::memory_order_relaxed);
+  assertExpectedSink(row.name.c_str(), participants, sink);
   return row;
 }
 #endif
@@ -270,17 +322,18 @@ template <class Pool, class EnqueueFn>
   };
   BenchRow row = measureLoop("dispenso::parallel_for x30", cal, [&] {
     for (std::size_t p = 0; p < kPlexPhases; ++p) {
-      CompetitorTraits<dispenso::ThreadPool>::parallelFor(*pool, std::size_t{0}, participants,
-                                                          participants, bodyChunk);
+      CompetitorTraits<dispenso::ThreadPool>::parallelFor(
+          *pool, std::size_t{0}, participants, participants, bodyChunk);
     }
   });
-  (void)sink.load(std::memory_order_relaxed);
+  assertExpectedSink(row.name.c_str(), participants, sink);
   return row;
 }
 #endif
 
 #ifdef CITOR_BENCH_HAS_OPENMP
-[[nodiscard]] BenchRow measureOpenMpPool(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureOpenMpPool(std::size_t participants,
+                                         const CyclesPerNanosecond &cal) {
   std::atomic<std::uint64_t> sink{0};
   BenchRow row = measureLoop("OpenMP::parallel_for x30", cal, [&] {
     const int threads = static_cast<int>(participants);
@@ -293,7 +346,7 @@ template <class Pool, class EnqueueFn>
       }
     }
   });
-  (void)sink.load(std::memory_order_relaxed);
+  assertExpectedSink(row.name.c_str(), participants, sink);
   return row;
 }
 #endif
@@ -328,7 +381,7 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
   return table;
 }
 
-/// 30-phase x 16-worker x 5 us body; the spec's headline workload.
+// 30-phase x 16-worker x 5 us body.
 BenchTable runPlexJ16(const CyclesPerNanosecond &cal) {
   return buildTable(/*participants=*/16, "j16_30phases_5us", cal);
 }
@@ -343,8 +396,10 @@ BenchTable runPlexJ8(const CyclesPerNanosecond &cal) {
 /// initialization time.
 struct PlexRegistrar {
   PlexRegistrar() {
-    registerWorkload({.name = "plex_transition_j8_30phases_5us", .run = &runPlexJ8});
-    registerWorkload({.name = "plex_transition_j16_30phases_5us", .run = &runPlexJ16});
+    registerWorkload(
+        {.name = "plex_transition_j8_30phases_5us", .run = &runPlexJ8});
+    registerWorkload(
+        {.name = "plex_transition_j16_30phases_5us", .run = &runPlexJ16});
   }
 };
 

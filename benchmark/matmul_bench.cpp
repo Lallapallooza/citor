@@ -15,7 +15,9 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <future>
 #include <memory>
 #include <string>
@@ -25,6 +27,8 @@
 #include "bench_registry.h"
 #include "competitor_traits.h"
 #include "cycle_clock.h"
+
+#include "citor/always_assert.h"
 
 namespace citor::bench {
 namespace {
@@ -361,8 +365,31 @@ template <class PoolT, class Dispatch>
     matmulRowBlock(lo, hi, n, aBase, bBase, cBase);
   };
 
+  // Sequential reference. `C` rows are independent so the ikj parallelization
+  // is bit-identical regardless of partition shape; byte compare is the tight
+  // guard against silent miscomputation.
+  const AlignedFloatBuffer refBuf = allocateAlignedFloats(elems);
+  matmulRowBlock(0, n, n, aBase, bBase, refBuf.get());
+  const float *refBase = refBuf.get();
+  const std::size_t refBytes = elems * sizeof(float);
+  auto checkOutput = [&] {
+    if (std::memcmp(cBase, refBase, refBytes) != 0) [[unlikely]] {
+      for (std::size_t k = 0; k < elems; ++k) {
+        if (cBase[k] != refBase[k]) {
+          std::fprintf(stderr,
+                       "[%s] matmul mismatch at index %zu (n=%zu): expected=%.9g actual=%.9g\n",
+                       displayName, k, n, static_cast<double>(refBase[k]),
+                       static_cast<double>(cBase[k]));
+          break;
+        }
+      }
+    }
+    CITOR_ALWAYS_ASSERT(std::memcmp(cBase, refBase, refBytes) == 0);
+  };
+
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     dispatch(*pool, n, participants, body);
+    checkOutput();
   }
 
   std::vector<double> samples;
@@ -372,6 +399,7 @@ template <class PoolT, class Dispatch>
     dispatch(*pool, n, participants, body);
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
+    checkOutput();
   }
 
   std::atomic_signal_fence(std::memory_order_seq_cst);
