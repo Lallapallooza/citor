@@ -72,6 +72,24 @@ jobs:
           python-version: "3.12"
       - uses: pre-commit/action@v3.0.1
 
+  version-sync:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install commitizen
+        run: pip install commitizen
+      - name: Check every version_files target matches the project version
+        run: |
+          set -euo pipefail
+          PROJECT_VERSION=$(cz version --project)
+          echo "project version = ${PROJECT_VERSION}"
+          # commitizen errors if any tracked file's version line is missing or
+          # does not match the project version.
+          cz bump --files-only --dry-run --increment PATCH
+
   clang-tidy:
     runs-on: ubuntu-24.04
     needs: build-and-test

@@ -1,11 +1,11 @@
 # Conan 2.x recipe for citor. Header-library -- no compile, no copy_source.
 #
 # Usage (local recipe, ahead of ConanCenter acceptance):
-#   conan create packaging/conan --version 0.1.0
-#   conan install --requires=citor/0.1.0 --remote=mylocal
+#   conan create packaging/conan --version $(cz version --project)
+#   conan install --requires=citor/$(cz version --project) --remote=mylocal
 #
 # After ConanCenter acceptance, consumers can do `conan install
-# --requires=citor/0.1.0` against the default ConanCenter remote with no
+# --requires=citor/<version>` against the default ConanCenter remote with no
 # extra setup.
 
 from pathlib import Path

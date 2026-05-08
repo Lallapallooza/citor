@@ -28,8 +28,9 @@ version_files = [
     "README.md:citor/v",
     "README.md:citor#v",
     "README.md:GIT_TAG",
+    "README.md:find_package\\(citor",
     "README.md:--version",
-    "README.md:citor/0",
+    "README.md:requires=citor",
     "packaging/vcpkg/ports/citor/vcpkg.json:\"version\"",
     "packaging/conan/conanfile.py:^    version",
 ]
