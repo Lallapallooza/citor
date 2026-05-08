@@ -31,7 +31,6 @@ The name comes from Latin *cito* -- "swiftly, quickly".
 - [Cancellation](#cancellation)
 - [Build options](#build-options)
 - [Supported compilers](#supported-compilers)
-- [Non-goals](#non-goals)
 - [Reproducing benchmarks](#reproducing-benchmarks)
 - [License](#license)
 
@@ -501,3 +500,272 @@ void stencil(citor::ThreadPool &pool,
 **Nesting**: same-pool reentrancy falls through to inline-on-caller; the inner phased loop is single-threaded. `runPlex` is meant to be the outermost driver, with a sequential body per phase:
 
 ```cpp
+// GOOD: runPlex at the top, sequential per-phase body.
+pool.runPlex<citor::HintsDefaults>(
+    steps, grid.size(),
+    [&](std::size_t /*phase*/, std::uint32_t /*slot*/,
+        std::size_t lo, std::size_t hi, void * /*tls*/) {
+      for (std::size_t i = (lo == 0 ? 1 : lo);
+           i < (hi == grid.size() ? hi - 1 : hi); ++i) {
+        next[i] = 0.5f * grid[i] + 0.25f * (grid[i - 1] + grid[i + 1]);
+      }
+    });
+
+// BAD: runPlex nested inside parallelFor / forkJoin collapses to single-threaded.
+```
+
+### `bulkForQueries`
+
+Many independent queries fanned across the pool. Differs from `parallelFor` in semantics: the body must process **every** query index in the chunk, and per-query results must be written to a per-query slot keyed on the query index (chunk dispatch order varies across worker counts).
+
+```cpp
+template <class HintsT, class QueryFn>
+void bulkForQueries(std::size_t q, QueryFn &&fn,
+                    CancellationToken tok = {});
+```
+
+```cpp
+#include <citor/cpos/bulk_for_queries.h>
+#include <citor/hints.h>
+#include <citor/thread_pool.h>
+
+#include <cstdint>
+#include <vector>
+
+struct Query;
+struct Hit;
+
+void runQueries(citor::ThreadPool &pool,
+                const std::vector<Query> &queries,
+                std::vector<Hit> &out) {
+  out.resize(queries.size());
+  pool.bulkForQueries<citor::HintsDefaults>(
+      queries.size(),
+      [&](std::size_t lo, std::size_t hi) {
+        for (std::size_t i = lo; i < hi; ++i) {
+          out[i] = /* run queries[i] */ Hit{};
+        }
+      });
+}
+```
+
+**When to use it**: spatial-index lookups, batched key/value gets, KD-tree or BVH ray queries -- workloads where per-query depth varies and a `Balance::DynamicChunked` policy amortises the skew. Use `parallelFor` instead when the per-item cost is uniform.
+
+**Nesting**: same-pool reentrancy falls through to inline-on-caller. If a single query body itself wants fan-out, prefer `forkJoin` inside it (which has a first-class nested path) over another `bulkForQueries`:
+
+```cpp
+pool.bulkForQueries<citor::HintsDefaults>(
+    queries.size(), [&](std::size_t lo, std::size_t hi) {
+      for (std::size_t i = lo; i < hi; ++i) {
+        // Per-query recursive descent: forkJoin nests cleanly here.
+        Hit left, right;
+        pool.forkJoin<citor::CcdLocalForkJoinHints>(
+            [&] { left  = descend(queries[i], tree.left); },
+            [&] { right = descend(queries[i], tree.right); });
+        out[i] = merge(left, right);
+      }
+    });
+```
+
+### `forkJoin`
+
+Recursive divide-and-conquer over per-worker Chase-Lev work-stealing deques. Tasks may call back into `forkJoin` from inside their bodies; nested fork-join is the headline use case. The nested call uses the Cilk-5 spawn-parent shape: children are pushed onto the calling worker's own deque (visible to peers via Chase-Lev), the last child runs inline, and the join is a per-frame `pendingTasks` counter.
+
+```cpp
+template <class HintsT, class... TaskFns>
+void forkJoin(TaskFns &&...fns);
+
+template <class HintsT, class... TaskFns>
+void forkJoin(CancellationToken tok, TaskFns &&...fns);
+```
+
+The producer participates as slot 0 and steals from other workers' deques when its own drains. `Affinity::CcdLocal` (the default and the named preset `CcdLocalForkJoinHints`) biases steal probes to same-CCD victims first.
+
+```cpp
+#include <citor/cpos/fork_join.h>
+#include <citor/hints.h>
+#include <citor/thread_pool.h>
+
+int fib(citor::ThreadPool &pool, int n) {
+  if (n < 2) return n;
+  if (n < 12) return fib(pool, n - 1) + fib(pool, n - 2);
+
+  int a = 0;
+  int b = 0;
+  pool.forkJoin<citor::CcdLocalForkJoinHints>(
+      [&] { a = fib(pool, n - 1); },
+      [&] { b = fib(pool, n - 2); });
+  return a + b;
+}
+```
+
+**Exception handling**: the first exception escaping any task body is captured and rethrown from the producer after the join. Subsequent throws drop. The remaining tasks are cancelled so the join doesn't block on quiescence.
+
+**When to use it**: divide-and-conquer with non-uniform recursion (Strassen, cilksort, DAC matmul, UTS, BVH builds). For straight loops over uniform ranges, `parallelFor` has lower dispatch overhead and bigger blocks.
+
+### `submitDetached`
+
+Fire-and-forget. The pool's destructor blocks until every detached body has retired; until then, the pool's lifetime extends every in-flight body.
+
+```cpp
+template <class HintsT, class TaskFn>
+void submitDetached(TaskFn &&fn, CancellationToken tok = {});
+```
+
+```cpp
+#include <citor/cpos/submit_detached.h>
+#include <citor/hints.h>
+#include <citor/thread_pool.h>
+
+#include <atomic>
+
+void scheduleBackground(citor::ThreadPool &pool) {
+  pool.submitDetached<citor::HintsDefaults>(
+      [] { /* background work */ });
+  // Pool destructor will wait for the body before returning.
+}
+```
+
+**Exception handling**: a throw from a detached body is captured into a per-pool slot and surfaced via `pool.lastDetachedException()`. Subsequent throws drop. The pool does not call `std::terminate` on a detached throw.
+
+**When to use it**: tear-down work whose completion is not needed on the caller's join path, but whose retirement is needed before the pool itself can go away (logging flush, async finalisation). For anything the caller actually waits on, use a synchronous primitive.
+
+---
+
+## Hints reference
+
+Every primitive templates on `HintsT` (or `ChainHintsT`). Inherit `HintsDefaults` and override only what differs:
+
+```cpp
+struct MyHints : citor::HintsDefaults {
+  static constexpr citor::Affinity affinity  = citor::Affinity::CcdLocal;
+  static constexpr double          minTaskUs = 25.0;
+  static constexpr std::size_t     chunk     = 4096;
+};
+```
+
+| field                | type            | default            | what it controls |
+|----------------------|-----------------|--------------------|------------------|
+| `balance`            | `Balance`       | `DynamicChunked`   | `StaticUniform` (worker-strided block partition, deterministic block->rank) vs `DynamicChunked` (atomic counter, straggler-tolerant). |
+| `determinism`        | `Determinism`   | `FixedBlockOrder`  | `parallelReduce` only. `FixedBlockOrder` = chunk-id pairwise tree. `KahanCompensated` = Kahan/Neumaier on top. |
+| `affinity`           | `Affinity`      | `CcdLocal`         | `forkJoin` steal-victim direction. `CcdLocal` biases same-CCD victims first. |
+| `priority`           | `Priority`      | `Throughput`       | Two-bucket gate when concurrent producers contend. `Latency` jumps the gate; `Background` yields. |
+| `estimatedItemNs`    | `double`        | `0.0`              | Per-item cost estimate. With `minTaskUs > 0`, gates the inline fallback as `n * estimatedItemNs * 1e-3 < minTaskUs * participants`. |
+| `minTaskUs`          | `double`        | `0.0`              | Minimum task wall time that justifies fan-out. Pair with `estimatedItemNs`. `0.0` disables the gate. |
+| `chunk`              | `std::size_t`   | `0`                | Static block grain (when `balance == StaticUniform`). `0` = derive from `n / participants`. |
+| `cancellationChecks` | `bool`          | `true`             | Whether worker bodies poll the cancellation token at chunk boundaries. Compile out with `false` for tokens that cannot stop. |
+
+Bundled presets (in `<citor/hints.h>`):
+
+| preset                    | what it changes                                           | use when |
+|---------------------------|-----------------------------------------------------------|----------|
+| `HintsDefaults`           | the defaults above                                        | every primitive's first cut. |
+| `StaticHints`             | `balance = StaticUniform`                                 | uniform-cost loops that benefit from cold-collapse's typed monomorphised fast path. |
+| `DynamicHints`            | `balance = DynamicChunked`                                | a stable name for the future-proof default. |
+| `LatencyHints`            | `priority = Latency`                                      | short jobs that want fast first response over peak throughput. |
+| `BulkHints`               | `minTaskUs = 25.0`, `cancellationChecks = false`          | hot uniform-cost loops with no cancellation. |
+| `KahanReduceHints`        | `determinism = KahanCompensated`, `minTaskUs = 25.0`      | numerically sensitive sums (`parallelReduce`). |
+| `FixedBlockReduceHints`   | `minTaskUs = 25.0`                                        | integer or order-insensitive reductions (`parallelReduce`). |
+| `CcdLocalForkJoinHints`   | `affinity = CcdLocal`                                     | recursive fork-join workloads with cross-CCD locality. |
+| `ChainHintsDefaults`      | chain shape: `balance = StaticUniform`, `pipelineSameChunk = true` | most chains. |
+| `DynamicChainHints`       | chain shape: `balance = DynamicChunked`, `pipelineSameChunk = false` | stage packs with skewed bodies and only Global / DeterministicReduce barriers. |
+
+For runtime-driven decisions (benchmark drivers, CLI tools), every primitive has a `*Runtime` sibling that takes a `Hints` POD by value. The runtime path goes through the same engine -- it just trades the compile-time monomorphisation for an in-register hint struct.
+
+## PoolGroup and per-CCD arenas
+
+`PoolGroup::global()` lazily constructs one `ThreadPool` arena per CCD detected by sysfs. Each arena's `pool.kind()` is `PoolKind::Arena`. Cross-arena synchronous calls fall through to the inline path on the caller -- the TLS participant token guards against a worker on arena A submitting work to arena B and blocking on a queue arena A doesn't service.
+
+```cpp
+#include <citor/cpos/parallel_for.h>
+#include <citor/hints.h>
+#include <citor/pool_group.h>
+
+void perCcd() {
+  citor::PoolGroup &group = citor::PoolGroup::global();
+  for (std::size_t i = 0; i < group.ccdCount(); ++i) {
+    citor::ThreadPool &arena = group.arena(i);
+    arena.parallelFor<citor::HintsDefaults>(
+        0, 1'000'000,
+        [&](std::size_t lo, std::size_t hi) { /* per-CCD work */ });
+  }
+}
+
+void localArenaPath() {
+  // Whichever CCD the caller is pinned to (or arena 0 on a non-worker thread).
+  citor::ThreadPool &arena = citor::PoolGroup::global().localArena();
+  arena.parallelFor<citor::HintsDefaults>(0, 1024, [](auto, auto) {});
+}
+```
+
+`localArena()` returns `arena(0)` when the calling thread is not a `PoolGroup` worker (the producer or any user-spawned `std::thread`), so callers always get a valid arena to dispatch to.
+
+## Cancellation
+
+`citor::CancellationToken` is a copy-cheap handle wrapping a heap-allocated atomic. The default-constructed sentinel is allocation-free and `stop_requested()` always returns `false`; obtain a token whose flag can actually be set via `CancellationToken::makeOwned()`.
+
+```cpp
+#include <citor/cancellation.h>
+#include <citor/cpos/parallel_for.h>
+#include <citor/hints.h>
+#include <citor/thread_pool.h>
+
+#include <thread>
+
+void cancellable(citor::ThreadPool &pool) {
+  citor::CancellationToken tok = citor::CancellationToken::makeOwned();
+
+  std::thread killer([tok]() mutable {
+    using namespace std::chrono_literals;
+    std::this_thread::sleep_for(50ms);
+    tok.request_stop();
+  });
+
+  try {
+    pool.parallelFor<citor::HintsDefaults>(
+        0, 1'000'000'000,
+        [&](std::size_t lo, std::size_t hi) {
+          for (std::size_t i = lo; i < hi; ++i) { /* heavy work */ }
+        },
+        tok);
+  } catch (const citor::cancelled_exception &) {
+    // void-returning primitives throw cancelled_exception on a stopped token.
+  }
+
+  killer.join();
+}
+```
+
+`parallelReduce` throws `citor::cancelled_value_exception<T>` carrying the deterministic combine of the chunks completed before cancellation. `forkJoin` cancels by clamping the outstanding count and returning normally; tasks that haven't started just don't run.
+
+The `cancellationChecks` hint compiles out the per-chunk poll for tokens that are statically known not to stop. Pair it with the never-stopped sentinel for hot loops where cancellation is not a possibility.
+
+## Build options
+
+| option                          | default      | effect |
+|---------------------------------|--------------|--------|
+| `CITOR_BUILD_TESTS`             | ON top-level | Build the GTest suite. |
+| `CITOR_BUILD_BENCHMARK`         | ON top-level | Build the comparative bench (fetches eight competitor pools via CPM; first cold configure is 5-10 minutes). |
+| `CITOR_USE_AVX2`                | ON           | Compile with `-mavx2 -mfma`, define `CITOR_USE_AVX2`. Auto-detected via `check_cxx_compiler_flag`. |
+| `CITOR_BUILD_WITH_SANITIZER`    | OFF          | Build with `-fsanitize=thread -fno-omit-frame-pointer`. |
+| `CITOR_ENABLE_CLANG_TIDY`       | ON top-level | Wire clang-tidy into the build (per-target). Not a pre-commit hook. |
+| `CITOR_ENABLE_POOL_COUNTERS`    | OFF          | Compile in pool-level diagnostic counters (dispatches, inline fallbacks, cancellation stops). Hot path pays no extra atomics when OFF. |
+| `CITOR_WORKER_STACK_KIB`        | `8192`       | Per-worker pthread stack size (KiB). |
+
+When citor is consumed via `add_subdirectory(...)` or CPM, all of the above default to OFF -- the consumer gets the public INTERFACE target only.
+
+## Supported compilers
+
+- **GCC 14+**, **Clang 18+** on `ubuntu-24.04`. CI runs both on every push.
+- **GCC 15** and **Clang 19** are exercised on a weekly cron and allowed to fail-soft.
+- libstdc++ on GCC, libc++ on the TSan job (libstdc++ produces false-positive races on standard library internals under TSan; the LLVM project's own check-tsan suite uses libc++).
+
+Linux kernel 6.x with `futex` and sysfs `cpu/cpuX/cache/index*` is required. AVX2 is auto-detected; the pool builds without it but loses the AVX2-tuned code paths.
+
+## Reproducing benchmarks
+
+The full bench fetches eight competitor pools (BS, dp, task, riften, oneTBB, Taskflow, Eigen, OpenMP) and takes 2-3 hours wall-clock on a 9950X3D. Use `scripts/quickbench.sh` for a ~90 s smoke check. See [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for methodology, host disclosure, and the per-family scatter / "where citor loses" tables.
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).
