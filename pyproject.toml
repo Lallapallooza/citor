@@ -1,13 +1,30 @@
 [project]
-name = "citor-tooling"
+name = "citor-dev"
 version = "0.1.0"
-description = "Dev tooling for citor (pre-commit, formatters)"
+description = "Dev-side hooks and tooling for the citor C++ library."
 requires-python = ">=3.10"
-dependencies = [
-    "pre-commit>=3.5",
-    "commitizen>=3.13",
-    "gersemi>=0.16",
-]
+
+[dependency-groups]
+dev = ["pre-commit>=4.0", "commitizen>=4.0"]
+plot = ["matplotlib>=3.8", "numpy>=1.26", "pandas>=2.1", "pandas-stubs>=2.1"]
 
 [tool.commitizen]
 name = "cz_conventional_commits"
+version = "0.1.0"
+tag_format = "v$version"
+version_scheme = "semver"
+update_changelog_on_bump = false
+bump_message = "bump: $current_version -> $new_version"
+version_files = [
+    "pyproject.toml:^version",
+    "CMakeLists.txt:VERSION",
+    "include/citor/version.h:CITOR_VERSION_STRING",
+    "CITATION.cff:^version",
+    "README.md:citor/v",
+    "README.md:citor#v",
+    "README.md:GIT_TAG",
+    "README.md:--version",
+    "README.md:citor/0",
+    "packaging/vcpkg/ports/citor/vcpkg.json:\"version\"",
+    "packaging/conan/conanfile.py:^    version",
+]
