@@ -85,7 +85,7 @@ template <class Pool> struct CompetitorTraits;
 /// Trait for the new `citor::ThreadPool`.
 ///
 /// Routes through citor's public `DynamicHints` preset so the bench measures the user-facing
-/// default the engine ships with (DynamicChunked balance, auto-derived ,
+/// default the engine ships with (DynamicChunked balance, engine-derived chunk size,
 /// cold-collapse on). Cells that want a side-by-side Static-vs-Dynamic comparison call
 /// `pool.parallelFor<H>` directly with `citor::StaticHints` / `citor::DynamicHints` and bypass
 /// this shim.
@@ -152,10 +152,8 @@ template <> struct CompetitorTraits<BS::light_thread_pool> {
     pool.submit_blocks(first, last, fn, blocks).wait();
   }
 
-  /// blocks.
-  /// derivation so the comparison's partition shape is the same on both
-  /// sides; without it BS workers would each get exactly one strided block
-  /// and a slow worker would gate the future barrier on its assigned share.
+  /// Range-partitioned for using `submit_blocks` with `participantCount` blocks
+  /// (one block per worker), matching BS's natural single-fanout shape.
   template <class Fn>
   static void parallelFor(BS::light_thread_pool &pool, std::size_t first, std::size_t last,
                           std::size_t participantCount, Fn fn) {
@@ -303,9 +301,6 @@ template <> struct CompetitorTraits<dp::thread_pool<>> {
       return;
     }
     const std::size_t span = last - first;
-    //:
-    // workers race for blocks via dp's enqueue + futures, so a slow worker's
-    // unfinished tail can be picked up by faster peers.
     const std::size_t blocks = participantCount;
     const std::size_t block = (span + blocks - 1U) / blocks;
     std::vector<std::future<void>> futures;
@@ -429,8 +424,7 @@ template <> struct CompetitorTraits<::task_thread_pool::task_thread_pool> {
     }
   }
 
-  /// Range-partitioned for. Future-mutex barrier is the rendezvous.
-  ///.
+  /// Range-partitioned for. One block per worker; future-mutex barrier is the rendezvous.
   template <class Fn>
   static void parallelFor(::task_thread_pool::task_thread_pool &pool, std::size_t first,
                           std::size_t last, std::size_t participantCount, Fn fn) {
@@ -572,9 +566,6 @@ template <> struct CompetitorTraits<riften::Thiefpool> {
       return;
     }
     const std::size_t span = last - first;
-    //;
-    // riften's work-stealing scheduler picks blocks off its global queue, so
-    // a slow worker's tail can be stolen by faster peers.
     const std::size_t blocks = participantCount;
     const std::size_t block = (span + blocks - 1U) / blocks;
     std::vector<std::future<void>> futures;
@@ -703,8 +694,9 @@ template <> struct CompetitorTraits<::tbb::task_arena> {
 
   /// Range-partitioned `parallel_for`. Uses TBB's `auto_partitioner` so the
   /// runtime adaptively splits ranges in response to worker idle signals --
-  /// derivation. `participantCount` is consumed only as the construction
-  /// hint via `make()`; the partitioner picks the per-task grain itself.
+  /// TBB's idiomatic shape. `participantCount` is consumed only as the
+  /// construction hint via `make()`; the partitioner picks the per-task
+  /// grain itself.
   template <class Fn>
   static void parallelFor(::tbb::task_arena &arena, std::size_t first, std::size_t last,
                           std::size_t /*participantCount*/, Fn fn) {
@@ -832,8 +824,9 @@ template <> struct CompetitorTraits<::tf::Executor> {
     exec.run(flow).wait();
   }
 
-  /// derivation; Taskflow's executor work-steals between workers, so the
-  /// dynamic tail is absorbed by whichever worker is idle.
+  /// Range-partitioned for: split `[first, last)` into `participantCount`
+  /// blocks. Taskflow's executor work-steals between workers, so an idle
+  /// worker can pick up another's block when the tail straggles.
   template <class Fn>
   static void parallelFor(::tf::Executor &exec, std::size_t first, std::size_t last,
                           std::size_t participantCount, Fn fn) {
@@ -957,8 +950,6 @@ template <> struct CompetitorTraits<::Eigen::ThreadPool> {
       participantCount = 1;
     }
     const std::size_t span = last - first;
-    //;
-    // Eigen's NonBlockingThreadPool runs whichever worker is free.
     const std::size_t blocks = participantCount;
     const std::size_t block = (span + blocks - 1) / blocks;
     std::vector<std::pair<std::size_t, std::size_t>> ranges;
@@ -1078,9 +1069,10 @@ template <> struct CompetitorTraits<OpenMpRunner> {
     }
   }
 
-  /// chunk derivation; `schedule(dynamic, 1)` over the block index lets fast
-  /// libomp workers pull additional blocks past their static share when one
-  /// rank straggles.
+  /// Range-partitioned `parallel for` over `threads` blocks with dynamic
+  /// schedule. `schedule(dynamic, 1)` over the block index lets fast libomp
+  /// workers pull additional blocks past their static share when one rank
+  /// straggles.
   template <class Fn>
   static void parallelFor(OpenMpRunner &runner, std::size_t first, std::size_t last,
                           std::size_t /*participantCount*/, Fn fn) {
@@ -1151,8 +1143,9 @@ template <> struct CompetitorTraits<OpenMpRunner> {
 ///
 /// Leopard's `parallel_loop` auto-partitions into one block per worker thread and returns a
 /// vector of futures (one per chunk). The bench shim wires it through `dispatch()` directly so
-/// 1x partition would let stragglers gate the wait. `submitBlocksAndWait` on this adapter
-/// issues `last - first` per-element tasks, mirroring BS / dp / task / riften.
+/// the partition is `participantCount` blocks (one per worker), matching every other peer.
+/// `submitBlocksAndWait` on this adapter issues `last - first` per-element tasks, mirroring
+/// BS / dp / task / riften.
 template <> struct CompetitorTraits<hmthrp::ThreadPool> {
   static constexpr const char *name = "Leopard::ThreadPool";
 
@@ -1261,8 +1254,8 @@ template <> struct CompetitorTraits<hmthrp::ThreadPool> {
 ///        `parallel_for` over `ChunkedRange`.
 ///
 /// The shim binds a per-row `dispenso::ThreadPool` to a `dispenso::TaskSet` and routes the
-/// dispatch through `dispenso::parallel_for(taskSet, ChunkedRange, body)`. The chunk size
-/// comparison's partition shape is symmetric across pools.
+/// dispatch through `dispenso::parallel_for(taskSet, ChunkedRange, body)`. The chunk size is
+/// `participantCount` blocks (one per worker), matching every other peer's natural shape.
 template <> struct CompetitorTraits<dispenso::ThreadPool> {
   static constexpr const char *name = "dispenso::ThreadPool";
 
