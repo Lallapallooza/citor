@@ -161,7 +161,14 @@ inline Topology detectTopology() {
   cpu_set_t mask;
   CPU_ZERO(&mask);
   if (sched_getaffinity(0, sizeof(mask), &mask) == 0) {
-    for (std::uint32_t cpu = 0; cpu < topo.logicalCount; ++cpu) {
+    /// Cap the scan at `CPU_SETSIZE` so the fixed-size `cpu_set_t` is never
+    /// indexed past its bit range on hosts with more than `CPU_SETSIZE`
+    /// logical CPUs. Pools never need more than `physicalCores` workers so
+    /// the cap only affects affinity reporting, not scheduling.
+    const std::uint32_t cpuMax = static_cast<std::uint32_t>(CPU_SETSIZE);
+    const std::uint32_t scanLimit =
+        topo.logicalCount < cpuMax ? topo.logicalCount : cpuMax;
+    for (std::uint32_t cpu = 0; cpu < scanLimit; ++cpu) {
       if (CPU_ISSET(static_cast<int>(cpu), &mask)) {
         allowed.push_back(cpu);
       }
