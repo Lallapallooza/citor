@@ -64,10 +64,19 @@ struct PoolControl {
   /// `claimedAt` CAS and stamp DONE with a plain release store.
   static constexpr std::uint64_t kSkipClaimBit = 1ULL << 3;
 
+  /// Bit set by the worker on its `mailbox` after the producer self-stamped `doneSentinel`
+  /// in the cold-collapse path. The worker's natural CAS at the end of a dispatch fails
+  /// when the producer raced ahead, leaving acquire-only ordering on the failure path. This
+  /// bit lets the worker re-emit a release-store on the same line so the producer's next
+  /// dispatch can acquire-load it before constructing a fresh `JobDescriptor` on the same
+  /// stack address. Only inspected by the producer during the publish path's pre-write
+  /// wait when a prior dispatch's cold-collapse left an unacked slot.
+  static constexpr std::uint64_t kAckedBit = 1ULL << 4;
+
   /// Number of low bits reserved for flags; producer increments `generation` by `1 << kPhaseShift`.
   /// Bits: 0=shutdown, 1=done (worker->producer ack), 2=reuse (producer->worker hot-path hint),
-  /// 3=skip cold-collapse claim on hot large fanouts.
-  static constexpr std::uint64_t kPhaseShift = 4;
+  /// 3=skip cold-collapse claim on hot large fanouts, 4=cold-collapse ack (worker->producer).
+  static constexpr std::uint64_t kPhaseShift = 5;
 
   /// Increment applied per published phase so flags survive the bump.
   static constexpr std::uint64_t kPhaseStep = 1ULL << kPhaseShift;

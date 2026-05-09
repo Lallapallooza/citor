@@ -4849,6 +4849,28 @@ private:
     {
       auto *workersBaseForPublish = m_workers.get();
       auto *descRaw = static_cast<void *>(&desc);
+      // Drain pending cold-collapse acks from the prior dispatch. When the
+      // prior dispatch's join self-stamped `doneSentinel` on a worker's
+      // mailbox to skip waiting for the worker's natural release, the
+      // worker's prior reads of the prior `JobDescriptor`'s fields were
+      // ordered only acquire-side. Wait for the worker's `kAckedBit`
+      // release-store before overwriting `mailboxDesc` or the mailbox phase
+      // here, so this dispatch's writes to the same stack-frame address
+      // happen-after the worker's prior reads. Hot path: `m_coldStampedMask`
+      // is zero, the branch is skipped.
+      if (m_coldStampedMask != 0U) [[unlikely]] {
+        std::uint64_t scan = m_coldStampedMask;
+        while (scan != 0U) {
+          const auto bit = static_cast<unsigned>(__builtin_ctzll(scan));
+          scan &= scan - 1U;
+          auto *w = workersBaseForPublish + bit;
+          while ((w->mailbox.load(std::memory_order_acquire) &
+                  detail::PoolControl::kAckedBit) == 0U) {
+            detail::cpuRelax();
+          }
+        }
+        m_coldStampedMask = 0U;
+      }
       if (reuseSafe) {
         // Same-command reuse: workers already cached desc fields on the prior
         // full publish. Skip the mailboxDesc store entirely; just bump mailbox
@@ -4901,8 +4923,8 @@ private:
         while (scan != 0U) {
           const auto bit = static_cast<unsigned>(__builtin_ctzll(scan));
           scan &= scan - 1U;
-          if ((workersBase + bit)->mailbox.load(std::memory_order_acquire) ==
-              doneSentinel) {
+          if (((workersBase + bit)->mailbox.load(std::memory_order_acquire) &
+               ~detail::PoolControl::kAckedBit) == doneSentinel) {
             pendingProbe &= ~(std::uint64_t{1} << bit);
           }
         }
@@ -5061,7 +5083,11 @@ private:
           auto &w = *(workersBase + bit);
           bool tightDone = false;
           for (std::uint32_t i = 0; i < kTightProbeIters; ++i) {
-            if (w.mailbox.load(std::memory_order_acquire) == doneSentinel) {
+            // Mask out `kAckedBit` so a worker's cold-collapse-path
+            // CAS-success stamp (which carries `kAckedBit`) is recognized
+            // as `doneSentinel` here.
+            if ((w.mailbox.load(std::memory_order_acquire) &
+                 ~detail::PoolControl::kAckedBit) == doneSentinel) {
               tightDone = true;
               break;
             }
@@ -5132,10 +5158,16 @@ private:
               }
             }
             w.mailbox.store(doneSentinel, std::memory_order_release);
+            // Record this slot in the cold-stamped mask so the next dispatch's
+            // publish path waits for the worker's `kAckedBit` release before
+            // it can safely overwrite `mailboxDesc[bit]` and reuse the
+            // producer's stack frame for a fresh `JobDescriptor`.
+            m_coldStampedMask |= (1ULL << bit);
             tightDone = true;
           }
           while (!tightDone &&
-                 w.mailbox.load(std::memory_order_acquire) != doneSentinel) {
+                 (w.mailbox.load(std::memory_order_acquire) &
+                  ~detail::PoolControl::kAckedBit) != doneSentinel) {
             detail::cpuRelax();
             // Quiet-rounds bookkeeping is dead weight under low-latency scope:
             // workers are hot-spinning so the CPU-collision yield is the wrong
@@ -5172,7 +5204,7 @@ private:
           auto &w = *(workersBase + slot);
           while (true) {
             const std::uint64_t mb = w.mailbox.load(std::memory_order_acquire);
-            if (mb == doneSentinel) {
+            if ((mb & ~detail::PoolControl::kAckedBit) == doneSentinel) {
               break;
             }
             detail::cpuRelax();
@@ -5497,6 +5529,18 @@ private:
   // under the dispatch gate, so a relaxed atomic load is sufficient on
   // the producer's pre-lease read.
   std::atomic<const detail::JobDescriptor *> m_lastPublishedDesc{nullptr};
+
+  // Bitmask of worker slots that the prior dispatch's join cold-collapsed
+  // via the producer-side `mailbox.store(doneSentinel, release)` at
+  // `dispatchOneStaticLockedBody`. Cold-collapse short-circuits the worker's
+  // natural release-store on `mailbox`, leaving the worker's prior reads of
+  // `desc->workerEntry` and other descriptor fields unordered relative to
+  // the next dispatch's `JobDescriptor` constructor on the same producer
+  // stack frame. The next dispatch's publish path consults this mask: for
+  // each set bit, it spin-waits on the worker's `mailbox` until the worker
+  // emits `kAckedBit` from its CAS-fail at `worker_loop.h`. Mutated only
+  // under the dispatch gate.
+  std::uint64_t m_coldStampedMask{0};
 
   // Number of `Priority::Latency` callers currently waiting on the
   // dispatch gate. Throughput and Background callers spin on this until

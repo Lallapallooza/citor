@@ -57,6 +57,7 @@ set(_citor_tests
     pool_group_topology_test
     priority_queue_test
     regression_auto_pin_test
+    regression_back_to_back_dispatch_test
     regression_cross_pool_dispatch_test
     regression_descriptor_reuse_test
     regression_detached_lifecycle_test
