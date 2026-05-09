@@ -74,6 +74,7 @@ jobs:
 
   version-sync:
     runs-on: ubuntu-24.04
+    needs: [build-and-test, pre-commit, clang-tidy]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -87,18 +88,18 @@ jobs:
           PROJECT_VERSION=$(cz version --project)
           echo "project version = ${PROJECT_VERSION}"
           # commitizen errors if any tracked file's version line is missing or
-          # does not match the project version.
-          cz bump --files-only --dry-run --increment PATCH
+          # does not match the project version. `--yes` skips the interactive
+          # tag-confirmation prompt that fails with EOFError on CI runners.
+          cz bump --files-only --dry-run --increment PATCH --yes
 
   clang-tidy:
     runs-on: ubuntu-24.04
-    needs: build-and-test
     steps:
       - uses: actions/checkout@v4
-      - name: Install clang-tidy
+      - name: Install clang-18 + clang-tidy-18
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-18 clang-tidy-18 ninja-build
+          sudo apt-get install -y clang-18 clang-tidy-18 lld-18 ninja-build
           echo "CC=clang-18"  >> "$GITHUB_ENV"
           echo "CXX=clang++-18" >> "$GITHUB_ENV"
       - name: CPM source cache
@@ -108,14 +109,19 @@ jobs:
           key: cpm-${{ runner.os }}-${{ hashFiles('cmake/CPM.cmake', '**/CMakeLists.txt') }}
           restore-keys: |
             cpm-${{ runner.os }}-
-      - name: Configure (with compile_commands.json)
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: clang-tidy-ci
+          max-size: 500M
+      - name: Configure with CITOR_ENABLE_CLANG_TIDY=ON
         env:
           CPM_SOURCE_CACHE: ${{ github.workspace }}/.cache/CPM
         run: |
           cmake -S . -B build -G Ninja \
             -DCITOR_BUILD_BENCHMARK=OFF \
-            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-      - name: Run clang-tidy across include/ tests/ benchmark/
-        run: |
-          mapfile -t FILES < <(git ls-files 'include/citor/**/*.h' 'tests/**/*.cpp' 'benchmark/**/*.cpp')
-          python3 scripts/run_clang_tidy.py "${FILES[@]}"
+            -DCITOR_ENABLE_CLANG_TIDY=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      - name: Build (clang-tidy runs per TU)
+        run: cmake --build build -j
