@@ -50,6 +50,13 @@ repos:
         files: ^(include/citor/.*\.h|tools/amalgamate\.py)$
         pass_filenames: false
 
+      - id: require-doc-strings
+        name: require-doc-strings
+        entry: python3 scripts/check_doc_strings.py
+        language: system
+        files: ^include/citor/.*\.h$
+        pass_filenames: true
+
       - id: clang-tidy
         name: clang-tidy
         entry: python3 scripts/run_clang_tidy.py
