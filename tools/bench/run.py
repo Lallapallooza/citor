@@ -10,7 +10,7 @@ from tools.bench import host
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
-def add_parser(sub: argparse._SubParsersAction) -> None:
+def add_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("run", help="full bench sweep")
     p.add_argument("--filter", default="", help="workload-name substring filter")
     p.add_argument("--out", default="", help="output dir (default: bench_out/<host>/<sha>)")
@@ -28,10 +28,9 @@ def run(args: argparse.Namespace) -> int:
     if args.out:
         out_dir = Path(args.out)
     else:
-        sha = host.disclosure(REPO_ROOT, args.taskset)["git_sha"][:12]
-        out_dir = (
-            REPO_ROOT / "bench_out" / host.disclosure(REPO_ROOT, args.taskset)["hostname"] / sha
-        )
+        info = host.disclosure(REPO_ROOT, args.taskset)
+        sha = str(info["git_sha"])[:12]
+        out_dir = REPO_ROOT / "bench_out" / str(info["hostname"]) / sha
     out_dir.mkdir(parents=True, exist_ok=True)
     host.write(out_dir / "host.json", REPO_ROOT, args.taskset)
 

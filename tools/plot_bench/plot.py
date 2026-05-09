@@ -474,7 +474,7 @@ def _medians_by_workload(samples: pd.DataFrame) -> dict[str, dict[str, float]]:
         return out
     grouped = samples.groupby(["workload", "pool"], observed=True)["ns"].median()
     for key, median in grouped.items():
-        out[str(key[0])][str(key[1])] = float(median)  # type: ignore[index]
+        out[str(key[0])][str(key[1])] = float(median)
     return out
 
 

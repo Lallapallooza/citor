@@ -17,7 +17,7 @@ CELLS = (
 )
 
 
-def add_parser(sub: argparse._SubParsersAction) -> None:
+def add_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("quick", help="smoke bench (~90s)")
     p.add_argument("--taskset", default="0-15", help="taskset CPU mask")
     p.set_defaults(func=run)

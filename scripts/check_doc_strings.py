@@ -53,11 +53,9 @@ def scan(path: Path) -> list[tuple[int, str]]:
     text = path.read_text(encoding="utf-8")
     lines = text.splitlines()
     issues: list[tuple[int, str]] = []
-    brace_depth = 0      # function-body depth; top-of-namespace is 0
+    brace_depth = 0  # function-body depth; top-of-namespace is 0
     in_anon = 0
     for idx, line in enumerate(lines):
-        stripped = line.strip()
-
         if ANON_NS_RE.match(line):
             in_anon += 1
             brace_depth += 1
@@ -71,13 +69,17 @@ def scan(path: Path) -> list[tuple[int, str]]:
             brace_depth = max(0, brace_depth - 1)
             continue
 
-        if brace_depth == 0 and not in_anon and not SKIP_RE.match(line):
-            if DECL_RE.match(line) and not has_preceding_doc(lines, idx):
-                issues.append((idx + 1, line.rstrip()))
+        if (
+            brace_depth == 0
+            and not in_anon
+            and not SKIP_RE.match(line)
+            and DECL_RE.match(line)
+            and not has_preceding_doc(lines, idx)
+        ):
+            issues.append((idx + 1, line.rstrip()))
 
         brace_depth += line.count("{") - line.count("}")
-        if brace_depth < 0:
-            brace_depth = 0
+        brace_depth = max(brace_depth, 0)
 
     return issues
 
