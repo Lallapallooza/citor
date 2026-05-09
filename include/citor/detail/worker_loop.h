@@ -238,17 +238,14 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
           lastSeenMailbox = doneAcked;
           mailbox = doneAcked;
         } else {
-          // The producer cold-collapsed our slot via a `mailbox.store(
-          // doneSentinel, release)` and is waiting for our ack. Our prior
-          // reads of `desc->workerEntry` and other descriptor fields are
-          // sequenced before the failed CAS, but the failure-order is
-          // acquire-only and emits no release. Re-store `expected |
-          // kAckedBit` with release so the producer's next-dispatch publish
-          // can acquire-load it before reusing the prior dispatch's
-          // stack-frame address for a fresh `JobDescriptor`. Also update
-          // `lastSeenMailbox` so the phase compare on the next iteration
-          // does not re-enter this branch and re-read descriptor fields
-          // (which would race the producer's already-running next dispatch).
+          // CAS lost the race against the producer's cold-collapse
+          // self-stamp. Re-store `expected | kAckedBit` with release so the
+          // producer's next-dispatch publish can acquire-load it before
+          // reusing the prior dispatch's stack-frame address for a fresh
+          // `JobDescriptor`. Also update `lastSeenMailbox` so the phase
+          // compare on the next iteration does not re-enter this branch
+          // and re-read descriptor fields (which would race the producer's
+          // already-running next dispatch).
           const std::uint64_t ackedMb = expected | PoolControl::kAckedBit;
           self.mailbox.store(ackedMb, std::memory_order_release);
           lastSeenMailbox = ackedMb;
