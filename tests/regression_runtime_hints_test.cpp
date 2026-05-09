@@ -56,6 +56,8 @@ TEST(RegressionRuntimeHints,
                               std::size_t /*lo*/, std::size_t /*hi*/) {
         calls.fetch_add(1, std::memory_order_relaxed);
       }));
-  // With participants=4, the static-uniform stage runs once per slot.
-  EXPECT_EQ(calls.load(), 4);
+  // The static-uniform stage runs once per slot. The pool clamps to physical
+  // cores at construction, so the actual participant count may be less than
+  // the requested 4 (for example on a CI runner with two physical cores).
+  EXPECT_EQ(calls.load(), static_cast<int>(pool.participants()));
 }
