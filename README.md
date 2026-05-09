@@ -908,12 +908,12 @@ Linux kernel 6.x with `futex` and sysfs `cpu/cpuX/cache/index*` is required. AVX
 
 ## Reproducing benchmarks
 
-The full sweep fetches ten peer pools and runs ~94 workloads; wall-clock is 40-50 minutes on a 16-core CCD. Use `scripts/run_bench_isolated.sh` to wrap each cell in its own process so a competitor's segfault does not kill the whole run.
+The full sweep fetches ten peer pools and runs ~94 workloads; wall-clock is 40-50 minutes on a 16-core CCD. Use `python -m tools.bench isolated` to run each cell in its own process so a competitor's segfault does not kill the whole run.
 
 ```bash
 cmake -S . -B build -G Ninja -DCITOR_BUILD_BENCHMARK=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target parallel_bench -j
-taskset -c 0-15 ./build/benchmark/parallel_bench --export bench_out/results.json
+python -m tools.bench run
 ```
 
 Disable ASLR (`/proc/sys/kernel/randomize_va_space=0`), set `cpufreq` governor to `performance`, and disable boost before timing-sensitive runs. The harness's startup checklist surfaces any gate that did not pass.

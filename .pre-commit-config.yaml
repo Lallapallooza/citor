@@ -75,7 +75,7 @@ repos:
 
       - id: packaging-tests
         name: packaging-tests (consume channels)
-        entry: bash tests/packaging/run_packaging_tests.sh
+        entry: python3 -m tools.bench packaging
         language: system
         stages: [pre-push]
         pass_filenames: false

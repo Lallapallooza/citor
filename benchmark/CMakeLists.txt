@@ -294,34 +294,34 @@ else()
 endif()
 
 set(_citor_bench_sources
-    affinity_sweep_bench.cpp
-    balance_sweep_bench.cpp
-    bench_main.cpp
-    bulk_for_queries_bench.cpp
-    chain_bench.cpp
-    cold_path_bench.cpp
-    cross_ccd_parallel_for_bench.cpp
-    differential_bench.cpp
-    empty_fanout_bench.cpp
-    fork_join_bench.cpp
-    forkjoin_cilksort_bench.cpp
-    forkjoin_knapsack_cancel_bench.cpp
-    forkjoin_matmul_dac_bench.cpp
-    forkjoin_mixed_detached_sync_bench.cpp
-    forkjoin_pool_group_cross_ccd_bench.cpp
-    forkjoin_skynet_bench.cpp
-    forkjoin_strassen_bench.cpp
-    forkjoin_uts_bench.cpp
-    granularity_bench.cpp
-    matmul_bench.cpp
-    parallel_for_cold_dispatch_bench.cpp
-    parallel_reduce_bench.cpp
-    parallel_reduce_pareto_bench.cpp
-    pareto_body_bench.cpp
-    plex_bench.cpp
-    runplex_heat_bench.cpp
-    runplex_stencil_bench.cpp
-    scan_bench.cpp
+    harness/bench_main.cpp
+    parallel_for/affinity_sweep_bench.cpp
+    parallel_for/balance_sweep_bench.cpp
+    parallel_for/cold_path_bench.cpp
+    parallel_for/cross_ccd_parallel_for_bench.cpp
+    parallel_for/empty_fanout_bench.cpp
+    parallel_for/granularity_bench.cpp
+    parallel_for/matmul_bench.cpp
+    parallel_for/parallel_for_cold_dispatch_bench.cpp
+    parallel_for/pareto_body_bench.cpp
+    reduce/parallel_reduce_bench.cpp
+    reduce/parallel_reduce_pareto_bench.cpp
+    scan/scan_bench.cpp
+    chain/chain_bench.cpp
+    run_plex/plex_bench.cpp
+    run_plex/runplex_heat_bench.cpp
+    run_plex/runplex_stencil_bench.cpp
+    fork_join/fork_join_bench.cpp
+    fork_join/forkjoin_cilksort_bench.cpp
+    fork_join/forkjoin_knapsack_cancel_bench.cpp
+    fork_join/forkjoin_matmul_dac_bench.cpp
+    fork_join/forkjoin_mixed_detached_sync_bench.cpp
+    fork_join/forkjoin_pool_group_cross_ccd_bench.cpp
+    fork_join/forkjoin_skynet_bench.cpp
+    fork_join/forkjoin_strassen_bench.cpp
+    fork_join/forkjoin_uts_bench.cpp
+    bulk_for_queries/bulk_for_queries_bench.cpp
+    differential/differential_bench.cpp
 )
 
 # libfork's public API uses C++23-only multi-arg subscript syntax
@@ -331,17 +331,23 @@ set(_citor_bench_sources
 # reduces to `std::vector<double>` / `std::string` cross-TU handoff, which is
 # stable across C++20-C++23 with the same standard library.
 if(TARGET libfork_headers)
-    list(APPEND _citor_bench_sources libfork_runners.cpp)
+    list(APPEND _citor_bench_sources harness/libfork_runners.cpp)
 endif()
 
 # TooManyCooks compiles at the project default (C++20). One TU must define
 # TMC_IMPL before including the headers; tmc_runners.cpp does this once.
 if(TARGET tmc_headers)
-    list(APPEND _citor_bench_sources tmc_runners.cpp)
+    list(APPEND _citor_bench_sources harness/tmc_runners.cpp)
 endif()
 
 add_executable(parallel_bench ${_citor_bench_sources})
-target_include_directories(parallel_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(
+    parallel_bench
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/harness
+        ${CMAKE_CURRENT_SOURCE_DIR}/competitor_traits
+)
 target_link_libraries(
     parallel_bench
     PRIVATE
@@ -433,7 +439,7 @@ if(TARGET libfork_headers)
     # heavily at the libfork headers; isolating the std=c++23 override on
     # this single TU keeps both the std and the warning surface contained.
     set_source_files_properties(
-        libfork_runners.cpp
+        harness/libfork_runners.cpp
         PROPERTIES
             COMPILE_OPTIONS
                 "-std=c++23;-Wno-c++23-extensions;-Wno-deprecated-declarations"
@@ -469,7 +475,7 @@ if(TARGET tmc_headers)
     # tmc compiles at C++20 (project default). Skip linting on the impl TU --
     # the TMC_IMPL definitions pull in the full implementation surface and
     # tidy diagnostics on third-party headers are not actionable here.
-    set_source_files_properties(tmc_runners.cpp PROPERTIES SKIP_LINTING ON)
+    set_source_files_properties(harness/tmc_runners.cpp PROPERTIES SKIP_LINTING ON)
 endif()
 
 if(UNIX AND NOT APPLE)
