@@ -26,10 +26,10 @@
 #include <thread>
 #include <vector>
 
-#include "../bench_format.h"
-#include "../bench_registry.h"
-#include "../cycle_clock.h"
-#include "../harness.h"
+#include "../harness/bench_format.h"
+#include "../harness/bench_registry.h"
+#include "../harness/cycle_clock.h"
+#include "../harness/harness.h"
 
 extern "C" void kmp_set_blocktime(int milliseconds);
 

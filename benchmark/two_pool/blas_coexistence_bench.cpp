@@ -39,9 +39,9 @@
 #include "citor/hints.h"
 #include "citor/thread_pool.h"
 
-#include "../bench_format.h"
-#include "../bench_registry.h"
-#include "../cycle_clock.h"
+#include "../harness/bench_format.h"
+#include "../harness/bench_registry.h"
+#include "../harness/cycle_clock.h"
 
 // LLVM libomp Intel-compatibility extensions; declared as free C functions so
 // we do not pull in `omp-tools.h` for these two symbols.

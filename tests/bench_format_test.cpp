@@ -12,7 +12,7 @@
 #include <string>
 #include <vector>
 
-#include "../benchmark/bench_format.h"
+#include "../benchmark/harness/bench_format.h"
 
 namespace {
 
