@@ -64,12 +64,14 @@ TEST(BenchFormat, FormatTableNoTailColumnsWhenAllNullopt) {
                                       .nsPerOp = 100.0,
                                       .opsPerSec = 1e7,
                                       .errPercent = 0.5,
-                                      .tailNs = std::nullopt},
+                                      .tailNs = std::nullopt,
+                                      .rawSamplesNs = {}},
                                      {.name = "oneTBB",
                                       .nsPerOp = 200.0,
                                       .opsPerSec = 5e6,
                                       .errPercent = 0.7,
-                                      .tailNs = std::nullopt},
+                                      .tailNs = std::nullopt,
+                                      .rawSamplesNs = {}},
                                  }};
   std::ostringstream oss;
   citor::bench::formatTable(table, "citor::ThreadPool", oss);
@@ -81,19 +83,22 @@ TEST(BenchFormat, FormatTableNoTailColumnsWhenAllNullopt) {
 }
 
 TEST(BenchFormat, FormatTableEmitsTailColumnsWhenAnyRowPopulated) {
-  citor::bench::BenchTable table{.workload = "wl",
-                                 .rows = {
-                                     {.name = "citor::ThreadPool",
-                                      .nsPerOp = 100.0,
-                                      .opsPerSec = 1e7,
-                                      .errPercent = 0.5,
-                                      .tailNs = std::array<double, 3>{90.0, 100.0, 250.0}},
-                                     {.name = "oneTBB",
-                                      .nsPerOp = 200.0,
-                                      .opsPerSec = 5e6,
-                                      .errPercent = 0.7,
-                                      .tailNs = std::nullopt},
-                                 }};
+  citor::bench::BenchTable table{
+      .workload = "wl",
+      .rows = {
+          {.name = "citor::ThreadPool",
+           .nsPerOp = 100.0,
+           .opsPerSec = 1e7,
+           .errPercent = 0.5,
+           .tailNs = std::array<double, 3>{90.0, 100.0, 250.0},
+           .rawSamplesNs = {}},
+          {.name = "oneTBB",
+           .nsPerOp = 200.0,
+           .opsPerSec = 5e6,
+           .errPercent = 0.7,
+           .tailNs = std::nullopt,
+           .rawSamplesNs = {}},
+      }};
   std::ostringstream oss;
   citor::bench::formatTable(table, "citor::ThreadPool", oss);
   const std::string out = oss.str();
