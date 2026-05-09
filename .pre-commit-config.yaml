@@ -34,6 +34,9 @@ repos:
     hooks:
       - id: mypy
         additional_dependencies: []
+        # Conan's `ConanFile` ships no type stubs and the conanfile is loaded
+        # by the conan CLI rather than imported normally; skip it.
+        exclude: ^packaging/conan/conanfile\.py$
 
   - repo: https://github.com/commitizen-tools/commitizen
     rev: v4.13.10

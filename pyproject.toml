@@ -74,7 +74,7 @@ line-ending = "lf"
 [tool.mypy]
 python_version = "3.10"
 strict = true
-exclude = ["build.*", "\\.cache", "single_include"]
+exclude = ["build.*", "\\.cache", "single_include", "packaging/conan/conanfile.py"]
 explicit_package_bases = true
 warn_unused_ignores = true
 warn_redundant_casts = true
