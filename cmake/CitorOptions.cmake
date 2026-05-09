@@ -13,6 +13,11 @@ option(
 )
 option(CITOR_BUILD_WITH_SANITIZER "Compile and link with -fsanitize=thread" OFF)
 option(CITOR_USE_AVX2 "Add -mavx2 -mfma to the public INTERFACE target" ON)
+option(
+    CITOR_ENABLE_CLANG_TIDY
+    "Run clang-tidy on every TU during the build (CMAKE_CXX_CLANG_TIDY)"
+    OFF
+)
 
 # Pool diagnostic counters (dispatches, inlineFallbacks, cancellationStops).
 # OFF leaves the hot-path increment sites as no-ops.
