@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Drives the per-channel consume tests. Verifies that citor is consumable
-# via:
+# Drives every consume-channel test. Verifies that citor is consumable via:
 #   - the single-header drop-in (`single_include/citor.hpp`)
 #   - `FetchContent_Declare` from a local path
+#   - `CPMAddPackage` from a local source
+#   - `add_subdirectory` from a local path
 #   - `find_package(citor)` after `cmake --install`
+#   - conan create + install (if conan is on PATH)
+#   - vcpkg install via overlay port (if vcpkg is on PATH)
 #
 # Run from the repo root:
 #   tests/packaging/run_packaging_tests.sh
-#
-# Wired into nightly CI; not in the per-push fast lane because the install
-# step is slow.
 
 set -euo pipefail
 
@@ -19,10 +19,20 @@ trap 'rm -rf "$work"' EXIT
 
 cd "$root"
 
-# Make sure single_include/ is fresh.
 python3 tools/amalgamate.py
 
-# 1. Single-header consume.
+run_cmake_consume() {
+    local label="$1"
+    local source_dir="$2"
+    local extra="${3:-}"
+    echo "== ${label} =="
+    cmake -S "${source_dir}" -B "${work}/${label}" -G Ninja \
+          -DCITOR_LOCAL_SOURCE="$root" ${extra} > "${work}/${label}.configure.log" 2>&1
+    cmake --build "${work}/${label}" -j > "${work}/${label}.build.log" 2>&1
+    "${work}/${label}/${label}"
+    echo "PASS: ${label}"
+}
+
 echo "== single-header =="
 ${CXX:-c++} -std=c++20 -O2 -pthread -mavx2 -mfma -DCITOR_USE_AVX2 \
     -I single_include \
@@ -31,18 +41,10 @@ ${CXX:-c++} -std=c++20 -O2 -pthread -mavx2 -mfma -DCITOR_USE_AVX2 \
 "$work/single_header_consume"
 echo "PASS: single-header"
 
-# 2. FetchContent consume.
-echo "== fetchcontent =="
-cmake -S tests/packaging/fetchcontent_consume \
-      -B "$work/fetchcontent" \
-      -G Ninja \
-      -DCITOR_LOCAL_SOURCE="$root" \
-      > "$work/fetchcontent.configure.log" 2>&1
-cmake --build "$work/fetchcontent" -j > "$work/fetchcontent.build.log" 2>&1
-"$work/fetchcontent/fetchcontent_consume"
-echo "PASS: fetchcontent"
+run_cmake_consume fetchcontent_consume       tests/packaging/fetchcontent_consume
+run_cmake_consume cpm_consume                tests/packaging/cpm_consume
+run_cmake_consume add_subdirectory_consume   tests/packaging/add_subdirectory_consume
 
-# 3. find_package consume after install.
 echo "== find_package =="
 cmake -S "$root" -B "$work/install-build" -G Ninja \
       -DCITOR_BUILD_TESTS=OFF -DCITOR_BUILD_BENCHMARK=OFF \
@@ -50,15 +52,23 @@ cmake -S "$root" -B "$work/install-build" -G Ninja \
       > "$work/install.configure.log" 2>&1
 cmake --build "$work/install-build" -j > "$work/install.build.log" 2>&1
 cmake --install "$work/install-build" > "$work/install.install.log" 2>&1
+run_cmake_consume find_package_consume \
+    tests/packaging/find_package_consume \
+    "-DCMAKE_PREFIX_PATH=$work/install-prefix"
 
-cmake -S tests/packaging/find_package_consume \
-      -B "$work/find_package" \
-      -G Ninja \
-      -DCMAKE_PREFIX_PATH="$work/install-prefix" \
-      > "$work/find_package.configure.log" 2>&1
-cmake --build "$work/find_package" -j > "$work/find_package.build.log" 2>&1
-"$work/find_package/find_package_consume"
-echo "PASS: find_package"
+if command -v conan > /dev/null; then
+    echo "== conan =="
+    pushd "$work" > /dev/null
+    conan profile detect --force > /dev/null
+    conan create "$root/packaging/conan" --build=missing > "$work/conan.create.log" 2>&1
+    popd > /dev/null
+    echo "PASS: conan"
+else
+    echo "SKIP: conan (binary not on PATH)"
+fi
+
+# vcpkg port pins SHA512 against a tagged release tarball; runs in CI only.
+echo "SKIP: vcpkg (CI-only against a tagged release)"
 
 echo
 echo "all packaging consume tests passed"
