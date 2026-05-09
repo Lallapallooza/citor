@@ -57,3 +57,19 @@ repos:
         types_or: [c++, c]
         exclude: ^single_include/
         pass_filenames: true
+
+      - id: ctest
+        name: ctest (full test suite)
+        entry: python3 scripts/run_ctest.py
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+        always_run: true
+
+      - id: packaging-tests
+        name: packaging-tests (consume channels)
+        entry: bash tests/packaging/run_packaging_tests.sh
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+        always_run: true
