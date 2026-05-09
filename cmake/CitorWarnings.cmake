@@ -15,6 +15,7 @@ target_compile_options(
         -Wall
         -Wextra
         -Wpedantic
+        -Werror
         -Wshadow
         -Wnon-virtual-dtor
         -Wold-style-cast
