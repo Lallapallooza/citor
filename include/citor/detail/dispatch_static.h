@@ -9,6 +9,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "citor/detail/hints_traits.h"
 #include "citor/detail/job_descriptor.h"
 #include "citor/detail/worker_state.h"
 #include "citor/hints.h"
@@ -220,13 +221,7 @@ runSingleRankBlockTyped(JobDescriptor &desc, std::uint32_t rank, FOp &fn, std::s
   if (rank >= blockCount) {
     return;
   }
-  constexpr bool kHasCancellation = requires { HintsT::cancellationChecks; };
-  constexpr bool kCancellationActive = []() {
-    if constexpr (kHasCancellation) {
-      return HintsT::cancellationChecks;
-    }
-    return true;
-  }();
+  constexpr bool kCancellationActive = detail::kCancellationActive<HintsT>;
   constexpr bool kBodyNoexcept = std::is_nothrow_invocable_v<FOp &, std::size_t, std::size_t>;
 
   if constexpr (!kBodyNoexcept) {
@@ -276,13 +271,7 @@ template <Balance B, class HintsT, class FOp>
     return;
   }
 
-  constexpr bool kHasCancellation = requires { HintsT::cancellationChecks; };
-  constexpr bool kCancellationActive = []() {
-    if constexpr (kHasCancellation) {
-      return HintsT::cancellationChecks;
-    }
-    return true;
-  }();
+  constexpr bool kCancellationActive = detail::kCancellationActive<HintsT>;
   constexpr bool kBodyNoexcept = std::is_nothrow_invocable_v<FOp &, std::size_t, std::size_t>;
 
   for (std::size_t blockId = kNoBlock;
@@ -342,13 +331,7 @@ template <class HintsT, class FOp>
     std::size_t participants, std::size_t chunk, std::size_t first, std::size_t last) noexcept {
   const auto [begin, end] = contiguousRankBlockSpan(blockCount, participants, rank);
 
-  constexpr bool kHasCancellation = requires { HintsT::cancellationChecks; };
-  constexpr bool kCancellationActive = []() {
-    if constexpr (kHasCancellation) {
-      return HintsT::cancellationChecks;
-    }
-    return true;
-  }();
+  constexpr bool kCancellationActive = detail::kCancellationActive<HintsT>;
   constexpr bool kPassBlockId = std::is_invocable_v<FOp &, std::size_t, std::size_t, std::size_t>;
   constexpr bool kBodyNoexcept =
       kPassBlockId ? std::is_nothrow_invocable_v<FOp &, std::size_t, std::size_t, std::size_t>
@@ -480,13 +463,7 @@ inline void typedWorkerEntry(JobDescriptor *desc, std::uint32_t rankPacked,
   const std::size_t participants = cache.participants;
   auto &fn = *static_cast<F *>(cache.fnPtr);
 
-  constexpr bool kHasCancellation = requires { HintsT::cancellationChecks; };
-  constexpr bool kCancellationActive = []() {
-    if constexpr (kHasCancellation) {
-      return HintsT::cancellationChecks;
-    }
-    return true;
-  }();
+  constexpr bool kCancellationActive = detail::kCancellationActive<HintsT>;
   constexpr bool kBodyNoexcept = std::is_nothrow_invocable_v<F &, std::size_t, std::size_t>;
 
   if (blockCount <= participants) {
