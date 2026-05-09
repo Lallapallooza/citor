@@ -16,7 +16,8 @@
 //
 // The "did it work" gate (per the spec): primary-pool wall time at
 // `kmp_zero` should be meaningfully lower than at `kmp_default`. Both cells
-// are reported in the same binary run so the reader can compare them in one run.
+// are reported in the same binary run so the reader can compare them in one
+// run.
 //
 // This bench lives in a SEPARATE executable target (`parallel_bench_two_pool`)
 // because libomp's `KMP_BLOCKTIME` and `omp_set_num_threads(...)` global
@@ -80,11 +81,13 @@ constexpr std::size_t kIterations = 60;
 /// startup land inside the first timed bracket on cold runs.
 constexpr std::size_t kWarmupIterations = 16;
 
-/// Body work: a tight floating-point loop sized to take non-trivial wall-time per
+/// Body work: a tight floating-point loop sized to take non-trivial wall-time
+/// per
 /// `[lo, hi)` slot on a modern x86 host. The body operates over a per-call
 /// scratch buffer (passed by pointer) so the compiler cannot prove the loop
 /// is dead. Touch every element exactly once per iteration.
-inline void primaryBody(std::size_t lo, std::size_t hi, float *scratch) noexcept {
+inline void primaryBody(std::size_t lo, std::size_t hi,
+                        float *scratch) noexcept {
   // Each element is touched 64 times to land near 100us per slot at j=16
   // over a 16384-element range (1024 elements/slot * 64 multiply-adds = 64 K
   // FLOPs per slot; modern hosts hit the
@@ -153,7 +156,8 @@ void secondaryMatmul(float *aBase, float *bBase, float *cBase) noexcept {
 }
 
 /// Deterministic LCG fill; pairs with the secondary matmul's input init.
-void deterministicFill(float *p, std::size_t count, std::uint32_t seed) noexcept {
+void deterministicFill(float *p, std::size_t count,
+                       std::uint32_t seed) noexcept {
   std::uint32_t state = seed;
   for (std::size_t i = 0; i < count; ++i) {
     state = (state * 1664525U) + 1013904223U;
@@ -211,10 +215,11 @@ void spotCheck(const float *data) noexcept {
     // libomp work, waits for it, and then issues citor work back-to-back.
     secondaryMatmul(aPtr, bPtr, cPtr);
     for (std::size_t k = 0; k < kDispatchesPerBracket; ++k) {
-      primary.parallelFor<PrimaryForHints>(std::size_t{0}, kPrimaryRange,
-                                           [primaryData](std::size_t lo, std::size_t hi) noexcept {
-                                             primaryBody(lo, hi, primaryData);
-                                           });
+      primary.parallelFor<PrimaryForHints>(
+          std::size_t{0}, kPrimaryRange,
+          [primaryData](std::size_t lo, std::size_t hi) noexcept {
+            primaryBody(lo, hi, primaryData);
+          });
     }
   };
 
@@ -275,7 +280,8 @@ BenchTable runBlasCoexistence(const CyclesPerNanosecond &cal) {
 
 struct BlasCoexistenceRegistrar {
   BlasCoexistenceRegistrar() {
-    registerWorkload({.name = "two_pool_blas_coexistence", .run = &runBlasCoexistence});
+    registerWorkload(
+        {.name = "two_pool_blas_coexistence", .run = &runBlasCoexistence});
   }
 };
 

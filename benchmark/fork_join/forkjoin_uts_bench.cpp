@@ -64,7 +64,8 @@ namespace {
 // buffer (20 bytes for `rng_init`, 24 bytes for `rng_spawn`).
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] constexpr std::uint32_t rotl32(std::uint32_t x, unsigned n) noexcept {
+[[nodiscard]] constexpr std::uint32_t rotl32(std::uint32_t x,
+                                             unsigned n) noexcept {
   return (x << n) | (x >> (32U - n));
 }
 
@@ -121,8 +122,8 @@ inline void sha1Compress(std::array<std::uint32_t, 5> &h,
 /// loop is preserved for general correctness against the reference.
 inline void sha1Compute(const std::uint8_t *data, std::size_t len,
                         std::array<std::uint8_t, 20> &out) noexcept {
-  std::array<std::uint32_t, 5> h = {0x67452301U, 0xEFCDAB89U, 0x98BADCFEU, 0x10325476U,
-                                    0xC3D2E1F0U};
+  std::array<std::uint32_t, 5> h = {0x67452301U, 0xEFCDAB89U, 0x98BADCFEU,
+                                    0x10325476U, 0xC3D2E1F0U};
   const std::uint64_t totalBits = static_cast<std::uint64_t>(len) * 8U;
   std::array<std::uint8_t, 64> block{};
   std::size_t pos = 0;
@@ -187,7 +188,8 @@ struct RngState {
 /// Spawn a child RNG state. The input is the parent's 20-byte state
 /// followed by the big-endian 32-bit child index; the digest is the
 /// child's state. Matches upstream `rng_spawn` byte-for-byte.
-[[nodiscard]] inline RngState rngSpawn(const RngState &parent, std::uint32_t childIdx) noexcept {
+[[nodiscard]] inline RngState rngSpawn(const RngState &parent,
+                                       std::uint32_t childIdx) noexcept {
   std::array<std::uint8_t, 24> buf{};
   std::memcpy(buf.data(), parent.bytes.data(), 20);
   buf[20] = static_cast<std::uint8_t>((childIdx >> 24U) & 0xFFU);
@@ -241,7 +243,8 @@ constexpr std::int64_t kExpectedNodes = 4'130'071;
 ///     via the inverse-CDF: `numChildren = floor(log(1-u) / log(1-p))`
 ///     where `p = 1 / (1 + b_i)` and `u ~ U[0, 1)` is drawn from the
 ///     state's `rng_rand` word.
-[[nodiscard]] inline int utsNumChildrenGeo(const RngState &state, int depth) noexcept {
+[[nodiscard]] inline int utsNumChildrenGeo(const RngState &state,
+                                           int depth) noexcept {
   // For depth == 0 the upstream code also enters this branch with `b_i =
   // b_0`; the FIXED shape function happens to coincide with the depth-0
   // case so no special-casing is needed.
@@ -283,7 +286,8 @@ constexpr int kSeqCutoffDepth = 5;
 /// `kSeqCutoffDepth` levels); for canonical UTS T1 (`b0=4`) that is 4x less
 /// task-graph parallelism than the underlying tree exposes. Per-child counts
 /// land in `partials` and merge after the join.
-template <class Pool> std::int64_t parWalk(Pool &pool, const RngState &state, int depth) {
+template <class Pool>
+std::int64_t parWalk(Pool &pool, const RngState &state, int depth) {
   if (depth >= kSeqCutoffDepth) {
     return seqWalk(state, depth);
   }
@@ -296,10 +300,11 @@ template <class Pool> std::int64_t parWalk(Pool &pool, const RngState &state, in
     return 1 + parWalk(pool, child, depth + 1);
   }
   std::vector<std::int64_t> partials(static_cast<std::size_t>(n), 0);
-  recursiveSpawnN(pool, static_cast<std::size_t>(n), [&](Pool &p, std::size_t i) {
-    const RngState child = rngSpawn(state, static_cast<std::uint32_t>(i));
-    partials[i] = parWalk(p, child, depth + 1);
-  });
+  recursiveSpawnN(
+      pool, static_cast<std::size_t>(n), [&](Pool &p, std::size_t i) {
+        const RngState child = rngSpawn(state, static_cast<std::uint32_t>(i));
+        partials[i] = parWalk(p, child, depth + 1);
+      });
   std::int64_t total = 1;
   for (const std::int64_t v : partials) {
     total += v;
@@ -321,8 +326,10 @@ template <class PoolT>
 [[nodiscard]] BenchRow measureUts(const char *name, std::size_t participants,
                                   const CyclesPerNanosecond &cal) {
   static_assert(RecursiveForkJoinTraits<PoolT>::supportsRecursiveSpawn,
-                "UTS bench requires recursive-spawn-capable pool; the trait gate excludes "
-                "BS / dp / task_thread_pool / riften / Eigen / Taskflow Executor at compile time.");
+                "UTS bench requires recursive-spawn-capable pool; the trait "
+                "gate excludes "
+                "BS / dp / task_thread_pool / riften / Eigen / Taskflow "
+                "Executor at compile time.");
   using Traits = CompetitorTraits<PoolT>;
   auto pool = Traits::make(participants);
 
@@ -354,35 +361,43 @@ template <class PoolT>
 // has a different entry-point signature (the body owns a `tf::Subflow&`
 // rather than a `tf::Executor&`) and is wired separately.
 
-[[nodiscard]] BenchRow measureCitor(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureCitor(std::size_t participants,
+                                    const CyclesPerNanosecond &cal) {
   return measureUts<citor::ThreadPool>("citor::ThreadPool", participants, cal);
 }
 
 #ifdef CITOR_BENCH_HAS_TBB
-[[nodiscard]] BenchRow measureTbb(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureTbb(std::size_t participants,
+                                  const CyclesPerNanosecond &cal) {
   return measureUts<::tbb::task_arena>("oneTBB", participants, cal);
 }
 #endif
 
 #ifdef CITOR_BENCH_HAS_DISPENSO
-[[nodiscard]] BenchRow measureDispenso(std::size_t participants, const CyclesPerNanosecond &cal) {
-  static_assert(RecursiveForkJoinTraits<::dispenso::ThreadPool>::supportsRecursiveSpawn,
-                "dispenso must opt into recursive spawn for the UTS bench");
-  return measureUts<::dispenso::ThreadPool>("dispenso::ThreadPool", participants, cal);
+[[nodiscard]] BenchRow measureDispenso(std::size_t participants,
+                                       const CyclesPerNanosecond &cal) {
+  static_assert(
+      RecursiveForkJoinTraits<::dispenso::ThreadPool>::supportsRecursiveSpawn,
+      "dispenso must opt into recursive spawn for the UTS bench");
+  return measureUts<::dispenso::ThreadPool>("dispenso::ThreadPool",
+                                            participants, cal);
 }
 #endif
 
 #ifdef CITOR_BENCH_HAS_TASKFLOW
-[[nodiscard]] BenchRow measureTaskflow(std::size_t participants, const CyclesPerNanosecond &cal) {
-  static_assert(RecursiveForkJoinTraits<::tf::Subflow>::supportsRecursiveSpawn,
-                "Taskflow Subflow must opt into recursive spawn for the UTS bench");
+[[nodiscard]] BenchRow measureTaskflow(std::size_t participants,
+                                       const CyclesPerNanosecond &cal) {
+  static_assert(
+      RecursiveForkJoinTraits<::tf::Subflow>::supportsRecursiveSpawn,
+      "Taskflow Subflow must opt into recursive spawn for the UTS bench");
   ::tf::Executor exec(participants);
   const RngState root = rngInit(kRootSeed);
 
   auto runOnce = [&]() -> std::int64_t {
     std::int64_t result = 0;
     ::tf::Taskflow flow;
-    flow.emplace([&](::tf::Subflow &rootSub) { result = parWalk(rootSub, root, 0); });
+    flow.emplace(
+        [&](::tf::Subflow &rootSub) { result = parWalk(rootSub, root, 0); });
     exec.run(flow).wait();
     return result;
   };
@@ -407,9 +422,11 @@ template <class PoolT>
 #endif
 
 #ifdef CITOR_BENCH_HAS_OPENMP
-[[nodiscard]] BenchRow measureOmp(std::size_t participants, const CyclesPerNanosecond &cal) {
-  static_assert(RecursiveForkJoinTraits<OpenMpRunner>::supportsRecursiveSpawn,
-                "OpenMP runner must opt into recursive spawn for the UTS bench");
+[[nodiscard]] BenchRow measureOmp(std::size_t participants,
+                                  const CyclesPerNanosecond &cal) {
+  static_assert(
+      RecursiveForkJoinTraits<OpenMpRunner>::supportsRecursiveSpawn,
+      "OpenMP runner must opt into recursive spawn for the UTS bench");
   // OpenMP's `task` directive must be inside an open `parallel` region;
   // the helper's `taskwait` works at any task scope, but the surrounding
   // region must exist. Open the region once per iteration and let the

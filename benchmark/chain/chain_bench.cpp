@@ -11,9 +11,11 @@
 // ships a native chain primitive with a shared rendezvous; oneTBB has no chain
 // either. Each competitor row simulates via `kStageCount` back-to-back
 // parallel-for waves):
-//   - citor pool              -> `parallelChain<ChainBenchHints>` / dynamic-chain hint rows
+//   - citor pool              -> `parallelChain<ChainBenchHints>` /
+//   dynamic-chain hint rows
 //                                (native).
-//   - citor pool baseline     -> `parallelFor` x kStageCount (own apples-to-apples).
+//   - citor pool baseline     -> `parallelFor` x kStageCount (own
+//   apples-to-apples).
 //   - BS::thread_pool          -> `submit_blocks(...).wait()` x kStageCount.
 //   - dp::thread_pool          -> N enqueue futures + join, x kStageCount.
 //   - task_thread_pool         -> N submit futures + join, x kStageCount.
@@ -21,7 +23,8 @@
 //   - oneTBB                   -> `tbb::parallel_for` x kStageCount.
 //   - Taskflow                 -> taskflow run + wait, x kStageCount.
 //   - Eigen::ThreadPool        -> `Schedule + Barrier` wave, x kStageCount.
-//   - OpenMP                   -> `#pragma omp parallel for` region, x kStageCount.
+//   - OpenMP                   -> `#pragma omp parallel for` region, x
+//   kStageCount.
 //
 // MEASUREMENT PROTOCOL: this bench MUST run with an affinity mask wide enough
 // to host every requested participant. `taskset -c 0` (single-CPU pinning)
@@ -54,8 +57,9 @@
 #include "competitor_traits.h"
 #include "cycle_clock.h"
 
-/// Chain hint preset at TU scope (not in an anonymous namespace) so clang-tidy treats every
-/// static-constexpr member as a public field of a named type rather than an unused constant.
+/// Chain hint preset at TU scope (not in an anonymous namespace) so clang-tidy
+/// treats every static-constexpr member as a public field of a named type
+/// rather than an unused constant.
 struct ChainBenchHints : citor::ChainHintsDefaults {
   static constexpr bool cancellationChecks = false;
 };
@@ -85,7 +89,8 @@ constexpr std::size_t kRangeN = 16;
 /// `kBatchSize` chain calls; per-bracket cycles divided by the batch size to
 /// produce per-call ns samples.
 template <class RunFn>
-[[nodiscard]] BenchRow measureLoop(const char *name, const CyclesPerNanosecond &cal, RunFn run) {
+[[nodiscard]] BenchRow measureLoop(const char *name,
+                                   const CyclesPerNanosecond &cal, RunFn run) {
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     for (std::size_t k = 0; k < kBatchSize; ++k) {
       run();
@@ -99,7 +104,8 @@ template <class RunFn>
       run();
     }
     const std::uint64_t endCycles = readCyclesEnd();
-    samples.push_back(cyclesToNs(endCycles - startCycles, cal) / static_cast<double>(kBatchSize));
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal) /
+                      static_cast<double>(kBatchSize));
   }
   return finalizeRow(name, samples);
 }
@@ -108,20 +114,22 @@ template <class RunFn>
                                             const CyclesPerNanosecond &cal) {
   ThreadPool pool(participants);
   if (pool.participants() <= 1U) {
-    throw std::runtime_error(
-        "chain_bench: pool.participants() <= 1 (likely run under taskset -c 0); "
-        "rerun unpinned or with taskset -c 0-N where N >= requested participants.");
+    throw std::runtime_error("chain_bench: pool.participants() <= 1 (likely "
+                             "run under taskset -c 0); "
+                             "rerun unpinned or with taskset -c 0-N where N >= "
+                             "requested participants.");
   }
   std::atomic<std::uint64_t> sink{0};
-  auto emptyBody = [&sink](std::size_t /*stageIdx*/, std::uint32_t slot, std::size_t /*lo*/,
-                           std::size_t /*hi*/) noexcept {
+  auto emptyBody = [&sink](std::size_t /*stageIdx*/, std::uint32_t slot,
+                           std::size_t /*lo*/, std::size_t /*hi*/) noexcept {
     sink.fetch_add(slot, std::memory_order_relaxed);
   };
   BenchRow row = measureLoop("citor::ThreadPool::parallelChain", cal, [&] {
-    pool.parallelChain<ChainBenchHints>(kRangeN, globalStage("s0", emptyBody),
-                                        globalStage("s1", emptyBody), globalStage("s2", emptyBody),
-                                        globalStage("s3", emptyBody), globalStage("s4", emptyBody),
-                                        globalStage("s5", emptyBody), globalStage("s6", emptyBody));
+    pool.parallelChain<ChainBenchHints>(
+        kRangeN, globalStage("s0", emptyBody), globalStage("s1", emptyBody),
+        globalStage("s2", emptyBody), globalStage("s3", emptyBody),
+        globalStage("s4", emptyBody), globalStage("s5", emptyBody),
+        globalStage("s6", emptyBody));
   });
   (void)sink.load(std::memory_order_relaxed);
   return row;
@@ -131,9 +139,10 @@ template <class RunFn>
                                              const CyclesPerNanosecond &cal) {
   ThreadPool pool(participants);
   if (pool.participants() <= 1U) {
-    throw std::runtime_error(
-        "chain_bench: pool.participants() <= 1 (likely run under taskset -c 0); "
-        "rerun unpinned or with taskset -c 0-N where N >= requested participants.");
+    throw std::runtime_error("chain_bench: pool.participants() <= 1 (likely "
+                             "run under taskset -c 0); "
+                             "rerun unpinned or with taskset -c 0-N where N >= "
+                             "requested participants.");
   }
   std::atomic<std::uint64_t> sink{0};
   auto emptyBody = [&sink](std::size_t lo, std::size_t hi) noexcept {
@@ -150,7 +159,8 @@ template <class RunFn>
   return row;
 }
 
-[[nodiscard]] BenchRow measureBsPool(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureBsPool(std::size_t participants,
+                                     const CyclesPerNanosecond &cal) {
   BS::light_thread_pool pool(participants);
   std::atomic<std::uint64_t> sink{0};
   auto emptyBody = [&sink](std::size_t lo, std::size_t hi) noexcept {
@@ -160,7 +170,8 @@ template <class RunFn>
   };
   BenchRow row = measureLoop("BS::thread_pool::submit_blocks x7", cal, [&] {
     for (std::size_t s = 0; s < kStageCount; ++s) {
-      pool.submit_blocks(std::size_t{0}, kRangeN, emptyBody, participants).wait();
+      pool.submit_blocks(std::size_t{0}, kRangeN, emptyBody, participants)
+          .wait();
     }
   });
   (void)sink.load(std::memory_order_relaxed);
@@ -168,9 +179,10 @@ template <class RunFn>
 }
 
 template <class Pool, class EnqueueFn>
-[[nodiscard]] BenchRow measureFutureFanoutPool(const char *name, std::size_t participants,
-                                               const CyclesPerNanosecond &cal, Pool &pool,
-                                               EnqueueFn enqueue) {
+[[nodiscard]] BenchRow measureFutureFanoutPool(const char *name,
+                                               std::size_t participants,
+                                               const CyclesPerNanosecond &cal,
+                                               Pool &pool, EnqueueFn enqueue) {
   std::atomic<std::uint64_t> sink{0};
   // Per-slot body: the fanout chunks `[0, kRangeN)` across `participants`
   // workers; each task computes its slot's slice. Empty body equivalent.
@@ -190,7 +202,8 @@ template <class Pool, class EnqueueFn>
         if (lo == hi) {
           continue;
         }
-        futs.emplace_back(enqueue(pool, [lo, hi, &slotBody]() { slotBody(lo, hi); }));
+        futs.emplace_back(
+            enqueue(pool, [lo, hi, &slotBody]() { slotBody(lo, hi); }));
       }
       for (auto &f : futs) {
         f.get();
@@ -201,21 +214,27 @@ template <class Pool, class EnqueueFn>
   return row;
 }
 
-[[nodiscard]] BenchRow measureDpPool(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureDpPool(std::size_t participants,
+                                     const CyclesPerNanosecond &cal) {
   dp::thread_pool<> pool(static_cast<unsigned int>(participants));
   return measureFutureFanoutPool(
       "dp::thread_pool::enqueue x7", participants, cal, pool,
       [](dp::thread_pool<> &p, auto fn) { return p.enqueue(std::move(fn)); });
 }
 
-[[nodiscard]] BenchRow measureTaskPool(std::size_t participants, const CyclesPerNanosecond &cal) {
-  ::task_thread_pool::task_thread_pool pool(static_cast<unsigned int>(participants));
+[[nodiscard]] BenchRow measureTaskPool(std::size_t participants,
+                                       const CyclesPerNanosecond &cal) {
+  ::task_thread_pool::task_thread_pool pool(
+      static_cast<unsigned int>(participants));
   return measureFutureFanoutPool(
       "task_thread_pool::submit x7", participants, cal, pool,
-      [](::task_thread_pool::task_thread_pool &p, auto fn) { return p.submit(std::move(fn)); });
+      [](::task_thread_pool::task_thread_pool &p, auto fn) {
+        return p.submit(std::move(fn));
+      });
 }
 
-[[nodiscard]] BenchRow measureRiftenPool(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureRiftenPool(std::size_t participants,
+                                         const CyclesPerNanosecond &cal) {
   riften::Thiefpool pool(participants);
   return measureFutureFanoutPool(
       "riften::Thiefpool::enqueue x7", participants, cal, pool,
@@ -223,7 +242,8 @@ template <class Pool, class EnqueueFn>
 }
 
 #ifdef CITOR_BENCH_HAS_TBB
-[[nodiscard]] BenchRow measureTbbPool(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureTbbPool(std::size_t participants,
+                                      const CyclesPerNanosecond &cal) {
   auto arena = CompetitorTraits<::tbb::task_arena>::make(participants);
   std::atomic<std::uint64_t> sink{0};
   auto emptyBody = [&sink](std::size_t lo, std::size_t hi) noexcept {
@@ -233,8 +253,8 @@ template <class Pool, class EnqueueFn>
   };
   BenchRow row = measureLoop("oneTBB::parallel_for x7", cal, [&] {
     for (std::size_t s = 0; s < kStageCount; ++s) {
-      CompetitorTraits<::tbb::task_arena>::parallelFor(*arena, std::size_t{0}, kRangeN, 1,
-                                                       emptyBody);
+      CompetitorTraits<::tbb::task_arena>::parallelFor(*arena, std::size_t{0},
+                                                       kRangeN, 1, emptyBody);
     }
   });
   (void)sink.load(std::memory_order_relaxed);
@@ -254,8 +274,8 @@ template <class Pool, class EnqueueFn>
   };
   BenchRow row = measureLoop("Taskflow::run x7", cal, [&] {
     for (std::size_t s = 0; s < kStageCount; ++s) {
-      CompetitorTraits<::tf::Executor>::parallelFor(*exec, std::size_t{0}, kRangeN, participants,
-                                                    emptyBody);
+      CompetitorTraits<::tf::Executor>::parallelFor(
+          *exec, std::size_t{0}, kRangeN, participants, emptyBody);
     }
   });
   (void)sink.load(std::memory_order_relaxed);
@@ -264,7 +284,8 @@ template <class Pool, class EnqueueFn>
 #endif
 
 #ifdef CITOR_BENCH_HAS_EIGEN_THREADPOOL
-[[nodiscard]] BenchRow measureEigenPool(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureEigenPool(std::size_t participants,
+                                        const CyclesPerNanosecond &cal) {
   auto pool = CompetitorTraits<::Eigen::ThreadPool>::make(participants);
   std::atomic<std::uint64_t> sink{0};
   auto emptyBody = [&sink](std::size_t lo, std::size_t hi) noexcept {
@@ -274,8 +295,8 @@ template <class Pool, class EnqueueFn>
   };
   BenchRow row = measureLoop("Eigen::ThreadPool::Schedule x7", cal, [&] {
     for (std::size_t s = 0; s < kStageCount; ++s) {
-      CompetitorTraits<::Eigen::ThreadPool>::parallelFor(*pool, std::size_t{0}, kRangeN,
-                                                         participants, emptyBody);
+      CompetitorTraits<::Eigen::ThreadPool>::parallelFor(
+          *pool, std::size_t{0}, kRangeN, participants, emptyBody);
     }
   });
   (void)sink.load(std::memory_order_relaxed);
@@ -295,8 +316,8 @@ template <class Pool, class EnqueueFn>
   };
   BenchRow row = measureLoop("Leopard::dispatch x7", cal, [&] {
     for (std::size_t s = 0; s < kStageCount; ++s) {
-      CompetitorTraits<hmthrp::ThreadPool>::parallelFor(*pool, std::size_t{0}, kRangeN,
-                                                        participants, emptyBody);
+      CompetitorTraits<hmthrp::ThreadPool>::parallelFor(
+          *pool, std::size_t{0}, kRangeN, participants, emptyBody);
     }
   });
   (void)sink.load(std::memory_order_relaxed);
@@ -316,8 +337,8 @@ template <class Pool, class EnqueueFn>
   };
   BenchRow row = measureLoop("dispenso::parallel_for x7", cal, [&] {
     for (std::size_t s = 0; s < kStageCount; ++s) {
-      CompetitorTraits<dispenso::ThreadPool>::parallelFor(*pool, std::size_t{0}, kRangeN,
-                                                          participants, emptyBody);
+      CompetitorTraits<dispenso::ThreadPool>::parallelFor(
+          *pool, std::size_t{0}, kRangeN, participants, emptyBody);
     }
   });
   (void)sink.load(std::memory_order_relaxed);
@@ -326,7 +347,8 @@ template <class Pool, class EnqueueFn>
 #endif
 
 #ifdef CITOR_BENCH_HAS_OPENMP
-[[nodiscard]] BenchRow measureOpenMpPool(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureOpenMpPool(std::size_t participants,
+                                         const CyclesPerNanosecond &cal) {
   std::atomic<std::uint64_t> sink{0};
   BenchRow row = measureLoop("OpenMP::parallel_for x7", cal, [&] {
     const int threads = static_cast<int>(participants);
@@ -389,9 +411,10 @@ BenchTable runChainJ8(const CyclesPerNanosecond &cal) {
 // =============================================================================
 //
 // 7 stages, each running a body whose per-iteration cost is drawn from a
-// Pareto distribution with shape alpha = 1.16 and median tuned to a microsecond. Each chain
-// call sums the per-iteration costs across all stages; the parallel sum must
-// match the precomputed sequential total before timing fires.
+// Pareto distribution with shape alpha = 1.16 and median tuned to a
+// microsecond. Each chain call sums the per-iteration costs across all stages;
+// the parallel sum must match the precomputed sequential total before timing
+// fires.
 //
 // Cost array: kPRangeN per-stage; indexed `(stage, i)` so every stage sees a
 // different draw. The shared accumulator is a per-iteration `int64`
@@ -415,7 +438,8 @@ constexpr double kPSpinCapNs = 200'000.0;
   return draw;
 }
 
-inline void pSpinForNs(double targetNs, const CyclesPerNanosecond &cal) noexcept {
+inline void pSpinForNs(double targetNs,
+                       const CyclesPerNanosecond &cal) noexcept {
   if (targetNs <= 0.0) {
     return;
   }
@@ -454,8 +478,9 @@ struct ChainParetoData {
 /// Per-stage body invoked across the chain stages and the future-pool
 /// emulations. Spins for `costs[stage * kPRangeN + i]` ns and adds the cost
 /// to the shared accumulator atomically.
-inline void chainParetoBody(const ChainParetoData &d, std::size_t stage, std::size_t lo,
-                            std::size_t hi, std::atomic<std::int64_t> &accum,
+inline void chainParetoBody(const ChainParetoData &d, std::size_t stage,
+                            std::size_t lo, std::size_t hi,
+                            std::atomic<std::int64_t> &accum,
                             const CyclesPerNanosecond &cal) noexcept {
   std::int64_t local = 0;
   for (std::size_t i = lo; i < hi; ++i) {
@@ -467,8 +492,9 @@ inline void chainParetoBody(const ChainParetoData &d, std::size_t stage, std::si
 }
 
 template <class RunFn>
-[[nodiscard]] BenchRow measureParetoLoop(const char *name, const CyclesPerNanosecond &cal,
-                                         RunFn run, std::int64_t referenceTotal) {
+[[nodiscard]] BenchRow
+measureParetoLoop(const char *name, const CyclesPerNanosecond &cal, RunFn run,
+                  std::int64_t referenceTotal) {
   // No batching: each iteration's wall time is already in the millisecond
   // range due to the Pareto bodies, well above the timer-tick floor.
   for (std::size_t i = 0; i < 2; ++i) {
@@ -489,17 +515,20 @@ template <class RunFn>
 }
 
 template <class ChainHintsT>
-[[nodiscard]] BenchRow measureCitorChainPareto(const char *name, std::size_t participants,
+[[nodiscard]] BenchRow measureCitorChainPareto(const char *name,
+                                               std::size_t participants,
                                                const ChainParetoData &d,
                                                const CyclesPerNanosecond &cal) {
   ThreadPool pool(participants);
   if (pool.participants() <= 1U) {
-    throw std::runtime_error(
-        "chain_bench: pool.participants() <= 1 (likely run under taskset -c 0); "
-        "rerun unpinned or with taskset -c 0-N where N >= requested participants.");
+    throw std::runtime_error("chain_bench: pool.participants() <= 1 (likely "
+                             "run under taskset -c 0); "
+                             "rerun unpinned or with taskset -c 0-N where N >= "
+                             "requested participants.");
   }
   std::atomic<std::int64_t> accum{0};
-  auto stageBody = [&accum, &d, &cal](std::size_t stageIdx, std::uint32_t /*slot*/, std::size_t lo,
+  auto stageBody = [&accum, &d, &cal](std::size_t stageIdx,
+                                      std::uint32_t /*slot*/, std::size_t lo,
                                       std::size_t hi) noexcept {
     chainParetoBody(d, stageIdx, lo, hi, accum, cal);
   };
@@ -507,24 +536,26 @@ template <class ChainHintsT>
       name, cal,
       [&] {
         accum.store(0, std::memory_order_relaxed);
-        pool.parallelChain<ChainHintsT>(kPRangeN, globalStage("p0", stageBody),
-                                        globalStage("p1", stageBody), globalStage("p2", stageBody),
-                                        globalStage("p3", stageBody), globalStage("p4", stageBody),
-                                        globalStage("p5", stageBody), globalStage("p6", stageBody));
+        pool.parallelChain<ChainHintsT>(
+            kPRangeN, globalStage("p0", stageBody),
+            globalStage("p1", stageBody), globalStage("p2", stageBody),
+            globalStage("p3", stageBody), globalStage("p4", stageBody),
+            globalStage("p5", stageBody), globalStage("p6", stageBody));
         return accum.load(std::memory_order_relaxed);
       },
       d.referenceTotal);
 }
 
 /// Generic per-stage emulation via the trait's `parallelChain` shim. Used by
-/// every adapter (BS / dp / task / riften / oneTBB / Taskflow / Eigen / OpenMP).
-/// Each adapter's emulation pays its own per-stage barrier cost; the body
-/// shape is identical across adapters so the comparison measures dispatch +
-/// barrier-wait per stage with the same Pareto-distributed work load.
+/// every adapter (BS / dp / task / riften / oneTBB / Taskflow / Eigen /
+/// OpenMP). Each adapter's emulation pays its own per-stage barrier cost; the
+/// body shape is identical across adapters so the comparison measures dispatch
+/// + barrier-wait per stage with the same Pareto-distributed work load.
 template <class PoolT>
-[[nodiscard]] BenchRow measureChainParetoAdapter(const char *name, std::size_t participants,
-                                                 const ChainParetoData &d,
-                                                 const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow
+measureChainParetoAdapter(const char *name, std::size_t participants,
+                          const ChainParetoData &d,
+                          const CyclesPerNanosecond &cal) {
   using Traits = CompetitorTraits<PoolT>;
   auto pool = Traits::make(participants);
   std::atomic<std::int64_t> accum{0};
@@ -534,7 +565,8 @@ template <class PoolT>
         accum.store(0, std::memory_order_relaxed);
         Traits::parallelChain(
             *pool, std::size_t{0}, kPRangeN, participants, kStageCount,
-            [&accum, &d, &cal](std::size_t stage, std::size_t lo, std::size_t hi) {
+            [&accum, &d, &cal](std::size_t stage, std::size_t lo,
+                               std::size_t hi) {
               chainParetoBody(d, stage, lo, hi, accum, cal);
             });
         return accum.load(std::memory_order_relaxed);
@@ -553,35 +585,36 @@ BenchTable buildParetoTable(std::size_t participants, const char *suffix,
       "citor::ThreadPool::parallelChain[Dynamic]", participants, d, cal));
   table.rows.push_back(measureChainParetoAdapter<BS::light_thread_pool>(
       "BS::thread_pool[chainAdapter]", participants, d, cal));
-  table.rows.push_back(measureChainParetoAdapter<dp::thread_pool<>>("dp::thread_pool[chainAdapter]",
-                                                                    participants, d, cal));
-  table.rows.push_back(measureChainParetoAdapter<::task_thread_pool::task_thread_pool>(
-      "task_thread_pool[chainAdapter]", participants, d, cal));
+  table.rows.push_back(measureChainParetoAdapter<dp::thread_pool<>>(
+      "dp::thread_pool[chainAdapter]", participants, d, cal));
+  table.rows.push_back(
+      measureChainParetoAdapter<::task_thread_pool::task_thread_pool>(
+          "task_thread_pool[chainAdapter]", participants, d, cal));
   table.rows.push_back(measureChainParetoAdapter<riften::Thiefpool>(
       "riften::Thiefpool[chainAdapter]", participants, d, cal));
 #ifdef CITOR_BENCH_HAS_TBB
-  table.rows.push_back(measureChainParetoAdapter<::tbb::task_arena>("oneTBB::parallel_for x7",
-                                                                    participants, d, cal));
+  table.rows.push_back(measureChainParetoAdapter<::tbb::task_arena>(
+      "oneTBB::parallel_for x7", participants, d, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_TASKFLOW
-  table.rows.push_back(
-      measureChainParetoAdapter<::tf::Executor>("Taskflow::run x7", participants, d, cal));
+  table.rows.push_back(measureChainParetoAdapter<::tf::Executor>(
+      "Taskflow::run x7", participants, d, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_EIGEN_THREADPOOL
   table.rows.push_back(measureChainParetoAdapter<::Eigen::ThreadPool>(
       "Eigen::ThreadPool::Schedule x7", participants, d, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
-  table.rows.push_back(
-      measureChainParetoAdapter<OpenMpRunner>("OpenMP::parallel_for x7", participants, d, cal));
+  table.rows.push_back(measureChainParetoAdapter<OpenMpRunner>(
+      "OpenMP::parallel_for x7", participants, d, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_LEOPARD
-  table.rows.push_back(
-      measureChainParetoAdapter<hmthrp::ThreadPool>("Leopard::dispatch x7", participants, d, cal));
+  table.rows.push_back(measureChainParetoAdapter<hmthrp::ThreadPool>(
+      "Leopard::dispatch x7", participants, d, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_DISPENSO
-  table.rows.push_back(measureChainParetoAdapter<dispenso::ThreadPool>("dispenso::parallel_for x7",
-                                                                       participants, d, cal));
+  table.rows.push_back(measureChainParetoAdapter<dispenso::ThreadPool>(
+      "dispenso::parallel_for x7", participants, d, cal));
 #endif
   return table;
 }
@@ -597,10 +630,14 @@ BenchTable runChainParetoJ16(const CyclesPerNanosecond &cal) {
 /// File-scope registrar.
 struct ChainRegistrar {
   ChainRegistrar() {
-    registerWorkload({.name = "chain_dispatch_j8_7stages_empty", .run = &runChainJ8});
-    registerWorkload({.name = "chain_dispatch_j16_7stages_empty", .run = &runChainJ16});
-    registerWorkload({.name = "chain_pareto_j8_7stages_pareto_body", .run = &runChainParetoJ8});
-    registerWorkload({.name = "chain_pareto_j16_7stages_pareto_body", .run = &runChainParetoJ16});
+    registerWorkload(
+        {.name = "chain_dispatch_j8_7stages_empty", .run = &runChainJ8});
+    registerWorkload(
+        {.name = "chain_dispatch_j16_7stages_empty", .run = &runChainJ16});
+    registerWorkload({.name = "chain_pareto_j8_7stages_pareto_body",
+                      .run = &runChainParetoJ8});
+    registerWorkload({.name = "chain_pareto_j16_7stages_pareto_body",
+                      .run = &runChainParetoJ16});
   }
 };
 

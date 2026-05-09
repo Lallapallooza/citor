@@ -96,8 +96,10 @@ struct Item {
     for (int c = 0; c <= capacity; ++c) {
       curr[static_cast<std::size_t>(c)] = prev[static_cast<std::size_t>(c)];
       if (c >= it.weight) {
-        const int candidate = prev[static_cast<std::size_t>(c - it.weight)] + it.value;
-        curr[static_cast<std::size_t>(c)] = std::max(candidate, curr[static_cast<std::size_t>(c)]);
+        const int candidate =
+            prev[static_cast<std::size_t>(c - it.weight)] + it.value;
+        curr[static_cast<std::size_t>(c)] =
+            std::max(candidate, curr[static_cast<std::size_t>(c)]);
       }
     }
     std::swap(prev, curr);
@@ -108,8 +110,8 @@ struct Item {
 /// Linear-relaxation upper bound at recursion node (idx, remaining-cap,
 /// current-value). Items are pre-sorted by value-density (`value/weight`)
 /// so the bound is tight; computed in O(n - idx).
-[[nodiscard]] double upperBound(const std::vector<Item> &items, std::size_t idx, int remCap,
-                                int curValue) noexcept {
+[[nodiscard]] double upperBound(const std::vector<Item> &items, std::size_t idx,
+                                int remCap, int curValue) noexcept {
   auto bound = static_cast<double>(curValue);
   int cap = remCap;
   for (std::size_t i = idx; i < items.size() && cap > 0; ++i) {
@@ -149,8 +151,8 @@ struct SearchState {
 /// bound is below the running best; cancellation triggers a global stop
 /// when a branch's bound is dramatically tighter than the current best.
 template <class Pool>
-void searchRec(Pool &pool, const std::vector<Item> &items, std::size_t idx, int remCap,
-               int curValue, SearchState &state) {
+void searchRec(Pool &pool, const std::vector<Item> &items, std::size_t idx,
+               int remCap, int curValue, SearchState &state) {
   // Cancellation observation. In cancel-on mode the branch records the
   // firing every time it observes the stop flag, exercising the same
   // observation path that the engine's `cancellationChecks=true` hint
@@ -166,7 +168,8 @@ void searchRec(Pool &pool, const std::vector<Item> &items, std::size_t idx, int 
   if (idx == items.size() || remCap == 0) {
     int observed = state.bestValue.load(std::memory_order_relaxed);
     while (curValue > observed &&
-           !state.bestValue.compare_exchange_weak(observed, curValue, std::memory_order_release,
+           !state.bestValue.compare_exchange_weak(observed, curValue,
+                                                  std::memory_order_release,
                                                   std::memory_order_relaxed)) {
       // CAS retried; observed updated in place.
     }
@@ -208,8 +211,8 @@ void searchRec(Pool &pool, const std::vector<Item> &items, std::size_t idx, int 
   if (items.size() - idx <= kSeqCutoff) {
     // Take.
     if (items[idx].weight <= remCap) {
-      searchRec(pool, items, idx + 1U, remCap - items[idx].weight, curValue + items[idx].value,
-                state);
+      searchRec(pool, items, idx + 1U, remCap - items[idx].weight,
+                curValue + items[idx].value, state);
     }
     // Skip.
     searchRec(pool, items, idx + 1U, remCap, curValue, state);
@@ -241,22 +244,24 @@ struct RunOutput {
 };
 
 template <class Pool>
-[[nodiscard]] RunOutput runOnce(Pool &pool, const std::vector<Item> &itemsSorted, int capacity,
-                                int referenceValue, bool cancellationEnabled) {
+[[nodiscard]] RunOutput
+runOnce(Pool &pool, const std::vector<Item> &itemsSorted, int capacity,
+        int referenceValue, bool cancellationEnabled) {
   SearchState state;
   state.cancellationEnabled = cancellationEnabled;
-  state.token =
-      cancellationEnabled ? citor::CancellationToken::makeOwned() : citor::CancellationToken{};
+  state.token = cancellationEnabled ? citor::CancellationToken::makeOwned()
+                                    : citor::CancellationToken{};
   searchRec(pool, itemsSorted, 0U, capacity, 0, state);
   return RunOutput{.parallel = state.bestValue.load(std::memory_order_acquire),
                    .reference = referenceValue,
-                   .firings = state.cancelFirings.load(std::memory_order_relaxed)};
+                   .firings =
+                       state.cancelFirings.load(std::memory_order_relaxed)};
 }
 
 template <class PoolT>
-[[nodiscard]] BenchRow measureKnapsack(const char *name, std::size_t participants,
-                                       std::size_t nItems, const CyclesPerNanosecond &cal,
-                                       bool cancellationEnabled) {
+[[nodiscard]] BenchRow
+measureKnapsack(const char *name, std::size_t participants, std::size_t nItems,
+                const CyclesPerNanosecond &cal, bool cancellationEnabled) {
   static_assert(RecursiveForkJoinTraits<PoolT>::supportsRecursiveSpawn,
                 "knapsack-cancel bench requires recursive-spawn-capable pool");
   using Traits = CompetitorTraits<PoolT>;
@@ -271,15 +276,18 @@ template <class PoolT>
   // Pre-sort by value-density so the upper-bound is tight (linear-
   // relaxation knapsack convention).
   std::vector<Item> itemsSorted = items;
-  std::sort(itemsSorted.begin(), itemsSorted.end(), [](const Item &a, const Item &b) {
-    return static_cast<double>(a.value) / a.weight > static_cast<double>(b.value) / b.weight;
-  });
+  std::sort(itemsSorted.begin(), itemsSorted.end(),
+            [](const Item &a, const Item &b) {
+              return static_cast<double>(a.value) / a.weight >
+                     static_cast<double>(b.value) / b.weight;
+            });
   const int reference = seqDp(items, capacity);
 
   // Warmup + correctness.
   RunOutput last{};
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
-    last = runOnce(*pool, itemsSorted, capacity, reference, cancellationEnabled);
+    last =
+        runOnce(*pool, itemsSorted, capacity, reference, cancellationEnabled);
     CITOR_ALWAYS_ASSERT(last.parallel == reference);
   }
 
@@ -288,7 +296,8 @@ template <class PoolT>
   std::uint64_t totalFirings = 0;
   for (std::size_t i = 0; i < kIterations; ++i) {
     const std::uint64_t startCycles = readCyclesStart();
-    const RunOutput out = runOnce(*pool, itemsSorted, capacity, reference, cancellationEnabled);
+    const RunOutput out =
+        runOnce(*pool, itemsSorted, capacity, reference, cancellationEnabled);
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
     CITOR_ALWAYS_ASSERT(out.parallel == reference);
@@ -308,11 +317,14 @@ template <class PoolT>
 }
 
 #ifdef CITOR_BENCH_HAS_OPENMP
-[[nodiscard]] BenchRow measureKnapsackOmp(const char *name, std::size_t participants,
-                                          std::size_t nItems, const CyclesPerNanosecond &cal,
+[[nodiscard]] BenchRow measureKnapsackOmp(const char *name,
+                                          std::size_t participants,
+                                          std::size_t nItems,
+                                          const CyclesPerNanosecond &cal,
                                           bool cancellationEnabled) {
-  static_assert(RecursiveForkJoinTraits<OpenMpRunner>::supportsRecursiveSpawn,
-                "OpenMP runner must opt into recursive spawn for knapsack-cancel");
+  static_assert(
+      RecursiveForkJoinTraits<OpenMpRunner>::supportsRecursiveSpawn,
+      "OpenMP runner must opt into recursive spawn for knapsack-cancel");
   OpenMpRunner runner{participants};
 
   const std::vector<Item> items = buildItems(nItems);
@@ -322,24 +334,28 @@ template <class PoolT>
   }
   const int capacity = totalWeight / 2;
   std::vector<Item> itemsSorted = items;
-  std::sort(itemsSorted.begin(), itemsSorted.end(), [](const Item &a, const Item &b) {
-    return static_cast<double>(a.value) / a.weight > static_cast<double>(b.value) / b.weight;
-  });
+  std::sort(itemsSorted.begin(), itemsSorted.end(),
+            [](const Item &a, const Item &b) {
+              return static_cast<double>(a.value) / a.weight >
+                     static_cast<double>(b.value) / b.weight;
+            });
   const int reference = seqDp(items, capacity);
 
   auto runOnceOmp = [&](SearchState &state) {
 #pragma omp parallel num_threads(static_cast<int>(participants))
     {
 #pragma omp single
-      { searchRec(runner, itemsSorted, 0U, capacity, 0, state); }
+      {
+        searchRec(runner, itemsSorted, 0U, capacity, 0, state);
+      }
     }
   };
 
   auto runIter = [&]() -> RunOutput {
     SearchState state;
     state.cancellationEnabled = cancellationEnabled;
-    state.token =
-        cancellationEnabled ? citor::CancellationToken::makeOwned() : citor::CancellationToken{};
+    state.token = cancellationEnabled ? citor::CancellationToken::makeOwned()
+                                      : citor::CancellationToken{};
     runOnceOmp(state);
     return RunOutput{state.bestValue.load(std::memory_order_acquire), reference,
                      state.cancelFirings.load(std::memory_order_relaxed)};
@@ -372,15 +388,17 @@ template <class PoolT>
 // (take + skip) and joins. The cancellation observation works the same way
 // as the helper-driven recursion -- workers polling `tok.stop_requested()`
 // observe peer's `request_stop` between Subflow.emplace boundaries.
-void searchRecSubflow(::tf::Subflow &sub, const std::vector<Item> &items, std::size_t idx,
-                      int remCap, int curValue, SearchState &state) {
+void searchRecSubflow(::tf::Subflow &sub, const std::vector<Item> &items,
+                      std::size_t idx, int remCap, int curValue,
+                      SearchState &state) {
   if (state.cancellationEnabled && state.token.stop_requested()) {
     state.cancelFirings.fetch_add(1U, std::memory_order_relaxed);
   }
   if (idx == items.size() || remCap == 0) {
     int observed = state.bestValue.load(std::memory_order_relaxed);
     while (curValue > observed &&
-           !state.bestValue.compare_exchange_weak(observed, curValue, std::memory_order_release,
+           !state.bestValue.compare_exchange_weak(observed, curValue,
+                                                  std::memory_order_release,
                                                   std::memory_order_relaxed)) {
     }
     if (state.cancellationEnabled && curValue > observed && observed > 0 &&
@@ -418,8 +436,10 @@ void searchRecSubflow(::tf::Subflow &sub, const std::vector<Item> &items, std::s
   sub.join();
 }
 
-[[nodiscard]] BenchRow measureKnapsackTaskflow(const char *name, std::size_t participants,
-                                               std::size_t nItems, const CyclesPerNanosecond &cal,
+[[nodiscard]] BenchRow measureKnapsackTaskflow(const char *name,
+                                               std::size_t participants,
+                                               std::size_t nItems,
+                                               const CyclesPerNanosecond &cal,
                                                bool cancellationEnabled) {
   ::tf::Executor exec(participants);
 
@@ -430,16 +450,18 @@ void searchRecSubflow(::tf::Subflow &sub, const std::vector<Item> &items, std::s
   }
   const int capacity = totalWeight / 2;
   std::vector<Item> itemsSorted = items;
-  std::sort(itemsSorted.begin(), itemsSorted.end(), [](const Item &a, const Item &b) {
-    return static_cast<double>(a.value) / a.weight > static_cast<double>(b.value) / b.weight;
-  });
+  std::sort(itemsSorted.begin(), itemsSorted.end(),
+            [](const Item &a, const Item &b) {
+              return static_cast<double>(a.value) / a.weight >
+                     static_cast<double>(b.value) / b.weight;
+            });
   const int reference = seqDp(items, capacity);
 
   auto runIter = [&]() -> RunOutput {
     SearchState state;
     state.cancellationEnabled = cancellationEnabled;
-    state.token =
-        cancellationEnabled ? citor::CancellationToken::makeOwned() : citor::CancellationToken{};
+    state.token = cancellationEnabled ? citor::CancellationToken::makeOwned()
+                                      : citor::CancellationToken{};
     ::tf::Taskflow flow;
     flow.emplace([&](::tf::Subflow &root) {
       searchRecSubflow(root, itemsSorted, 0U, capacity, 0, state);
@@ -481,38 +503,42 @@ constexpr std::array<KnapsackCell, 2> kCells{{
     {.n = 24, .suffix = "n24"},
 }};
 
-BenchTable buildTable(std::size_t participants, KnapsackCell cell, const CyclesPerNanosecond &cal) {
+BenchTable buildTable(std::size_t participants, KnapsackCell cell,
+                      const CyclesPerNanosecond &cal) {
   BenchTable table;
-  table.workload =
-      std::string{"forkjoin_knapsack_cancel_j"} + std::to_string(participants) + "_" + cell.suffix;
+  table.workload = std::string{"forkjoin_knapsack_cancel_j"} +
+                   std::to_string(participants) + "_" + cell.suffix;
 
   // citor: 2 rows. Both rows below use citor::CancellationToken for the
   // observation side-channel. TBB's native cancel_group_execution is NOT
   // wired through; the oneTBB rows measure cooperative-cancellation
   // overhead with the same token type, not TBB-native cancellation.
   table.rows.push_back(measureKnapsack<citor::ThreadPool>(
-      "citor::ThreadPool[citor::CancellationToken cooperative cancel-on]", participants, cell.n,
-      cal, /*cancellationEnabled=*/true));
+      "citor::ThreadPool[citor::CancellationToken cooperative cancel-on]",
+      participants, cell.n, cal, /*cancellationEnabled=*/true));
   table.rows.push_back(measureKnapsack<citor::ThreadPool>(
-      "citor::ThreadPool[cancel-off]", participants, cell.n, cal, /*cancellationEnabled=*/false));
+      "citor::ThreadPool[cancel-off]", participants, cell.n, cal,
+      /*cancellationEnabled=*/false));
 #ifdef CITOR_BENCH_HAS_TBB
   table.rows.push_back(measureKnapsack<::tbb::task_arena>(
-      "oneTBB[citor::CancellationToken cooperative cancel-on]", participants, cell.n, cal, true));
-  table.rows.push_back(
-      measureKnapsack<::tbb::task_arena>("oneTBB[cancel-off]", participants, cell.n, cal, false));
+      "oneTBB[citor::CancellationToken cooperative cancel-on]", participants,
+      cell.n, cal, true));
+  table.rows.push_back(measureKnapsack<::tbb::task_arena>(
+      "oneTBB[cancel-off]", participants, cell.n, cal, false));
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
   table.rows.push_back(measureKnapsackOmp(
-      "OpenMP[citor::CancellationToken cooperative cancel-on]", participants, cell.n, cal, true));
-  table.rows.push_back(
-      measureKnapsackOmp("OpenMP[cancel-off]", participants, cell.n, cal, false));
+      "OpenMP[citor::CancellationToken cooperative cancel-on]", participants,
+      cell.n, cal, true));
+  table.rows.push_back(measureKnapsackOmp("OpenMP[cancel-off]", participants,
+                                          cell.n, cal, false));
 #endif
 #ifdef CITOR_BENCH_HAS_TASKFLOW
   table.rows.push_back(measureKnapsackTaskflow(
-      "Taskflow::Subflow[citor::CancellationToken cooperative cancel-on]", participants, cell.n,
-      cal, true));
-  table.rows.push_back(measureKnapsackTaskflow("Taskflow::Subflow[cancel-off]", participants,
-                                               cell.n, cal, false));
+      "Taskflow::Subflow[citor::CancellationToken cooperative cancel-on]",
+      participants, cell.n, cal, true));
+  table.rows.push_back(measureKnapsackTaskflow(
+      "Taskflow::Subflow[cancel-off]", participants, cell.n, cal, false));
 #endif
   // dispenso is not wired here despite recursive_forkjoin_helper's
   // ForceQueuingTag plumbing forcing concurrent sibling execution. ForceQueuing
@@ -538,10 +564,14 @@ BenchTable runKnapsackCell(const CyclesPerNanosecond &cal) {
 
 struct KnapsackRegistrar {
   KnapsackRegistrar() {
-    registerWorkload({.name = "forkjoin_knapsack_cancel_j8_n20", .run = &runKnapsackCell<0, 8>});
-    registerWorkload({.name = "forkjoin_knapsack_cancel_j16_n20", .run = &runKnapsackCell<0, 16>});
-    registerWorkload({.name = "forkjoin_knapsack_cancel_j8_n24", .run = &runKnapsackCell<1, 8>});
-    registerWorkload({.name = "forkjoin_knapsack_cancel_j16_n24", .run = &runKnapsackCell<1, 16>});
+    registerWorkload({.name = "forkjoin_knapsack_cancel_j8_n20",
+                      .run = &runKnapsackCell<0, 8>});
+    registerWorkload({.name = "forkjoin_knapsack_cancel_j16_n20",
+                      .run = &runKnapsackCell<0, 16>});
+    registerWorkload({.name = "forkjoin_knapsack_cancel_j8_n24",
+                      .run = &runKnapsackCell<1, 8>});
+    registerWorkload({.name = "forkjoin_knapsack_cancel_j16_n24",
+                      .run = &runKnapsackCell<1, 16>});
   }
 };
 

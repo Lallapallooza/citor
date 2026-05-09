@@ -96,8 +96,9 @@ constexpr std::size_t kSeqCutoff = 64;
 /// drift if the recurrence changes.
 constexpr std::size_t kParallelDepth = 1;
 
-/// Hint preset for the inner parallel-row matmul: bare `HintsDefaults` is enough today, since
-/// the inner `parallelFor` does not consume affinity or cancellation polls.
+/// Hint preset for the inner parallel-row matmul: bare `HintsDefaults` is
+/// enough today, since the inner `parallelFor` does not consume affinity or
+/// cancellation polls.
 using StrassenForHints = citor::HintsDefaults;
 
 /// 64-byte aligned float-buffer deleter; pairs with `std::unique_ptr` so the
@@ -126,7 +127,8 @@ AlignedFloatBuffer allocateAlignedFloats(std::size_t count) {
 /// values. The bounded `[-1, 1]` range keeps Strassen's recursive
 /// sub-matrix sums within a magnitude that the per-element tolerance can
 /// reasonably absorb.
-void deterministicFill(float *p, std::size_t count, std::uint32_t seed) noexcept {
+void deterministicFill(float *p, std::size_t count,
+                       std::uint32_t seed) noexcept {
   std::mt19937 rng{seed};
   std::uniform_real_distribution<float> dist(-1.0F, 1.0F);
   for (std::size_t i = 0; i < count; ++i) {
@@ -213,17 +215,19 @@ inline void seqMatmul(const Sub &c, const Sub &a, const Sub &b) noexcept {
 /// Quadrant accessor: returns the (`row`, `col`) sub-matrix of `m` where
 /// `row` and `col` are 0 or 1. Each quadrant is `n/2 x n/2` and shares the
 /// stride of the parent.
-[[nodiscard]] inline Sub quadrant(const Sub &m, std::size_t row, std::size_t col) noexcept {
+[[nodiscard]] inline Sub quadrant(const Sub &m, std::size_t row,
+                                  std::size_t col) noexcept {
   const std::size_t half = m.n / 2U;
-  return Sub{
-      .data = m.data + (row * half * m.stride) + (col * half), .stride = m.stride, .n = half};
+  return Sub{.data = m.data + (row * half * m.stride) + (col * half),
+             .stride = m.stride,
+             .n = half};
 }
 
 /// Forward declaration: recursive Strassen entry. The body is placed below
 /// because it depends on the parallel-row matmul leaf via `parallelMatmul`.
 template <class Pool>
-void strassenRec(Pool &pool, const Sub &c, const Sub &a, const Sub &b, float *scratch,
-                 std::size_t depth);
+void strassenRec(Pool &pool, const Sub &c, const Sub &a, const Sub &b,
+                 float *scratch, std::size_t depth);
 
 /// Parallel-row matmul leaf: at the recursion's `kSeqCutoff` boundary the
 /// 64x64 (or smaller) matmul runs serially because dispatching a
@@ -243,7 +247,8 @@ void parallelMatmul(Pool & /*pool*/, const Sub &c, const Sub &a, const Sub &b) {
 /// recurrence becomes `scratchBudget(n, depth) = 17 * (n/2)^2 +
 /// scratchBudget(n/2, depth + 1)`. Both branches terminate at
 /// `n <= kSeqCutoff` where the leaf seq-matmul needs no scratch.
-[[nodiscard]] constexpr std::size_t scratchBudget(std::size_t n, std::size_t depth) noexcept {
+[[nodiscard]] constexpr std::size_t scratchBudget(std::size_t n,
+                                                  std::size_t depth) noexcept {
   if (n <= kSeqCutoff) {
     return 0U;
   }
@@ -269,8 +274,9 @@ void parallelMatmul(Pool & /*pool*/, const Sub &c, const Sub &a, const Sub &b) {
   constexpr double kHighamScale = 1.5;
   // log2(7) is irrational; std::pow at runtime is fine since this runs
   // once per verify() call, well outside the timing window.
-  const double bound =
-      kHighamScale * std::pow(static_cast<double>(n), 2.8073549220576041) * kEpsFloat;
+  const double bound = kHighamScale *
+                       std::pow(static_cast<double>(n), 2.8073549220576041) *
+                       kEpsFloat;
   return static_cast<float>(bound);
 }
 
@@ -280,8 +286,8 @@ void parallelMatmul(Pool & /*pool*/, const Sub &c, const Sub &a, const Sub &b) {
 /// (deeper levels). Parallel siblings own disjoint scratch slices; serial
 /// siblings share the same slice across the seven mults.
 template <class Pool>
-void strassenRec(Pool &pool, const Sub &c, const Sub &a, const Sub &b, float *scratch,
-                 std::size_t depth) {
+void strassenRec(Pool &pool, const Sub &c, const Sub &a, const Sub &b,
+                 float *scratch, std::size_t depth) {
   if (c.n <= kSeqCutoff) {
     parallelMatmul(pool, c, a, b);
     return;
@@ -292,7 +298,8 @@ void strassenRec(Pool &pool, const Sub &c, const Sub &a, const Sub &b, float *sc
   // Carve 21 contiguous sub-buffers out of the scratch arena.
   float *cursor = scratch;
   auto take = [&cursor, halfSize]() {
-    // The returned writable scratch slice is immediately stored in a mutable Sub view.
+    // The returned writable scratch slice is immediately stored in a mutable
+    // Sub view.
     float *const out = cursor; // NOLINT(misc-const-correctness)
     cursor += halfSize;
     return out;
@@ -362,9 +369,13 @@ void strassenRec(Pool &pool, const Sub &c, const Sub &a, const Sub &b, float *sc
         [&](Pool &p) {
           // Group 1: M1, M2.
           recursiveSpawn2(
-              p, [&](Pool &pp) { strassenRec(pp, mBufs[0], t1A, t1B, childScratch, depth + 1U); },
+              p,
               [&](Pool &pp) {
-                strassenRec(pp, mBufs[1], t2A, b11, childScratch + childBudget, depth + 1U);
+                strassenRec(pp, mBufs[0], t1A, t1B, childScratch, depth + 1U);
+              },
+              [&](Pool &pp) {
+                strassenRec(pp, mBufs[1], t2A, b11, childScratch + childBudget,
+                            depth + 1U);
               });
         },
         [&](Pool &p) {
@@ -372,10 +383,12 @@ void strassenRec(Pool &pool, const Sub &c, const Sub &a, const Sub &b, float *sc
           recursiveSpawn2(
               p,
               [&](Pool &pp) {
-                strassenRec(pp, mBufs[2], a11, t3B, childScratch + (2U * childBudget), depth + 1U);
+                strassenRec(pp, mBufs[2], a11, t3B,
+                            childScratch + (2U * childBudget), depth + 1U);
               },
               [&](Pool &pp) {
-                strassenRec(pp, mBufs[3], a22, t4B, childScratch + (3U * childBudget), depth + 1U);
+                strassenRec(pp, mBufs[3], a22, t4B,
+                            childScratch + (3U * childBudget), depth + 1U);
               });
         });
 
@@ -386,15 +399,18 @@ void strassenRec(Pool &pool, const Sub &c, const Sub &a, const Sub &b, float *sc
           recursiveSpawn2(
               p,
               [&](Pool &pp) {
-                strassenRec(pp, mBufs[4], t5A, b22, childScratch + (4U * childBudget), depth + 1U);
+                strassenRec(pp, mBufs[4], t5A, b22,
+                            childScratch + (4U * childBudget), depth + 1U);
               },
               [&](Pool &pp) {
-                strassenRec(pp, mBufs[5], t6A, t6B, childScratch + (5U * childBudget), depth + 1U);
+                strassenRec(pp, mBufs[5], t6A, t6B,
+                            childScratch + (5U * childBudget), depth + 1U);
               });
         },
         [&](Pool &p) {
           // Group 4: M7 alone (no sibling, runs in this branch directly).
-          strassenRec(p, mBufs[6], t7A, t7B, childScratch + (6U * childBudget), depth + 1U);
+          strassenRec(p, mBufs[6], t7A, t7B, childScratch + (6U * childBudget),
+                      depth + 1U);
         });
   } else {
     // Serial sub-product dispatch. All seven mults reuse the same child
@@ -428,11 +444,14 @@ void strassenRec(Pool &pool, const Sub &c, const Sub &a, const Sub &b, float *sc
 }
 
 template <class PoolT>
-[[nodiscard]] BenchRow measureStrassen(const char *name, std::size_t participants, std::size_t n,
+[[nodiscard]] BenchRow measureStrassen(const char *name,
+                                       std::size_t participants, std::size_t n,
                                        const CyclesPerNanosecond &cal) {
   static_assert(RecursiveForkJoinTraits<PoolT>::supportsRecursiveSpawn,
-                "strassen bench requires recursive-spawn-capable pool; the trait gate excludes "
-                "BS / dp / task_thread_pool / riften / Eigen / Taskflow Executor at compile time.");
+                "strassen bench requires recursive-spawn-capable pool; the "
+                "trait gate excludes "
+                "BS / dp / task_thread_pool / riften / Eigen / Taskflow "
+                "Executor at compile time.");
   using Traits = CompetitorTraits<PoolT>;
   auto pool = Traits::make(participants);
 
@@ -500,7 +519,8 @@ template <class PoolT>
 
 [[nodiscard]] BenchRow measureCitor(std::size_t participants, std::size_t n,
                                     const CyclesPerNanosecond &cal) {
-  return measureStrassen<citor::ThreadPool>("citor::ThreadPool", participants, n, cal);
+  return measureStrassen<citor::ThreadPool>("citor::ThreadPool", participants,
+                                            n, cal);
 }
 
 #ifdef CITOR_BENCH_HAS_TBB
@@ -513,9 +533,11 @@ template <class PoolT>
 #ifdef CITOR_BENCH_HAS_DISPENSO
 [[nodiscard]] BenchRow measureDispenso(std::size_t participants, std::size_t n,
                                        const CyclesPerNanosecond &cal) {
-  static_assert(RecursiveForkJoinTraits<::dispenso::ThreadPool>::supportsRecursiveSpawn,
-                "dispenso must opt into recursive spawn for the strassen bench");
-  return measureStrassen<::dispenso::ThreadPool>("dispenso::ThreadPool", participants, n, cal);
+  static_assert(
+      RecursiveForkJoinTraits<::dispenso::ThreadPool>::supportsRecursiveSpawn,
+      "dispenso must opt into recursive spawn for the strassen bench");
+  return measureStrassen<::dispenso::ThreadPool>("dispenso::ThreadPool",
+                                                 participants, n, cal);
 }
 #endif
 
@@ -539,8 +561,9 @@ template <class PoolT>
 #ifdef CITOR_BENCH_HAS_OPENMP
 [[nodiscard]] BenchRow measureOmp(std::size_t participants, std::size_t n,
                                   const CyclesPerNanosecond &cal) {
-  static_assert(RecursiveForkJoinTraits<OpenMpRunner>::supportsRecursiveSpawn,
-                "OpenMP runner must opt into recursive spawn for the strassen bench");
+  static_assert(
+      RecursiveForkJoinTraits<OpenMpRunner>::supportsRecursiveSpawn,
+      "OpenMP runner must opt into recursive spawn for the strassen bench");
   // OpenMP `task` requires an enclosing `parallel` region. Open it once
   // per iteration; the inner `single` directive funnels the root call.
   OpenMpRunner runner{participants};
@@ -613,10 +636,11 @@ constexpr std::array<StrassenCell, 2> kCells{{
     {.n = 2048U, .suffix = "n2048"},
 }};
 
-BenchTable buildTable(std::size_t participants, StrassenCell cell, const CyclesPerNanosecond &cal) {
+BenchTable buildTable(std::size_t participants, StrassenCell cell,
+                      const CyclesPerNanosecond &cal) {
   BenchTable table;
-  table.workload =
-      std::string{"forkjoin_strassen_j"} + std::to_string(participants) + "_" + cell.suffix;
+  table.workload = std::string{"forkjoin_strassen_j"} +
+                   std::to_string(participants) + "_" + cell.suffix;
   table.rows.push_back(measureCitor(participants, cell.n, cal));
 #ifdef CITOR_BENCH_HAS_TBB
   table.rows.push_back(measureTbb(participants, cell.n, cal));
@@ -644,10 +668,14 @@ BenchTable runStrassenCell(const CyclesPerNanosecond &cal) {
 
 struct StrassenRegistrar {
   StrassenRegistrar() {
-    registerWorkload({.name = "forkjoin_strassen_j8_n1024", .run = &runStrassenCell<0, 8>});
-    registerWorkload({.name = "forkjoin_strassen_j16_n1024", .run = &runStrassenCell<0, 16>});
-    registerWorkload({.name = "forkjoin_strassen_j8_n2048", .run = &runStrassenCell<1, 8>});
-    registerWorkload({.name = "forkjoin_strassen_j16_n2048", .run = &runStrassenCell<1, 16>});
+    registerWorkload(
+        {.name = "forkjoin_strassen_j8_n1024", .run = &runStrassenCell<0, 8>});
+    registerWorkload({.name = "forkjoin_strassen_j16_n1024",
+                      .run = &runStrassenCell<0, 16>});
+    registerWorkload(
+        {.name = "forkjoin_strassen_j8_n2048", .run = &runStrassenCell<1, 8>});
+    registerWorkload({.name = "forkjoin_strassen_j16_n2048",
+                      .run = &runStrassenCell<1, 16>});
   }
 };
 

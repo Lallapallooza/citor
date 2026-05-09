@@ -28,7 +28,8 @@ double driveOneReduction(ThreadPool &pool, const std::vector<double> &data) {
       [](double a, double b) { return a + b; });
 }
 
-double driveOneKahanReduction(ThreadPool &pool, const std::vector<double> &data) {
+double driveOneKahanReduction(ThreadPool &pool,
+                              const std::vector<double> &data) {
   return pool.parallelReduce<KahanReduceHints>(
       0, data.size(), 0.0,
       [&data](std::size_t lo, std::size_t hi) {
@@ -43,7 +44,8 @@ double driveOneKahanReduction(ThreadPool &pool, const std::vector<double> &data)
 
 } // namespace
 
-// Stress-test bit-identity across many repeated reductions at fixed worker count.
+// Stress-test bit-identity across many repeated reductions at fixed worker
+// count.
 TEST(ParallelReduceDeterminism, FixedBlockBitIdenticalUnderRepeats) {
   constexpr std::size_t kN = 5000;
   constexpr int kRepeats = 1000;
@@ -56,12 +58,15 @@ TEST(ParallelReduceDeterminism, FixedBlockBitIdenticalUnderRepeats) {
   const double reference = driveOneReduction(pool, data);
   for (int rep = 1; rep < kRepeats; ++rep) {
     const double current = driveOneReduction(pool, data);
-    ASSERT_EQ(std::bit_cast<std::uint64_t>(reference), std::bit_cast<std::uint64_t>(current))
-        << "FixedBlock parallelReduce reproducibility broke at repetition " << rep;
+    ASSERT_EQ(std::bit_cast<std::uint64_t>(reference),
+              std::bit_cast<std::uint64_t>(current))
+        << "FixedBlock parallelReduce reproducibility broke at repetition "
+        << rep;
   }
 }
 
-// Stress-test bit-identity across worker counts using the named KahanReduceHints hint preset.
+// Stress-test bit-identity across worker counts using the named
+// KahanReduceHints hint preset.
 TEST(ParallelReduceDeterminism, KahanReduceBitIdenticalAcrossManyJobs) {
   constexpr std::size_t kN = 5000;
   constexpr int kRepeats = 200;
@@ -71,14 +76,16 @@ TEST(ParallelReduceDeterminism, KahanReduceBitIdenticalAcrossManyJobs) {
   }
 
   std::vector<double> referencesPerJ;
-  for (const std::size_t j :
-       {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}, std::size_t{16}}) {
+  for (const std::size_t j : {std::size_t{1}, std::size_t{2}, std::size_t{4},
+                              std::size_t{8}, std::size_t{16}}) {
     ThreadPool pool(j);
     const double reference = driveOneKahanReduction(pool, data);
     for (int rep = 1; rep < kRepeats; ++rep) {
       const double current = driveOneKahanReduction(pool, data);
-      ASSERT_EQ(std::bit_cast<std::uint64_t>(reference), std::bit_cast<std::uint64_t>(current))
-          << "KahanReduceHints reproducibility broke at j=" << j << " rep=" << rep;
+      ASSERT_EQ(std::bit_cast<std::uint64_t>(reference),
+                std::bit_cast<std::uint64_t>(current))
+          << "KahanReduceHints reproducibility broke at j=" << j
+          << " rep=" << rep;
     }
     referencesPerJ.push_back(reference);
   }

@@ -80,12 +80,13 @@ namespace export_detail {
 /// Read the value of a `KEY=VALUE` line whose key matches |key|. Strips
 /// surrounding double quotes from the value. Returns empty string when the
 /// file or the key is missing.
-[[nodiscard]] inline std::string readKeyValue(const std::string &path, const std::string &key) {
+[[nodiscard]] inline std::string readKeyValue(const std::string &path,
+                                              const std::string &key) {
   std::ifstream f(path);
   std::string line;
   while (f.is_open() && std::getline(f, line)) {
-    if (line.size() > key.size() + 1U && line.compare(0U, key.size(), key) == 0 &&
-        line[key.size()] == '=') {
+    if (line.size() > key.size() + 1U &&
+        line.compare(0U, key.size(), key) == 0 && line[key.size()] == '=') {
       std::string value = line.substr(key.size() + 1U);
       if (value.size() >= 2U && value.front() == '"' && value.back() == '"') {
         value = value.substr(1U, value.size() - 2U);
@@ -111,7 +112,8 @@ namespace export_detail {
   std::array<char, 256> buf{};
   if (std::fgets(buf.data(), static_cast<int>(buf.size()), pipe) != nullptr) {
     out.assign(buf.data());
-    while (!out.empty() && (out.back() == '\n' || out.back() == '\r' || out.back() == ' ')) {
+    while (!out.empty() &&
+           (out.back() == '\n' || out.back() == '\r' || out.back() == ' ')) {
       out.pop_back();
     }
   }
@@ -220,7 +222,8 @@ namespace export_detail {
         while (!value.empty() && value.front() == ' ') {
           value.erase(value.begin());
         }
-        while (!value.empty() && (value.back() == ' ' || value.back() == '\n')) {
+        while (!value.empty() &&
+               (value.back() == ' ' || value.back() == '\n')) {
           value.pop_back();
         }
         return value;
@@ -330,12 +333,15 @@ inline void writeNumber(std::ostream &out, double v) {
 ///            downstream tools can reconstruct the wall-clock conversion.
 /// Populated `ExportContext`. Fields that fail to probe are left empty;
 ///         the writer emits empty strings as JSON `""`.
-[[nodiscard]] inline ExportContext probeContext(const CyclesPerNanosecond &cal) {
+[[nodiscard]] inline ExportContext
+probeContext(const CyclesPerNanosecond &cal) {
   ExportContext c;
   c.tool = "citor::parallel_bench";
-  c.citorVersion = export_detail::runOneLine("git describe --always --dirty 2>/dev/null");
+  c.citorVersion =
+      export_detail::runOneLine("git describe --always --dirty 2>/dev/null");
   c.citorCommit = export_detail::runOneLine("git rev-parse HEAD 2>/dev/null");
-  c.citorDirty = !export_detail::runOneLine("git status --porcelain 2>/dev/null").empty();
+  c.citorDirty =
+      !export_detail::runOneLine("git status --porcelain 2>/dev/null").empty();
   c.datetimeUtc = export_detail::isoUtcNow();
   c.hostname = export_detail::readHostname();
   c.kernel = export_detail::readKernel();
@@ -349,8 +355,8 @@ inline void writeNumber(std::ostream &out, double v) {
 #endif
   c.tscCyclesPerNs = cal.value;
   c.tasksetCpus = export_detail::readTasksetCpus();
-  c.checklist = {probeGovernor(),  probeBoost(),    probeSmt(),
-                 probeAslr(),      probeTsanOff(), probeLibompBlocktime()};
+  c.checklist = {probeGovernor(), probeBoost(),   probeSmt(),
+                 probeAslr(),     probeTsanOff(), probeLibompBlocktime()};
   return c;
 }
 
@@ -366,11 +372,14 @@ inline void writeNumber(std::ostream &out, double v) {
 ///                    skipped engines or workloads that never collected
 ///                    per-iteration samples).
 /// pretty      When true, emit indented JSON. Default false (compact).
-inline bool writeJsonExport(const std::string &path, const ExportContext &context,
-                            const std::vector<BenchTable> &tables, bool pretty = false) {
+inline bool writeJsonExport(const std::string &path,
+                            const ExportContext &context,
+                            const std::vector<BenchTable> &tables,
+                            bool pretty = false) {
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   if (!out.is_open()) {
-    std::cerr << "parallel_bench: failed to open --export path '" << path << "' for write\n";
+    std::cerr << "parallel_bench: failed to open --export path '" << path
+              << "' for write\n";
     return false;
   }
   const std::string nl = pretty ? "\n" : "";
@@ -382,33 +391,50 @@ inline bool writeJsonExport(const std::string &path, const ExportContext &contex
   out << '{' << nl;
   out << indent1 << "\"schema_version\": 1," << nl;
   out << indent1 << "\"context\": {" << nl;
-  out << indent2 << "\"tool\": " << export_detail::escapeJson(context.tool) << ',' << nl;
-  out << indent2 << "\"citor_version\": " << export_detail::escapeJson(context.citorVersion) << ','
-      << nl;
-  out << indent2 << "\"citor_commit\": " << export_detail::escapeJson(context.citorCommit) << ','
-      << nl;
-  out << indent2 << "\"citor_dirty\": " << (context.citorDirty ? "true" : "false") << ',' << nl;
-  out << indent2 << "\"datetime_utc\": " << export_detail::escapeJson(context.datetimeUtc) << ','
-      << nl;
-  out << indent2 << "\"hostname\": " << export_detail::escapeJson(context.hostname) << ',' << nl;
-  out << indent2 << "\"kernel\": " << export_detail::escapeJson(context.kernel) << ',' << nl;
-  out << indent2 << "\"cpu_model\": " << export_detail::escapeJson(context.cpuModel) << ',' << nl;
-  out << indent2 << "\"cpu_logical\": " << context.cpuLogical << ',' << nl;
-  out << indent2 << "\"compiler\": " << export_detail::escapeJson(context.compiler) << ',' << nl;
-  out << indent2 << "\"compiler_version\": " << export_detail::escapeJson(context.compilerVersion)
+  out << indent2 << "\"tool\": " << export_detail::escapeJson(context.tool)
       << ',' << nl;
-  out << indent2 << "\"build_type\": " << export_detail::escapeJson(context.buildType) << ',' << nl;
-  out << indent2 << "\"avx2\": " << (context.avx2 ? "true" : "false") << ',' << nl;
+  out << indent2 << "\"citor_version\": "
+      << export_detail::escapeJson(context.citorVersion) << ',' << nl;
+  out << indent2
+      << "\"citor_commit\": " << export_detail::escapeJson(context.citorCommit)
+      << ',' << nl;
+  out << indent2
+      << "\"citor_dirty\": " << (context.citorDirty ? "true" : "false") << ','
+      << nl;
+  out << indent2
+      << "\"datetime_utc\": " << export_detail::escapeJson(context.datetimeUtc)
+      << ',' << nl;
+  out << indent2
+      << "\"hostname\": " << export_detail::escapeJson(context.hostname) << ','
+      << nl;
+  out << indent2 << "\"kernel\": " << export_detail::escapeJson(context.kernel)
+      << ',' << nl;
+  out << indent2
+      << "\"cpu_model\": " << export_detail::escapeJson(context.cpuModel) << ','
+      << nl;
+  out << indent2 << "\"cpu_logical\": " << context.cpuLogical << ',' << nl;
+  out << indent2
+      << "\"compiler\": " << export_detail::escapeJson(context.compiler) << ','
+      << nl;
+  out << indent2 << "\"compiler_version\": "
+      << export_detail::escapeJson(context.compilerVersion) << ',' << nl;
+  out << indent2
+      << "\"build_type\": " << export_detail::escapeJson(context.buildType)
+      << ',' << nl;
+  out << indent2 << "\"avx2\": " << (context.avx2 ? "true" : "false") << ','
+      << nl;
   out << indent2 << "\"tsc_cycles_per_ns\": ";
   export_detail::writeNumber(out, context.tscCyclesPerNs);
   out << ',' << nl;
-  out << indent2 << "\"taskset_cpus\": " << export_detail::escapeJson(context.tasksetCpus) << ','
-      << nl;
+  out << indent2
+      << "\"taskset_cpus\": " << export_detail::escapeJson(context.tasksetCpus)
+      << ',' << nl;
   out << indent2 << "\"checklist\": [" << nl;
   for (std::size_t i = 0; i < context.checklist.size(); ++i) {
     const auto &g = context.checklist[i];
     out << indent3 << "{\"name\": " << export_detail::escapeJson(g.name)
-        << ", \"status\": " << export_detail::escapeJson(export_detail::statusLabel(g.status))
+        << ", \"status\": "
+        << export_detail::escapeJson(export_detail::statusLabel(g.status))
         << ", \"detail\": " << export_detail::escapeJson(g.detail) << '}';
     if (i + 1U < context.checklist.size()) {
       out << ',';
@@ -439,10 +465,13 @@ inline bool writeJsonExport(const std::string &path, const ExportContext &contex
         const double ns = row.rawSamplesNs[rep];
         const double cyclesD = ns * cyclesPerNs;
         // Cast to uint64_t; emit as decimal string.
-        const auto cycles = static_cast<std::uint64_t>(cyclesD < 0.0 ? 0.0 : cyclesD);
-        out << indent2 << "{\"workload\": " << export_detail::escapeJson(table.workload) << sep
-            << "\"pool\": " << export_detail::escapeJson(row.name) << sep << "\"rep\": " << rep
-            << sep << "\"cycles\": \"" << cycles << "\"" << sep << "\"ns\": ";
+        const auto cycles =
+            static_cast<std::uint64_t>(cyclesD < 0.0 ? 0.0 : cyclesD);
+        out << indent2
+            << "{\"workload\": " << export_detail::escapeJson(table.workload)
+            << sep << "\"pool\": " << export_detail::escapeJson(row.name) << sep
+            << "\"rep\": " << rep << sep << "\"cycles\": \"" << cycles << "\""
+            << sep << "\"ns\": ";
         export_detail::writeNumber(out, ns);
         out << '}';
       }

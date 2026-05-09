@@ -74,15 +74,19 @@ namespace citor::bench {
 // Recursive workloads (cilksort, Strassen) consume these specializations
 // directly; keeping the asserts in the bench TU that already pulls the
 // header keeps the gate close to the contract it enforces.
-static_assert(RecursiveForkJoinTraits<::citor::ThreadPool>::supportsRecursiveSpawn,
-              "citor::ThreadPool must support recursive spawn for the fork-join bench");
+static_assert(
+    RecursiveForkJoinTraits<::citor::ThreadPool>::supportsRecursiveSpawn,
+    "citor::ThreadPool must support recursive spawn for the fork-join bench");
 #ifdef CITOR_BENCH_HAS_TBB
-static_assert(RecursiveForkJoinTraits<::tbb::task_arena>::supportsRecursiveSpawn,
-              "oneTBB task_arena must support recursive spawn for the fork-join bench");
+static_assert(
+    RecursiveForkJoinTraits<::tbb::task_arena>::supportsRecursiveSpawn,
+    "oneTBB task_arena must support recursive spawn for the fork-join bench");
 #endif
 #ifdef CITOR_BENCH_HAS_DISPENSO
-static_assert(RecursiveForkJoinTraits<::dispenso::ThreadPool>::supportsRecursiveSpawn,
-              "dispenso::ThreadPool must support recursive spawn for the fork-join bench");
+static_assert(
+    RecursiveForkJoinTraits<::dispenso::ThreadPool>::supportsRecursiveSpawn,
+    "dispenso::ThreadPool must support recursive spawn for the fork-join "
+    "bench");
 #endif
 
 } // namespace citor::bench
@@ -155,24 +159,26 @@ template <class Spawn>
   return a + b;
 }
 
-template <class Spawn> [[nodiscard]] std::int64_t parFib(int n, Spawn spawn) {
+template <class Spawn>
+[[nodiscard]] std::int64_t parFib(int n, Spawn spawn) {
   return parFibCutoff(n, kFibCutoff, spawn);
 }
 
 /// Sequential N-queens count, used both standalone and as a leaf of the
 /// parallel variant once the root-branching depth has been exhausted.
-void seqQueensRec(int n, int row, std::uint64_t cols, std::uint64_t diag1, std::uint64_t diag2,
-                  std::int64_t &count) noexcept {
+void seqQueensRec(int n, int row, std::uint64_t cols, std::uint64_t diag1,
+                  std::uint64_t diag2, std::int64_t &count) noexcept {
   if (row == n) {
     ++count;
     return;
   }
-  std::uint64_t bits =
-      ~(cols | diag1 | diag2) & ((std::uint64_t{1} << static_cast<unsigned>(n)) - 1);
+  std::uint64_t bits = ~(cols | diag1 | diag2) &
+                       ((std::uint64_t{1} << static_cast<unsigned>(n)) - 1);
   while (bits != 0U) {
     const std::uint64_t pick = bits & (~bits + 1U);
     bits ^= pick;
-    seqQueensRec(n, row + 1, cols | pick, (diag1 | pick) << 1U, (diag2 | pick) >> 1U, count);
+    seqQueensRec(n, row + 1, cols | pick, (diag1 | pick) << 1U,
+                 (diag2 | pick) >> 1U, count);
   }
 }
 
@@ -185,7 +191,8 @@ void seqQueensRec(int n, int row, std::uint64_t cols, std::uint64_t diag1, std::
 /// Parallel N-queens: enumerate the first `kQueensRootDepth` rows in parallel
 /// (each a separate fork-join task), then drop into the sequential walker for
 /// the remaining rows.
-template <class Spawn> [[nodiscard]] std::int64_t parQueens(int n, Spawn spawn) {
+template <class Spawn>
+[[nodiscard]] std::int64_t parQueens(int n, Spawn spawn) {
   // Generate root states by enumerating the first `kQueensRootDepth` rows
   // sequentially; each root is then a parallel task.
   struct State {
@@ -200,12 +207,13 @@ template <class Spawn> [[nodiscard]] std::int64_t parQueens(int n, Spawn spawn) 
     std::vector<State> next;
     next.reserve(frontier.size() * static_cast<std::size_t>(n));
     for (const State &s : frontier) {
-      std::uint64_t bits =
-          ~(s.cols | s.diag1 | s.diag2) & ((std::uint64_t{1} << static_cast<unsigned>(n)) - 1);
+      std::uint64_t bits = ~(s.cols | s.diag1 | s.diag2) &
+                           ((std::uint64_t{1} << static_cast<unsigned>(n)) - 1);
       while (bits != 0U) {
         const std::uint64_t pick = bits & (~bits + 1U);
         bits ^= pick;
-        next.push_back({s.cols | pick, (s.diag1 | pick) << 1U, (s.diag2 | pick) >> 1U});
+        next.push_back(
+            {s.cols | pick, (s.diag1 | pick) << 1U, (s.diag2 | pick) >> 1U});
       }
     }
     frontier = std::move(next);
@@ -238,7 +246,8 @@ template <class Spawn> [[nodiscard]] std::int64_t parQueens(int n, Spawn spawn) 
 }
 
 template <class RunFn>
-[[nodiscard]] BenchRow measureLoop(const char *name, const CyclesPerNanosecond &cal, RunFn run) {
+[[nodiscard]] BenchRow measureLoop(const char *name,
+                                   const CyclesPerNanosecond &cal, RunFn run) {
   std::atomic<std::int64_t> sink{0};
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     sink.store(run(), std::memory_order_relaxed);
@@ -262,11 +271,13 @@ template <class RunFn>
 
 template <class Workload>
 [[nodiscard]] BenchRow measureCitor(const char *name, std::size_t participants,
-                                    const CyclesPerNanosecond &cal, Workload workload) {
+                                    const CyclesPerNanosecond &cal,
+                                    Workload workload) {
   ThreadPool pool(participants);
   return measureLoop(name, cal, [&] {
     return workload([&](auto &&a, auto &&b) {
-      pool.forkJoin<ForkJoinHints>(std::forward<decltype(a)>(a), std::forward<decltype(b)>(b));
+      pool.forkJoin<ForkJoinHints>(std::forward<decltype(a)>(a),
+                                   std::forward<decltype(b)>(b));
     });
   });
 }
@@ -278,7 +289,8 @@ template <class Workload>
 #ifdef CITOR_BENCH_HAS_TBB
 template <class Workload>
 [[nodiscard]] BenchRow measureTbb(const char *name, std::size_t participants,
-                                  const CyclesPerNanosecond &cal, Workload workload) {
+                                  const CyclesPerNanosecond &cal,
+                                  Workload workload) {
   auto arena = CompetitorTraits<::tbb::task_arena>::make(participants);
   return measureLoop(name, cal, [&] {
     std::int64_t result = 0;
@@ -301,8 +313,9 @@ template <class Workload>
 
 #ifdef CITOR_BENCH_HAS_DISPENSO
 template <class Workload>
-[[nodiscard]] BenchRow measureDispenso(const char *name, std::size_t participants,
-                                       const CyclesPerNanosecond &cal, Workload workload) {
+[[nodiscard]] BenchRow
+measureDispenso(const char *name, std::size_t participants,
+                const CyclesPerNanosecond &cal, Workload workload) {
   auto pool = CompetitorTraits<::dispenso::ThreadPool>::make(participants);
   return measureLoop(name, cal, [&] {
     return workload([&pool](auto &&a, auto &&b) {
@@ -325,7 +338,8 @@ template <class Workload>
 #ifdef CITOR_BENCH_HAS_OPENMP
 template <class Workload>
 [[nodiscard]] BenchRow measureOmp(const char *name, std::size_t participants,
-                                  const CyclesPerNanosecond &cal, Workload workload) {
+                                  const CyclesPerNanosecond &cal,
+                                  Workload workload) {
   return measureLoop(name, cal, [&] {
     std::int64_t result = 0;
 #pragma omp parallel num_threads(static_cast<int>(participants))
@@ -356,7 +370,8 @@ template <class Workload>
 // Subflow-specific parFib: each recursion level creates two child subflows via
 // `subflow.emplace(...)`, then joins. Cannot share the top-level `parFib`'s
 // `spawn(a, b)` shape because each recursion needs the local `tf::Subflow&`.
-[[nodiscard]] std::int64_t parFibSubflowCutoff(int n, int cutoff, ::tf::Subflow &sub) {
+[[nodiscard]] std::int64_t parFibSubflowCutoff(int n, int cutoff,
+                                               ::tf::Subflow &sub) {
   if (n <= cutoff) {
     return seqFib(n);
   }
@@ -388,12 +403,13 @@ template <class Workload>
     std::vector<State> next;
     next.reserve(frontier.size() * static_cast<std::size_t>(n));
     for (const State &s : frontier) {
-      std::uint64_t bits =
-          ~(s.cols | s.diag1 | s.diag2) & ((std::uint64_t{1} << static_cast<unsigned>(n)) - 1);
+      std::uint64_t bits = ~(s.cols | s.diag1 | s.diag2) &
+                           ((std::uint64_t{1} << static_cast<unsigned>(n)) - 1);
       while (bits != 0U) {
         const std::uint64_t pick = bits & (~bits + 1U);
         bits ^= pick;
-        next.push_back({s.cols | pick, (s.diag1 | pick) << 1U, (s.diag2 | pick) >> 1U});
+        next.push_back(
+            {s.cols | pick, (s.diag1 | pick) << 1U, (s.diag2 | pick) >> 1U});
       }
     }
     frontier = std::move(next);
@@ -401,7 +417,8 @@ template <class Workload>
   roots = frontier;
   std::vector<std::int64_t> partials(roots.size(), 0);
 
-  auto run = [&](std::size_t lo, std::size_t hi, ::tf::Subflow &sub, auto &self) -> void {
+  auto run = [&](std::size_t lo, std::size_t hi, ::tf::Subflow &sub,
+                 auto &self) -> void {
     if (hi - lo == 1) {
       const State &s = roots[lo];
       std::int64_t count = 0;
@@ -426,19 +443,23 @@ template <class Workload>
   return total;
 }
 
-[[nodiscard]] BenchRow measureTaskflowFib(const char *name, std::size_t participants,
+[[nodiscard]] BenchRow measureTaskflowFib(const char *name,
+                                          std::size_t participants,
                                           const CyclesPerNanosecond &cal) {
   ::tf::Executor exec(participants);
   return measureLoop(name, cal, [&] {
     std::int64_t result = 0;
     ::tf::Taskflow flow;
-    flow.emplace([&result](::tf::Subflow &root) { result = parFibSubflow(kFibN, root); });
+    flow.emplace([&result](::tf::Subflow &root) {
+      result = parFibSubflow(kFibN, root);
+    });
     exec.run(flow).wait();
     return result;
   });
 }
 
-[[nodiscard]] BenchRow measureTaskflowFibFine(const char *name, std::size_t participants,
+[[nodiscard]] BenchRow measureTaskflowFibFine(const char *name,
+                                              std::size_t participants,
                                               const CyclesPerNanosecond &cal) {
   ::tf::Executor exec(participants);
   return measureLoop(name, cal, [&] {
@@ -452,13 +473,16 @@ template <class Workload>
   });
 }
 
-[[nodiscard]] BenchRow measureTaskflowQueens(const char *name, std::size_t participants,
+[[nodiscard]] BenchRow measureTaskflowQueens(const char *name,
+                                             std::size_t participants,
                                              const CyclesPerNanosecond &cal) {
   ::tf::Executor exec(participants);
   return measureLoop(name, cal, [&] {
     std::int64_t result = 0;
     ::tf::Taskflow flow;
-    flow.emplace([&result](::tf::Subflow &root) { result = parQueensSubflow(kQueensN, root); });
+    flow.emplace([&result](::tf::Subflow &root) {
+      result = parQueensSubflow(kQueensN, root);
+    });
     exec.run(flow).wait();
     return result;
   });
@@ -486,7 +510,8 @@ auto fibWorkload() {
 }
 
 auto fibFineWorkload() {
-  return [](auto spawn) { return parFibCutoff(kFibFineN, kFibFineCutoff, spawn); };
+  return
+      [](auto spawn) { return parFibCutoff(kFibFineN, kFibFineCutoff, spawn); };
 }
 
 [[nodiscard]] BenchRow measureSeqFibFine(const CyclesPerNanosecond &cal) {
@@ -502,7 +527,8 @@ auto fibTortureWorkload(int n) {
   return [n](auto spawn) { return parFibCutoff(n, 2, spawn); };
 }
 
-[[nodiscard]] BenchRow measureSeqFibTorture(int n, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureSeqFibTorture(int n,
+                                            const CyclesPerNanosecond &cal) {
   return measureLoop("Sequential", cal, [n] { return seqFib(n); });
 }
 
@@ -518,40 +544,50 @@ BenchTable buildFibFineTable(std::size_t participants, const char *suffix,
                              const CyclesPerNanosecond &cal) {
   BenchTable table;
   table.workload = std::string{"forkjoin_fib_fine_"} + suffix;
-  table.rows.push_back(measureCitor("citor::ThreadPool", participants, cal, fibFineWorkload()));
+  table.rows.push_back(
+      measureCitor("citor::ThreadPool", participants, cal, fibFineWorkload()));
 #ifdef CITOR_BENCH_HAS_TBB
-  table.rows.push_back(measureTbb("oneTBB", participants, cal, fibFineWorkload()));
+  table.rows.push_back(
+      measureTbb("oneTBB", participants, cal, fibFineWorkload()));
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
-  table.rows.push_back(measureOmp("OpenMP", participants, cal, fibFineWorkload()));
+  table.rows.push_back(
+      measureOmp("OpenMP", participants, cal, fibFineWorkload()));
 #endif
 #ifdef CITOR_BENCH_HAS_DISPENSO
-  table.rows.push_back(
-      measureDispenso("dispenso::ThreadPool", participants, cal, fibFineWorkload()));
+  table.rows.push_back(measureDispenso("dispenso::ThreadPool", participants,
+                                       cal, fibFineWorkload()));
 #endif
 #ifdef CITOR_BENCH_HAS_TASKFLOW
-  table.rows.push_back(measureTaskflowFibFine("Taskflow::Subflow", participants, cal));
+  table.rows.push_back(
+      measureTaskflowFibFine("Taskflow::Subflow", participants, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_LIBFORK
-  table.rows.push_back(runLibforkFibFine(participants, kFibFineN, kFibFineCutoff, cal));
+  table.rows.push_back(
+      runLibforkFibFine(participants, kFibFineN, kFibFineCutoff, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_TMC
-  table.rows.push_back(runTmcFibFine(participants, kFibFineN, kFibFineCutoff, cal));
+  table.rows.push_back(
+      runTmcFibFine(participants, kFibFineN, kFibFineCutoff, cal));
 #endif
   table.rows.push_back(measureSeqFibFine(cal));
   return table;
 }
 
-BenchTable buildFibTortureTable(std::size_t participants, int n, const char *suffix,
+BenchTable buildFibTortureTable(std::size_t participants, int n,
+                                const char *suffix,
                                 const CyclesPerNanosecond &cal) {
   BenchTable table;
   table.workload = std::string{"forkjoin_fib_torture_"} + suffix;
-  table.rows.push_back(measureCitor("citor::ThreadPool", participants, cal, fibTortureWorkload(n)));
+  table.rows.push_back(measureCitor("citor::ThreadPool", participants, cal,
+                                    fibTortureWorkload(n)));
 #ifdef CITOR_BENCH_HAS_TBB
-  table.rows.push_back(measureTbb("oneTBB", participants, cal, fibTortureWorkload(n)));
+  table.rows.push_back(
+      measureTbb("oneTBB", participants, cal, fibTortureWorkload(n)));
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
-  table.rows.push_back(measureOmp("OpenMP", participants, cal, fibTortureWorkload(n)));
+  table.rows.push_back(
+      measureOmp("OpenMP", participants, cal, fibTortureWorkload(n)));
 #endif
 #ifdef CITOR_BENCH_HAS_LIBFORK
   table.rows.push_back(runLibforkFibFine(participants, n, /*cutoff=*/2, cal));
@@ -567,7 +603,8 @@ BenchTable buildFibTable(std::size_t participants, const char *suffix,
                          const CyclesPerNanosecond &cal) {
   BenchTable table;
   table.workload = std::string{"forkjoin_fib28_"} + suffix;
-  table.rows.push_back(measureCitor("citor::ThreadPool", participants, cal, fibWorkload()));
+  table.rows.push_back(
+      measureCitor("citor::ThreadPool", participants, cal, fibWorkload()));
 #ifdef CITOR_BENCH_HAS_TBB
   table.rows.push_back(measureTbb("oneTBB", participants, cal, fibWorkload()));
 #endif
@@ -575,10 +612,12 @@ BenchTable buildFibTable(std::size_t participants, const char *suffix,
   table.rows.push_back(measureOmp("OpenMP", participants, cal, fibWorkload()));
 #endif
 #ifdef CITOR_BENCH_HAS_DISPENSO
-  table.rows.push_back(measureDispenso("dispenso::ThreadPool", participants, cal, fibWorkload()));
+  table.rows.push_back(measureDispenso("dispenso::ThreadPool", participants,
+                                       cal, fibWorkload()));
 #endif
 #ifdef CITOR_BENCH_HAS_TASKFLOW
-  table.rows.push_back(measureTaskflowFib("Taskflow::Subflow", participants, cal));
+  table.rows.push_back(
+      measureTaskflowFib("Taskflow::Subflow", participants, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_LIBFORK
   table.rows.push_back(runLibforkFib28(participants, cal));
@@ -594,22 +633,27 @@ BenchTable buildQueensTable(std::size_t participants, const char *suffix,
                             const CyclesPerNanosecond &cal) {
   BenchTable table;
   table.workload = std::string{"forkjoin_nqueens12_"} + suffix;
-  table.rows.push_back(measureCitor("citor::ThreadPool", participants, cal, queensWorkload()));
+  table.rows.push_back(
+      measureCitor("citor::ThreadPool", participants, cal, queensWorkload()));
 #ifdef CITOR_BENCH_HAS_TBB
-  table.rows.push_back(measureTbb("oneTBB", participants, cal, queensWorkload()));
+  table.rows.push_back(
+      measureTbb("oneTBB", participants, cal, queensWorkload()));
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
-  table.rows.push_back(measureOmp("OpenMP", participants, cal, queensWorkload()));
+  table.rows.push_back(
+      measureOmp("OpenMP", participants, cal, queensWorkload()));
 #endif
 #ifdef CITOR_BENCH_HAS_DISPENSO
+  table.rows.push_back(measureDispenso("dispenso::ThreadPool", participants,
+                                       cal, queensWorkload()));
+#endif
+#ifdef CITOR_BENCH_HAS_TASKFLOW
   table.rows.push_back(
-      measureDispenso("dispenso::ThreadPool", participants, cal, queensWorkload()));
+      measureTaskflowQueens("Taskflow::Subflow", participants, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_TASKFLOW
-  table.rows.push_back(measureTaskflowQueens("Taskflow::Subflow", participants, cal));
-#endif
-#ifdef CITOR_BENCH_HAS_TASKFLOW
-  table.rows.push_back(measureTaskflowQueens("Taskflow::Subflow", participants, cal));
+  table.rows.push_back(
+      measureTaskflowQueens("Taskflow::Subflow", participants, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_LIBFORK
   table.rows.push_back(runLibforkNQueens12(participants, cal));
@@ -621,8 +665,12 @@ BenchTable buildQueensTable(std::size_t participants, const char *suffix,
   return table;
 }
 
-BenchTable runFibJ8(const CyclesPerNanosecond &cal) { return buildFibTable(8, "j8", cal); }
-BenchTable runFibJ16(const CyclesPerNanosecond &cal) { return buildFibTable(16, "j16", cal); }
+BenchTable runFibJ8(const CyclesPerNanosecond &cal) {
+  return buildFibTable(8, "j8", cal);
+}
+BenchTable runFibJ16(const CyclesPerNanosecond &cal) {
+  return buildFibTable(16, "j16", cal);
+}
 BenchTable runFibFineJ8(const CyclesPerNanosecond &cal) {
   return buildFibFineTable(8, "j8", cal);
 }
@@ -641,8 +689,12 @@ BenchTable runFibTortureN35J8(const CyclesPerNanosecond &cal) {
 BenchTable runFibTortureN35J16(const CyclesPerNanosecond &cal) {
   return buildFibTortureTable(16, 35, "n35_j16", cal);
 }
-BenchTable runQueensJ8(const CyclesPerNanosecond &cal) { return buildQueensTable(8, "j8", cal); }
-BenchTable runQueensJ16(const CyclesPerNanosecond &cal) { return buildQueensTable(16, "j16", cal); }
+BenchTable runQueensJ8(const CyclesPerNanosecond &cal) {
+  return buildQueensTable(8, "j8", cal);
+}
+BenchTable runQueensJ16(const CyclesPerNanosecond &cal) {
+  return buildQueensTable(16, "j16", cal);
+}
 
 struct ForkJoinRegistrar {
   ForkJoinRegistrar() {
@@ -650,10 +702,14 @@ struct ForkJoinRegistrar {
     registerWorkload({.name = "forkjoin_fib28_j16", .run = &runFibJ16});
     registerWorkload({.name = "forkjoin_fib_fine_j8", .run = &runFibFineJ8});
     registerWorkload({.name = "forkjoin_fib_fine_j16", .run = &runFibFineJ16});
-    registerWorkload({.name = "forkjoin_fib_torture_n30_j8", .run = &runFibTortureN30J8});
-    registerWorkload({.name = "forkjoin_fib_torture_n30_j16", .run = &runFibTortureN30J16});
-    registerWorkload({.name = "forkjoin_fib_torture_n35_j8", .run = &runFibTortureN35J8});
-    registerWorkload({.name = "forkjoin_fib_torture_n35_j16", .run = &runFibTortureN35J16});
+    registerWorkload(
+        {.name = "forkjoin_fib_torture_n30_j8", .run = &runFibTortureN30J8});
+    registerWorkload(
+        {.name = "forkjoin_fib_torture_n30_j16", .run = &runFibTortureN30J16});
+    registerWorkload(
+        {.name = "forkjoin_fib_torture_n35_j8", .run = &runFibTortureN35J8});
+    registerWorkload(
+        {.name = "forkjoin_fib_torture_n35_j16", .run = &runFibTortureN35J16});
     registerWorkload({.name = "forkjoin_nqueens12_j8", .run = &runQueensJ8});
     registerWorkload({.name = "forkjoin_nqueens12_j16", .run = &runQueensJ16});
   }

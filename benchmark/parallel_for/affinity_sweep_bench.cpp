@@ -59,7 +59,8 @@ inline void stridedBody(std::uint64_t *buffer, std::size_t lo, std::size_t hi,
   const std::size_t wordsPerStride = kStrideBytes / sizeof(std::uint64_t);
   for (std::size_t i = lo; i < hi; ++i) {
     const std::size_t idx = i * wordsPerStride;
-    const std::uint64_t mix = kPattern ^ (static_cast<std::uint64_t>(i) * 0x9E3779B97F4A7C15ULL);
+    const std::uint64_t mix =
+        kPattern ^ (static_cast<std::uint64_t>(i) * 0x9E3779B97F4A7C15ULL);
     const std::uint64_t v = buffer[idx];
     const std::uint64_t next = v ^ mix;
     buffer[idx] = next;
@@ -83,7 +84,8 @@ void resetBuffer(std::uint64_t *buffer, std::size_t words) noexcept {
 /// per-iteration mix is index-only, partitioning does not change the XOR
 /// fold, so this single sequential pass is the correctness oracle for every
 /// parallel partition.
-[[nodiscard]] std::uint64_t computeReferenceXor(std::vector<std::uint64_t> &buffer) {
+[[nodiscard]] std::uint64_t
+computeReferenceXor(std::vector<std::uint64_t> &buffer) {
   resetBuffer(buffer.data(), buffer.size());
   std::atomic<std::uint64_t> sink{0};
   stridedBody(buffer.data(), std::size_t{0}, kN, sink);
@@ -91,7 +93,8 @@ void resetBuffer(std::uint64_t *buffer, std::size_t words) noexcept {
 }
 
 template <class RunFn>
-[[nodiscard]] BenchRow measureLoop(const char *name, const CyclesPerNanosecond &cal, RunFn run,
+[[nodiscard]] BenchRow measureLoop(const char *name,
+                                   const CyclesPerNanosecond &cal, RunFn run,
                                    std::uint64_t referenceXor) {
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     const std::uint64_t v = run();
@@ -109,7 +112,8 @@ template <class RunFn>
   return finalizeRow(name, samples);
 }
 
-[[nodiscard]] BenchRow measureWithAffinity(const char *name, std::size_t participants,
+[[nodiscard]] BenchRow measureWithAffinity(const char *name,
+                                           std::size_t participants,
                                            citor::Affinity affinity,
                                            const CyclesPerNanosecond &cal) {
   ThreadPool pool(participants);
@@ -144,10 +148,12 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
                       const CyclesPerNanosecond &cal) {
   BenchTable table;
   table.workload = std::string{"affinity_sweep_strided_"} + suffix;
-  table.rows.push_back(measureWithAffinity("citor::ThreadPool[Affinity::None]", participants,
-                                           citor::Affinity::None, cal));
-  table.rows.push_back(measureWithAffinity("citor::ThreadPool[Affinity::CcdLocal]", participants,
-                                           citor::Affinity::CcdLocal, cal));
+  table.rows.push_back(measureWithAffinity("citor::ThreadPool[Affinity::None]",
+                                           participants, citor::Affinity::None,
+                                           cal));
+  table.rows.push_back(
+      measureWithAffinity("citor::ThreadPool[Affinity::CcdLocal]", participants,
+                          citor::Affinity::CcdLocal, cal));
   return table;
 }
 
@@ -157,7 +163,8 @@ BenchTable runAffinityJ16(const CyclesPerNanosecond &cal) {
 
 struct AffinitySweepRegistrar {
   AffinitySweepRegistrar() {
-    registerWorkload({.name = "affinity_sweep_strided_j16_64MB_2KBstride", .run = &runAffinityJ16});
+    registerWorkload({.name = "affinity_sweep_strided_j16_64MB_2KBstride",
+                      .run = &runAffinityJ16});
   }
 };
 

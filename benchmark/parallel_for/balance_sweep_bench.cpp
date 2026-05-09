@@ -22,9 +22,10 @@
 #include "competitor_traits.h"
 #include "cycle_clock.h"
 
-// Dynamic-chunked hint preset (workers race on the relaxed nextBlock counter). The static-uniform
-// counterpart in this bench is just `citor::HintsDefaults` (with cancellation polls disabled to
-// match the dispatch-floor measurement shape).
+// Dynamic-chunked hint preset (workers race on the relaxed nextBlock counter).
+// The static-uniform counterpart in this bench is just `citor::HintsDefaults`
+// (with cancellation polls disabled to match the dispatch-floor measurement
+// shape).
 struct BalanceSweepStaticHints : citor::HintsDefaults {
   static constexpr bool cancellationChecks = false;
 };
@@ -57,7 +58,8 @@ constexpr double kSpinCapNs = 200'000.0;
   return draw;
 }
 
-inline void spinForNs(double targetNs, const CyclesPerNanosecond &cal) noexcept {
+inline void spinForNs(double targetNs,
+                      const CyclesPerNanosecond &cal) noexcept {
   if (targetNs <= 0.0) {
     return;
   }
@@ -103,7 +105,8 @@ inline void paretoBlockBody(const ParetoData &d, std::size_t lo, std::size_t hi,
 }
 
 template <class RunFn>
-[[nodiscard]] BenchRow measureLoop(const char *name, const CyclesPerNanosecond &cal, RunFn run,
+[[nodiscard]] BenchRow measureLoop(const char *name,
+                                   const CyclesPerNanosecond &cal, RunFn run,
                                    std::int64_t referenceTotal) {
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     const std::int64_t v = run();
@@ -121,7 +124,8 @@ template <class RunFn>
   return finalizeRow(name, samples);
 }
 
-[[nodiscard]] BenchRow measureStatic(std::size_t participants, const ParetoData &d,
+[[nodiscard]] BenchRow measureStatic(std::size_t participants,
+                                     const ParetoData &d,
                                      const CyclesPerNanosecond &cal) {
   ThreadPool pool(participants);
   return measureLoop(
@@ -129,7 +133,8 @@ template <class RunFn>
       [&] {
         std::atomic<std::int64_t> sink{0};
         pool.parallelFor<BalanceSweepStaticHints>(
-            std::size_t{0}, kN, [&d, &cal, &sink](std::size_t lo, std::size_t hi) {
+            std::size_t{0}, kN,
+            [&d, &cal, &sink](std::size_t lo, std::size_t hi) {
               paretoBlockBody(d, lo, hi, cal, sink);
             });
         return sink.load(std::memory_order_relaxed);
@@ -137,7 +142,8 @@ template <class RunFn>
       d.totalCostNs);
 }
 
-[[nodiscard]] BenchRow measureDynamic(std::size_t participants, const ParetoData &d,
+[[nodiscard]] BenchRow measureDynamic(std::size_t participants,
+                                      const ParetoData &d,
                                       const CyclesPerNanosecond &cal) {
   ThreadPool pool(participants);
   return measureLoop(
@@ -145,7 +151,8 @@ template <class RunFn>
       [&] {
         std::atomic<std::int64_t> sink{0};
         pool.parallelFor<BalanceSweepDynamicHints>(
-            std::size_t{0}, kN, [&d, &cal, &sink](std::size_t lo, std::size_t hi) {
+            std::size_t{0}, kN,
+            [&d, &cal, &sink](std::size_t lo, std::size_t hi) {
               paretoBlockBody(d, lo, hi, cal, sink);
             });
         return sink.load(std::memory_order_relaxed);
@@ -163,13 +170,19 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
   return table;
 }
 
-BenchTable runBalanceJ8(const CyclesPerNanosecond &cal) { return buildTable(8, "j8_n1M", cal); }
-BenchTable runBalanceJ16(const CyclesPerNanosecond &cal) { return buildTable(16, "j16_n1M", cal); }
+BenchTable runBalanceJ8(const CyclesPerNanosecond &cal) {
+  return buildTable(8, "j8_n1M", cal);
+}
+BenchTable runBalanceJ16(const CyclesPerNanosecond &cal) {
+  return buildTable(16, "j16_n1M", cal);
+}
 
 struct BalanceSweepRegistrar {
   BalanceSweepRegistrar() {
-    registerWorkload({.name = "balance_sweep_pareto_j8_n1M", .run = &runBalanceJ8});
-    registerWorkload({.name = "balance_sweep_pareto_j16_n1M", .run = &runBalanceJ16});
+    registerWorkload(
+        {.name = "balance_sweep_pareto_j8_n1M", .run = &runBalanceJ8});
+    registerWorkload(
+        {.name = "balance_sweep_pareto_j16_n1M", .run = &runBalanceJ16});
   }
 };
 

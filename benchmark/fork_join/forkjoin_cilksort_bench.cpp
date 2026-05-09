@@ -22,10 +22,11 @@
 // output-offset prefix, and run `parallelFor` to merge each bucket
 // independently into the destination.
 //
-// Pool eligibility: only pools whose `RecursiveForkJoinTraits::supportsRecursiveSpawn`
-// is `true` participate. citor::ThreadPool, oneTBB, and OpenMP all qualify;
-// BS / dp / task / riften / Eigen / Taskflow Executor are excluded at compile
-// time via the helper's `static_assert`.
+// Pool eligibility: only pools whose
+// `RecursiveForkJoinTraits::supportsRecursiveSpawn` is `true` participate.
+// citor::ThreadPool, oneTBB, and OpenMP all qualify; BS / dp / task / riften /
+// Eigen / Taskflow Executor are excluded at compile time via the helper's
+// `static_assert`.
 //
 // Internal correctness gate (BEFORE timing): the cilksort output is compared
 // element-wise against `std::sort` on a fresh copy of the same input;
@@ -87,8 +88,8 @@ constexpr std::size_t kSeqCutoff = 256;
 // merge phase's parallelScan fans out instead of inline-capping.
 constexpr std::size_t kMergeBuckets = 64;
 
-/// Hint preset for the merge-phase `parallelFor`: cancellation polls disabled. The merge-phase
-/// `parallelScan` uses bare `citor::HintsDefaults`.
+/// Hint preset for the merge-phase `parallelFor`: cancellation polls disabled.
+/// The merge-phase `parallelScan` uses bare `citor::HintsDefaults`.
 struct CilksortForHints : citor::HintsDefaults {
   static constexpr bool cancellationChecks = false;
 };
@@ -98,8 +99,9 @@ struct CilksortForHints : citor::HintsDefaults {
 [[nodiscard]] std::vector<std::int32_t> buildInput(std::size_t n) {
   std::vector<std::int32_t> v(n);
   std::mt19937 rng{0xc1701U};
-  std::uniform_int_distribution<std::int32_t> dist(std::numeric_limits<std::int32_t>::min(),
-                                                   std::numeric_limits<std::int32_t>::max());
+  std::uniform_int_distribution<std::int32_t> dist(
+      std::numeric_limits<std::int32_t>::min(),
+      std::numeric_limits<std::int32_t>::max());
   for (std::size_t i = 0; i < n; ++i) {
     v[i] = dist(rng);
   }
@@ -108,9 +110,9 @@ struct CilksortForHints : citor::HintsDefaults {
 
 /// Sequential merge of two sorted runs `[aLo, aHi)` and `[bLo, bHi)` from
 /// `src` into `dst[outLo..]`. Returns the number of elements written.
-inline std::size_t seqMerge(const std::int32_t *src, std::size_t aLo, std::size_t aHi,
-                            std::size_t bLo, std::size_t bHi, std::int32_t *dst,
-                            std::size_t outLo) noexcept {
+inline std::size_t seqMerge(const std::int32_t *src, std::size_t aLo,
+                            std::size_t aHi, std::size_t bLo, std::size_t bHi,
+                            std::int32_t *dst, std::size_t outLo) noexcept {
   std::size_t i = aLo;
   std::size_t j = bLo;
   std::size_t k = outLo;
@@ -151,8 +153,9 @@ struct MergeBucket {
 /// slice via `seqMerge` into the matching destination offset. Output
 /// offsets come from a `parallelScan` over the bucket-size array.
 template <class Pool>
-void parallelMerge(Pool &pool, std::int32_t *src, std::size_t aLo, std::size_t aHi, std::size_t bLo,
-                   std::size_t bHi, std::int32_t *dst, std::size_t outLo) {
+void parallelMerge(Pool &pool, std::int32_t *src, std::size_t aLo,
+                   std::size_t aHi, std::size_t bLo, std::size_t bHi,
+                   std::int32_t *dst, std::size_t outLo) {
   const std::size_t nA = aHi - aLo;
   const std::size_t nB = bHi - bLo;
   const std::size_t total = nA + nB;
@@ -193,7 +196,8 @@ void parallelMerge(Pool &pool, std::int32_t *src, std::size_t aLo, std::size_t a
     // such that secondary[secLo..pos) is < key and secondary[pos..secHi) is
     // >= key. With duplicates, ties land on the secondary side of the cut,
     // matching the `<=` test in `seqMerge` above.
-    secSplit[k] = static_cast<std::size_t>(std::lower_bound(src + secLo, src + secHi, key) - src);
+    secSplit[k] = static_cast<std::size_t>(
+        std::lower_bound(src + secLo, src + secHi, key) - src);
   }
 
   // Build the bucket descriptors with the orientation undone (each bucket's
@@ -214,7 +218,8 @@ void parallelMerge(Pool &pool, std::int32_t *src, std::size_t aLo, std::size_t a
                                .bHi = primSplit[k + 1U],
                                .outOffset = 0U};
     }
-    sizes[k] = (buckets[k].aHi - buckets[k].aLo) + (buckets[k].bHi - buckets[k].bLo);
+    sizes[k] =
+        (buckets[k].aHi - buckets[k].aLo) + (buckets[k].bHi - buckets[k].bLo);
   }
 
   // Compute the bucket-offset prefix via `parallelScan`. Pass 1's body sums
@@ -223,8 +228,9 @@ void parallelMerge(Pool &pool, std::int32_t *src, std::size_t aLo, std::size_t a
   // The total `total` is returned and used as a sanity check below.
   std::array<std::size_t, kMergeBuckets> offsets{};
   if constexpr (std::is_same_v<Pool, ::citor::ThreadPool>) {
-    auto body = [&sizes, &offsets](std::size_t /*chunkId*/, std::size_t lo, std::size_t hi,
-                                   std::size_t initial, std::size_t * /*unused*/) -> std::size_t {
+    auto body = [&sizes, &offsets](std::size_t /*chunkId*/, std::size_t lo,
+                                   std::size_t hi, std::size_t initial,
+                                   std::size_t * /*unused*/) -> std::size_t {
       // Both passes write `offsets[i]` unconditionally. Pass 1 writes
       // intermediate values that pass 2 overwrites with the correct
       // exclusive prefix; correctness depends on pass 2 running strictly
@@ -242,8 +248,9 @@ void parallelMerge(Pool &pool, std::int32_t *src, std::size_t aLo, std::size_t a
       }
       return running - initial;
     };
-    const std::size_t inclusiveTotal = pool.template parallelScan<citor::HintsDefaults>(
-        kMergeBuckets, std::size_t{0}, body, std::plus<std::size_t>{});
+    const std::size_t inclusiveTotal =
+        pool.template parallelScan<citor::HintsDefaults>(
+            kMergeBuckets, std::size_t{0}, body, std::plus<std::size_t>{});
     CITOR_ALWAYS_ASSERT(inclusiveTotal == total);
   }
 #ifdef CITOR_BENCH_HAS_TBB
@@ -316,7 +323,8 @@ void parallelMerge(Pool &pool, std::int32_t *src, std::size_t aLo, std::size_t a
 
   if constexpr (std::is_same_v<Pool, ::citor::ThreadPool>) {
     pool.template parallelFor<CilksortForHints>(
-        std::size_t{0}, kMergeBuckets, [&buckets, src, dst](std::size_t lo, std::size_t hi) {
+        std::size_t{0}, kMergeBuckets,
+        [&buckets, src, dst](std::size_t lo, std::size_t hi) {
           for (std::size_t k = lo; k < hi; ++k) {
             const MergeBucket &bk = buckets[k];
             seqMerge(src, bk.aLo, bk.aHi, bk.bLo, bk.bHi, dst, bk.outOffset);
@@ -345,11 +353,18 @@ void parallelMerge(Pool &pool, std::int32_t *src, std::size_t aLo, std::size_t a
     // `OMP_MAX_ACTIVE_LEVELS=1` and silently degrade the merge to single-
     // threaded on the call site.
     (void)pool;
+    /// OpenMP `taskloop` lowers the loop counter to a signed `long` in the
+    /// generated runtime call, which then converts back to `std::size_t`
+    /// when indexing `buckets`. The conversion warning is intrinsic to the
+    /// pragma's lowering; suppress locally rather than rewriting the loop.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wsign-conversion"
 #pragma omp taskloop grainsize(1) shared(buckets, src, dst)
     for (std::size_t k = 0; k < kMergeBuckets; ++k) {
       const MergeBucket &bk = buckets[k];
       seqMerge(src, bk.aLo, bk.aHi, bk.bLo, bk.bHi, dst, bk.outOffset);
     }
+#pragma GCC diagnostic pop
   }
 #endif
 #ifdef CITOR_BENCH_HAS_DISPENSO
@@ -390,8 +405,8 @@ void parallelMerge(Pool &pool, std::int32_t *src, std::size_t aLo, std::size_t a
 /// destination is `tmp`; at depth d even, the opposite. The driver below
 /// detects the parity and copies if needed.
 template <class Pool>
-void cilksortRec(Pool &pool, std::int32_t *data, std::int32_t *tmp, std::size_t lo,
-                 std::size_t hi) {
+void cilksortRec(Pool &pool, std::int32_t *data, std::int32_t *tmp,
+                 std::size_t lo, std::size_t hi) {
   const std::size_t n = hi - lo;
   if (n <= kSeqCutoff) {
     std::sort(data + lo, data + hi);
@@ -412,11 +427,14 @@ void cilksortRec(Pool &pool, std::int32_t *data, std::int32_t *tmp, std::size_t 
 }
 
 template <class PoolT>
-[[nodiscard]] BenchRow measureCilksort(const char *name, std::size_t participants, std::size_t n,
+[[nodiscard]] BenchRow measureCilksort(const char *name,
+                                       std::size_t participants, std::size_t n,
                                        const CyclesPerNanosecond &cal) {
   static_assert(RecursiveForkJoinTraits<PoolT>::supportsRecursiveSpawn,
-                "cilksort bench requires recursive-spawn-capable pool; the trait gate excludes "
-                "BS / dp / task_thread_pool / riften / Eigen / Taskflow Executor at compile time.");
+                "cilksort bench requires recursive-spawn-capable pool; the "
+                "trait gate excludes "
+                "BS / dp / task_thread_pool / riften / Eigen / Taskflow "
+                "Executor at compile time.");
   using Traits = CompetitorTraits<PoolT>;
   auto pool = Traits::make(participants);
 
@@ -453,7 +471,8 @@ template <class PoolT>
 
 [[nodiscard]] BenchRow measureCitor(std::size_t participants, std::size_t n,
                                     const CyclesPerNanosecond &cal) {
-  return measureCilksort<citor::ThreadPool>("citor::ThreadPool", participants, n, cal);
+  return measureCilksort<citor::ThreadPool>("citor::ThreadPool", participants,
+                                            n, cal);
 }
 
 #ifdef CITOR_BENCH_HAS_TBB
@@ -466,8 +485,9 @@ template <class PoolT>
 #ifdef CITOR_BENCH_HAS_TASKFLOW
 [[nodiscard]] BenchRow measureTaskflow(std::size_t participants, std::size_t n,
                                        const CyclesPerNanosecond &cal) {
-  static_assert(RecursiveForkJoinTraits<::tf::Subflow>::supportsRecursiveSpawn,
-                "Taskflow Subflow must opt into recursive spawn for the cilksort bench");
+  static_assert(
+      RecursiveForkJoinTraits<::tf::Subflow>::supportsRecursiveSpawn,
+      "Taskflow Subflow must opt into recursive spawn for the cilksort bench");
   ::tf::Executor exec(participants);
   const std::vector<std::int32_t> input = buildInput(n);
   std::vector<std::int32_t> reference = input;
@@ -520,8 +540,9 @@ template <class PoolT>
 #ifdef CITOR_BENCH_HAS_OPENMP
 [[nodiscard]] BenchRow measureOmp(std::size_t participants, std::size_t n,
                                   const CyclesPerNanosecond &cal) {
-  static_assert(RecursiveForkJoinTraits<OpenMpRunner>::supportsRecursiveSpawn,
-                "OpenMP runner must opt into recursive spawn for the cilksort bench");
+  static_assert(
+      RecursiveForkJoinTraits<OpenMpRunner>::supportsRecursiveSpawn,
+      "OpenMP runner must opt into recursive spawn for the cilksort bench");
   // OpenMP `task` requires an enclosing `parallel` region. Open the region
   // once per iteration, then funnel into the recursion via a `single`
   // construct so only one thread enters the root.
@@ -579,10 +600,11 @@ constexpr std::array<CilksortCell, 2> kCells{{
     {.n = 1U << 24U, .suffix = "n16m"},
 }};
 
-BenchTable buildTable(std::size_t participants, CilksortCell cell, const CyclesPerNanosecond &cal) {
+BenchTable buildTable(std::size_t participants, CilksortCell cell,
+                      const CyclesPerNanosecond &cal) {
   BenchTable table;
-  table.workload =
-      std::string{"forkjoin_cilksort_j"} + std::to_string(participants) + "_" + cell.suffix;
+  table.workload = std::string{"forkjoin_cilksort_j"} +
+                   std::to_string(participants) + "_" + cell.suffix;
   table.rows.push_back(measureCitor(participants, cell.n, cal));
 #ifdef CITOR_BENCH_HAS_TBB
   table.rows.push_back(measureTbb(participants, cell.n, cal));
@@ -610,10 +632,14 @@ BenchTable runCilksortCell(const CyclesPerNanosecond &cal) {
 
 struct CilksortRegistrar {
   CilksortRegistrar() {
-    registerWorkload({.name = "forkjoin_cilksort_j8_n1m", .run = &runCilksortCell<0, 8>});
-    registerWorkload({.name = "forkjoin_cilksort_j16_n1m", .run = &runCilksortCell<0, 16>});
-    registerWorkload({.name = "forkjoin_cilksort_j8_n16m", .run = &runCilksortCell<1, 8>});
-    registerWorkload({.name = "forkjoin_cilksort_j16_n16m", .run = &runCilksortCell<1, 16>});
+    registerWorkload(
+        {.name = "forkjoin_cilksort_j8_n1m", .run = &runCilksortCell<0, 8>});
+    registerWorkload(
+        {.name = "forkjoin_cilksort_j16_n1m", .run = &runCilksortCell<0, 16>});
+    registerWorkload(
+        {.name = "forkjoin_cilksort_j8_n16m", .run = &runCilksortCell<1, 8>});
+    registerWorkload(
+        {.name = "forkjoin_cilksort_j16_n16m", .run = &runCilksortCell<1, 16>});
   }
 };
 

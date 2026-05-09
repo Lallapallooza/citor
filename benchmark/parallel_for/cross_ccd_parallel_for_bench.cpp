@@ -103,7 +103,8 @@ public:
   explicit ScopedThreadPin(unsigned cpu) noexcept {
 #ifdef __linux__
     CPU_ZERO(&m_saved);
-    if (pthread_getaffinity_np(pthread_self(), sizeof(m_saved), &m_saved) != 0) {
+    if (pthread_getaffinity_np(pthread_self(), sizeof(m_saved), &m_saved) !=
+        0) {
       m_restore = false;
       return;
     }
@@ -144,7 +145,9 @@ private:
 /// constant rather than reading the input; this keeps cross-CCD coherence
 /// traffic on the *dispatch* path the bench wants to measure, instead of
 /// pulling the reading-side cache lines into a different CCD's L3.
-[[nodiscard]] double expectedSum() noexcept { return static_cast<double>(kElementCount); }
+[[nodiscard]] double expectedSum() noexcept {
+  return static_cast<double>(kElementCount);
+}
 
 /// One row's measurement helper. The producer is pinned to |producerCpu| for
 /// the duration of the call; `arena(arenaCcd)` services the dispatch.
@@ -155,7 +158,8 @@ private:
 /// harness first ensures the singleton is initialized while the calling
 /// thread still has the full process affinity mask. Subsequent harness
 /// constructions reuse the singleton.
-[[nodiscard]] BenchRow measureRow(const char *name, unsigned producerCpu, std::size_t arenaCcd,
+[[nodiscard]] BenchRow measureRow(const char *name, unsigned producerCpu,
+                                  std::size_t arenaCcd,
                                   const CyclesPerNanosecond &cal) {
   MultiArenaHarness harness{/*requiredCcds=*/2U};
   CITOR_ALWAYS_ASSERT(arenaCcd < harness.arenaCount());
@@ -178,12 +182,13 @@ private:
   // Warmup + correctness gate. The body writes `1.0F` over every element of
   // its range; after the dispatch the sum must equal `kElementCount`.
   auto runOnce = [&]() {
-    pool.parallelFor<CrossCcdHints>(std::size_t{0}, kElementCount,
-                                    [data](std::size_t lo, std::size_t hi) noexcept {
-                                      for (std::size_t i = lo; i < hi; ++i) {
-                                        data[i] = 1.0F;
-                                      }
-                                    });
+    pool.parallelFor<CrossCcdHints>(
+        std::size_t{0}, kElementCount,
+        [data](std::size_t lo, std::size_t hi) noexcept {
+          for (std::size_t i = lo; i < hi; ++i) {
+            data[i] = 1.0F;
+          }
+        });
     double sum = 0.0;
     for (std::size_t i = 0; i < kElementCount; ++i) {
       sum += static_cast<double>(data[i]);
@@ -205,12 +210,13 @@ private:
       data[k] = 0.0F;
     }
     const std::uint64_t startCycles = readCyclesStart();
-    pool.parallelFor<CrossCcdHints>(std::size_t{0}, kElementCount,
-                                    [data](std::size_t lo, std::size_t hi) noexcept {
-                                      for (std::size_t j = lo; j < hi; ++j) {
-                                        data[j] = 1.0F;
-                                      }
-                                    });
+    pool.parallelFor<CrossCcdHints>(
+        std::size_t{0}, kElementCount,
+        [data](std::size_t lo, std::size_t hi) noexcept {
+          for (std::size_t j = lo; j < hi; ++j) {
+            data[j] = 1.0F;
+          }
+        });
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
 
@@ -229,7 +235,8 @@ private:
 /// Pick a CPU id from a CCD's enumerated CPU list, defaulting to the first
 /// CPU. Returns `0` for an empty list (defensive; `enumerateCcds()` never
 /// produces empty inner vectors on hosts the bench can run on).
-[[nodiscard]] unsigned firstCpuOfCcd(const std::vector<unsigned> &cpus) noexcept {
+[[nodiscard]] unsigned
+firstCpuOfCcd(const std::vector<unsigned> &cpus) noexcept {
   return cpus.empty() ? 0U : cpus.front();
 }
 
@@ -239,18 +246,22 @@ BenchTable runCrossCcd(const CyclesPerNanosecond &cal) {
 
   const auto ccds = enumerateCcds();
   if (ccds.size() < 2U) {
-    throw std::runtime_error{"cross-CCD bench: enumerateCcds() returned fewer than 2 CCDs at "
-                             "runtime; topology may have been collapsed by post-init affinity. "
-                             "Skipping."};
+    throw std::runtime_error{
+        "cross-CCD bench: enumerateCcds() returned fewer than 2 CCDs at "
+        "runtime; topology may have been collapsed by post-init affinity. "
+        "Skipping."};
   }
   const unsigned cpuOnCcd0 = firstCpuOfCcd(ccds[0]);
   const unsigned cpuOnCcd1 = firstCpuOfCcd(ccds[1]);
 
-  table.rows.push_back(measureRow("citor::ThreadPool producer_ccd0_arena_ccd1", cpuOnCcd0,
+  table.rows.push_back(measureRow("citor::ThreadPool producer_ccd0_arena_ccd1",
+                                  cpuOnCcd0,
                                   /*arenaCcd=*/1U, cal));
-  table.rows.push_back(measureRow("citor::ThreadPool producer_ccd1_arena_ccd0", cpuOnCcd1,
+  table.rows.push_back(measureRow("citor::ThreadPool producer_ccd1_arena_ccd0",
+                                  cpuOnCcd1,
                                   /*arenaCcd=*/0U, cal));
-  table.rows.push_back(measureRow("citor::ThreadPool producer_ccd0_arena_ccd0", cpuOnCcd0,
+  table.rows.push_back(measureRow("citor::ThreadPool producer_ccd0_arena_ccd0",
+                                  cpuOnCcd0,
                                   /*arenaCcd=*/0U, cal));
   return table;
 }

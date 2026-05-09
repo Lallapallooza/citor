@@ -10,7 +10,8 @@
 // the outer loop and avoids a chain-rendezvous round per timestep that
 // some competitor adapters cannot honor).
 //
-// All 8 competitor pools render natively via `CompetitorTraits<P>::parallelFor`.
+// All 8 competitor pools render natively via
+// `CompetitorTraits<P>::parallelFor`.
 //
 // Internal correctness check: a sequential reference run on the same seed
 // is run BEFORE the timing window; the parallel run's final-grid checksum
@@ -66,7 +67,8 @@ AlignedDoubleBuffer allocateAlignedDoubles(std::size_t count) {
 
 /// Deterministic LCG-seeded fill. Same seed -> identical initial grid for
 /// every (pool, n) cell so the checksum invariant is well-defined.
-void deterministicFill(double *p, std::size_t count, std::uint32_t seed) noexcept {
+void deterministicFill(double *p, std::size_t count,
+                       std::uint32_t seed) noexcept {
   std::uint32_t state = seed;
   for (std::size_t i = 0; i < count; ++i) {
     state = (state * 1664525U) + 1013904223U;
@@ -76,7 +78,8 @@ void deterministicFill(double *p, std::size_t count, std::uint32_t seed) noexcep
 
 /// Sequential 5-point Jacobi reference; used to compute the correctness
 /// checksum the parallel run must match before any timing iteration.
-[[nodiscard]] double seqJacobi(std::size_t n, std::size_t timesteps, std::uint32_t seed) {
+[[nodiscard]] double seqJacobi(std::size_t n, std::size_t timesteps,
+                               std::uint32_t seed) {
   const std::size_t elems = n * n;
   AlignedDoubleBuffer u = allocateAlignedDoubles(elems);
   AlignedDoubleBuffer uNext = allocateAlignedDoubles(elems);
@@ -106,12 +109,14 @@ void deterministicFill(double *p, std::size_t count, std::uint32_t seed) noexcep
 
 /// Per-timestep row-block body. `rowFirst..rowLast` are interior row
 /// indices (both clipped to `[1, n-1)` upstream).
-inline void jacobiRowBlock(std::size_t rowFirst, std::size_t rowLast, std::size_t n,
-                           const double *uIn, double *uOut) noexcept {
+inline void jacobiRowBlock(std::size_t rowFirst, std::size_t rowLast,
+                           std::size_t n, const double *uIn,
+                           double *uOut) noexcept {
   for (std::size_t i = rowFirst; i < rowLast; ++i) {
     for (std::size_t j = 1; j < n - 1U; ++j) {
-      uOut[(i * n) + j] = 0.25 * (uIn[((i - 1U) * n) + j] + uIn[((i + 1U) * n) + j] +
-                                  uIn[(i * n) + (j - 1U)] + uIn[(i * n) + (j + 1U)]);
+      uOut[(i * n) + j] =
+          0.25 * (uIn[((i - 1U) * n) + j] + uIn[((i + 1U) * n) + j] +
+                  uIn[(i * n) + (j - 1U)] + uIn[(i * n) + (j + 1U)]);
     }
   }
 }
@@ -122,9 +127,10 @@ inline void jacobiRowBlock(std::size_t rowFirst, std::size_t rowLast, std::size_
 /// `competitor_traits.h`. Riften's `parallelFor` shim takes a participant
 /// count argument so its overload signature differs; we wrap that case.
 template <class PoolT, class Dispatch>
-[[nodiscard]] BenchRow measureHeatWith(const char *displayName, std::size_t participants,
-                                       std::size_t n, const CyclesPerNanosecond &cal,
-                                       double referenceChecksum, Dispatch dispatch) {
+[[nodiscard]] BenchRow
+measureHeatWith(const char *displayName, std::size_t participants,
+                std::size_t n, const CyclesPerNanosecond &cal,
+                double referenceChecksum, Dispatch dispatch) {
   if (!engineEnabled(displayName)) {
     BenchRow row{};
     row.name = displayName;
@@ -146,7 +152,8 @@ template <class PoolT, class Dispatch>
     for (std::size_t t = 0; t < kTimesteps; ++t) {
       const double *uIn = u.get();
       double *uOut = uNext.get();
-      const auto body = [uIn, uOut, n](std::size_t lo, std::size_t hi) noexcept {
+      const auto body = [uIn, uOut, n](std::size_t lo,
+                                       std::size_t hi) noexcept {
         const std::size_t rLo = std::max<std::size_t>(lo, 1U);
         const std::size_t rHi = hi >= n - 1U ? n - 1U : hi;
         if (rLo < rHi) {
@@ -185,22 +192,25 @@ template <class PoolT, class Dispatch>
 
 template <class PoolT>
 [[nodiscard]] BenchRow measureHeat(std::size_t participants, std::size_t n,
-                                   const CyclesPerNanosecond &cal, double referenceChecksum) {
+                                   const CyclesPerNanosecond &cal,
+                                   double referenceChecksum) {
   using Traits = CompetitorTraits<PoolT>;
-  return measureHeatWith<PoolT>(Traits::name, participants, n, cal, referenceChecksum,
-                                [](PoolT &pool, std::size_t first, std::size_t last, std::size_t p,
-                                   auto fn) { Traits::parallelFor(pool, first, last, p, fn); });
+  return measureHeatWith<PoolT>(
+      Traits::name, participants, n, cal, referenceChecksum,
+      [](PoolT &pool, std::size_t first, std::size_t last, std::size_t p,
+         auto fn) { Traits::parallelFor(pool, first, last, p, fn); });
 }
 
 template <class HintsT>
-[[nodiscard]] BenchRow measureCitorHeatWithHint(const char *displayName, std::size_t participants,
-                                                std::size_t n, const CyclesPerNanosecond &cal,
-                                                double referenceChecksum) {
+[[nodiscard]] BenchRow
+measureCitorHeatWithHint(const char *displayName, std::size_t participants,
+                         std::size_t n, const CyclesPerNanosecond &cal,
+                         double referenceChecksum) {
   return measureHeatWith<citor::ThreadPool>(
       displayName, participants, n, cal, referenceChecksum,
-      [](citor::ThreadPool &pool, std::size_t first, std::size_t last, std::size_t /*p*/, auto fn) {
-        pool.parallelFor<HintsT>(first, last, fn);
-      });
+      [](citor::ThreadPool &pool, std::size_t first, std::size_t last,
+         std::size_t /*p*/,
+         auto fn) { pool.parallelFor<HintsT>(first, last, fn); });
 }
 
 struct HeatCell {
@@ -213,9 +223,11 @@ constexpr std::array<HeatCell, 2> kCells{{
     {.n = 4096, .suffix = "n4096"},
 }};
 
-BenchTable buildTable(std::size_t participants, HeatCell cell, const CyclesPerNanosecond &cal) {
+BenchTable buildTable(std::size_t participants, HeatCell cell,
+                      const CyclesPerNanosecond &cal) {
   BenchTable table;
-  table.workload = std::string{"runplex_heat_j"} + std::to_string(participants) + "_" + cell.suffix;
+  table.workload = std::string{"runplex_heat_j"} +
+                   std::to_string(participants) + "_" + cell.suffix;
 
   // Sequential reference checksum is computed once per cell and reused
   // across pool rows.
@@ -225,28 +237,37 @@ BenchTable buildTable(std::size_t participants, HeatCell cell, const CyclesPerNa
       "citor::ThreadPool[Static]", participants, cell.n, cal, reference));
   table.rows.push_back(measureCitorHeatWithHint<citor::DynamicHints>(
       "citor::ThreadPool[Dynamic]", participants, cell.n, cal, reference));
-  table.rows.push_back(measureHeat<BS::light_thread_pool>(participants, cell.n, cal, reference));
-  table.rows.push_back(measureHeat<dp::thread_pool<>>(participants, cell.n, cal, reference));
   table.rows.push_back(
-      measureHeat<::task_thread_pool::task_thread_pool>(participants, cell.n, cal, reference));
-  table.rows.push_back(measureHeat<riften::Thiefpool>(participants, cell.n, cal, reference));
+      measureHeat<BS::light_thread_pool>(participants, cell.n, cal, reference));
+  table.rows.push_back(
+      measureHeat<dp::thread_pool<>>(participants, cell.n, cal, reference));
+  table.rows.push_back(measureHeat<::task_thread_pool::task_thread_pool>(
+      participants, cell.n, cal, reference));
+  table.rows.push_back(
+      measureHeat<riften::Thiefpool>(participants, cell.n, cal, reference));
 #ifdef CITOR_BENCH_HAS_TBB
-  table.rows.push_back(measureHeat<::tbb::task_arena>(participants, cell.n, cal, reference));
+  table.rows.push_back(
+      measureHeat<::tbb::task_arena>(participants, cell.n, cal, reference));
 #endif
 #ifdef CITOR_BENCH_HAS_TASKFLOW
-  table.rows.push_back(measureHeat<::tf::Executor>(participants, cell.n, cal, reference));
+  table.rows.push_back(
+      measureHeat<::tf::Executor>(participants, cell.n, cal, reference));
 #endif
 #ifdef CITOR_BENCH_HAS_EIGEN_THREADPOOL
-  table.rows.push_back(measureHeat<::Eigen::ThreadPool>(participants, cell.n, cal, reference));
+  table.rows.push_back(
+      measureHeat<::Eigen::ThreadPool>(participants, cell.n, cal, reference));
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
-  table.rows.push_back(measureHeat<OpenMpRunner>(participants, cell.n, cal, reference));
+  table.rows.push_back(
+      measureHeat<OpenMpRunner>(participants, cell.n, cal, reference));
 #endif
 #ifdef CITOR_BENCH_HAS_LEOPARD
-  table.rows.push_back(measureHeat<hmthrp::ThreadPool>(participants, cell.n, cal, reference));
+  table.rows.push_back(
+      measureHeat<hmthrp::ThreadPool>(participants, cell.n, cal, reference));
 #endif
 #ifdef CITOR_BENCH_HAS_DISPENSO
-  table.rows.push_back(measureHeat<dispenso::ThreadPool>(participants, cell.n, cal, reference));
+  table.rows.push_back(
+      measureHeat<dispenso::ThreadPool>(participants, cell.n, cal, reference));
 #endif
   return table;
 }
@@ -259,10 +280,14 @@ BenchTable runHeatCell(const CyclesPerNanosecond &cal) {
 
 struct HeatRegistrar {
   HeatRegistrar() {
-    registerWorkload({.name = "runplex_heat_j8_n2048", .run = &runHeatCell<0, 8>});
-    registerWorkload({.name = "runplex_heat_j16_n2048", .run = &runHeatCell<0, 16>});
-    registerWorkload({.name = "runplex_heat_j8_n4096", .run = &runHeatCell<1, 8>});
-    registerWorkload({.name = "runplex_heat_j16_n4096", .run = &runHeatCell<1, 16>});
+    registerWorkload(
+        {.name = "runplex_heat_j8_n2048", .run = &runHeatCell<0, 8>});
+    registerWorkload(
+        {.name = "runplex_heat_j16_n2048", .run = &runHeatCell<0, 16>});
+    registerWorkload(
+        {.name = "runplex_heat_j8_n4096", .run = &runHeatCell<1, 8>});
+    registerWorkload(
+        {.name = "runplex_heat_j16_n4096", .run = &runHeatCell<1, 16>});
   }
 };
 

@@ -73,7 +73,8 @@ struct ForkJoinHints : citor::HintsDefaults {
   return b;
 }
 
-template <class Spawn> [[nodiscard]] std::int64_t parFib(int n, Spawn spawn) {
+template <class Spawn>
+[[nodiscard]] std::int64_t parFib(int n, Spawn spawn) {
   if (n <= kFibCutoff) {
     return seqFib(n);
   }
@@ -87,8 +88,8 @@ template <class Spawn> [[nodiscard]] std::int64_t parFib(int n, Spawn spawn) {
 /// nanoseconds. Used as the detached-task body so the bench measures
 /// scheduler interaction, not a real I/O syscall.
 inline void spinFor(std::uint64_t ns) noexcept {
-  // Calibrate at a small constant number of cycles per increment. Approximate via TSC
-  // which is monotonic and rdtsc-fast on this host.
+  // Calibrate at a small constant number of cycles per increment. Approximate
+  // via TSC which is monotonic and rdtsc-fast on this host.
   const std::uint64_t target = ns;
   std::uint64_t accum = 0;
   for (std::uint64_t i = 0; i < target * 3U; ++i) {
@@ -101,7 +102,8 @@ inline void spinFor(std::uint64_t ns) noexcept {
 }
 
 template <class RunFn>
-[[nodiscard]] BenchRow measureLoop(const char *name, const CyclesPerNanosecond &cal, RunFn run) {
+[[nodiscard]] BenchRow measureLoop(const char *name,
+                                   const CyclesPerNanosecond &cal, RunFn run) {
   std::atomic<std::int64_t> sink{0};
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     sink.store(run(), std::memory_order_relaxed);
@@ -122,11 +124,13 @@ template <class RunFn>
 // Baseline: forkJoin only, no detached tasks. Same wall-time shape as
 // the fib28 cell elsewhere; reproduced here so the row pair compares
 // cleanly within the same table.
-[[nodiscard]] BenchRow measureForkOnly(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureForkOnly(std::size_t participants,
+                                       const CyclesPerNanosecond &cal) {
   ThreadPool pool(participants);
   return measureLoop("citor::ThreadPool[fork only]", cal, [&] {
     return parFib(kFibN, [&](auto &&a, auto &&b) {
-      pool.forkJoin<ForkJoinHints>(std::forward<decltype(a)>(a), std::forward<decltype(b)>(b));
+      pool.forkJoin<ForkJoinHints>(std::forward<decltype(a)>(a),
+                                   std::forward<decltype(b)>(b));
     });
   });
 }
@@ -138,14 +142,16 @@ template <class RunFn>
 // completes; the next iter's submitDetached batch races the prior batch's
 // drain). The bench's signal: how much does the forground fib cost
 // stretch under detached load?
-[[nodiscard]] BenchRow measureMixed(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureMixed(std::size_t participants,
+                                    const CyclesPerNanosecond &cal) {
   ThreadPool pool(participants);
   return measureLoop("citor::ThreadPool[fork+detached]", cal, [&] {
     for (std::size_t k = 0; k < kDetachedTasks; ++k) {
       pool.submitDetached<ForkJoinHints>([] { spinFor(kDetachedSpinNs); });
     }
     return parFib(kFibN, [&](auto &&a, auto &&b) {
-      pool.forkJoin<ForkJoinHints>(std::forward<decltype(a)>(a), std::forward<decltype(b)>(b));
+      pool.forkJoin<ForkJoinHints>(std::forward<decltype(a)>(a),
+                                   std::forward<decltype(b)>(b));
     });
   });
 }
@@ -159,13 +165,19 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
   return table;
 }
 
-BenchTable runJ8(const CyclesPerNanosecond &cal) { return buildTable(8, "j8", cal); }
-BenchTable runJ16(const CyclesPerNanosecond &cal) { return buildTable(16, "j16", cal); }
+BenchTable runJ8(const CyclesPerNanosecond &cal) {
+  return buildTable(8, "j8", cal);
+}
+BenchTable runJ16(const CyclesPerNanosecond &cal) {
+  return buildTable(16, "j16", cal);
+}
 
 struct MixedRegistrar {
   MixedRegistrar() {
-    registerWorkload({.name = "forkjoin_mixed_detached_sync_j8", .run = &runJ8});
-    registerWorkload({.name = "forkjoin_mixed_detached_sync_j16", .run = &runJ16});
+    registerWorkload(
+        {.name = "forkjoin_mixed_detached_sync_j8", .run = &runJ8});
+    registerWorkload(
+        {.name = "forkjoin_mixed_detached_sync_j16", .run = &runJ16});
   }
 };
 

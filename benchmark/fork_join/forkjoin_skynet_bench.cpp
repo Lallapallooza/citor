@@ -62,9 +62,11 @@ std::int64_t skynetRec(Pool &pool, std::int64_t label, int depth) {
   }
   const std::int64_t base = label * kFanout;
   std::array<std::int64_t, kFanout> partials{};
-  recursiveSpawnN(pool, static_cast<std::size_t>(kFanout), [&](Pool &p, std::size_t i) {
-    partials[i] = skynetRec(p, base + static_cast<std::int64_t>(i), depth - 1);
-  });
+  recursiveSpawnN(
+      pool, static_cast<std::size_t>(kFanout), [&](Pool &p, std::size_t i) {
+        partials[i] =
+            skynetRec(p, base + static_cast<std::int64_t>(i), depth - 1);
+      });
   std::int64_t total = 0;
   for (const std::int64_t v : partials) {
     total += v;
@@ -98,26 +100,33 @@ template <class PoolT>
   return finalizeRow(name, samples);
 }
 
-[[nodiscard]] BenchRow measureCitor(std::size_t participants, const CyclesPerNanosecond &cal) {
-  return measureSkynet<citor::ThreadPool>("citor::ThreadPool", participants, cal);
+[[nodiscard]] BenchRow measureCitor(std::size_t participants,
+                                    const CyclesPerNanosecond &cal) {
+  return measureSkynet<citor::ThreadPool>("citor::ThreadPool", participants,
+                                          cal);
 }
 
 #ifdef CITOR_BENCH_HAS_TBB
-[[nodiscard]] BenchRow measureTbb(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureTbb(std::size_t participants,
+                                  const CyclesPerNanosecond &cal) {
   return measureSkynet<::tbb::task_arena>("oneTBB", participants, cal);
 }
 #endif
 
 #ifdef CITOR_BENCH_HAS_DISPENSO
-[[nodiscard]] BenchRow measureDispenso(std::size_t participants, const CyclesPerNanosecond &cal) {
-  static_assert(RecursiveForkJoinTraits<::dispenso::ThreadPool>::supportsRecursiveSpawn,
-                "dispenso must opt into recursive spawn for skynet");
-  return measureSkynet<::dispenso::ThreadPool>("dispenso::ThreadPool", participants, cal);
+[[nodiscard]] BenchRow measureDispenso(std::size_t participants,
+                                       const CyclesPerNanosecond &cal) {
+  static_assert(
+      RecursiveForkJoinTraits<::dispenso::ThreadPool>::supportsRecursiveSpawn,
+      "dispenso must opt into recursive spawn for skynet");
+  return measureSkynet<::dispenso::ThreadPool>("dispenso::ThreadPool",
+                                               participants, cal);
 }
 #endif
 
 #ifdef CITOR_BENCH_HAS_OPENMP
-[[nodiscard]] BenchRow measureOmp(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureOmp(std::size_t participants,
+                                  const CyclesPerNanosecond &cal) {
   static_assert(RecursiveForkJoinTraits<OpenMpRunner>::supportsRecursiveSpawn,
                 "OpenMP runner must opt into recursive spawn for skynet");
   OpenMpRunner runner{participants};
@@ -127,7 +136,9 @@ template <class PoolT>
 #pragma omp parallel num_threads(static_cast<int>(participants))
     {
 #pragma omp single
-      { result = skynetRec(runner, std::int64_t{0}, kDepth); }
+      {
+        result = skynetRec(runner, std::int64_t{0}, kDepth);
+      }
     }
     return result;
   };
@@ -152,7 +163,8 @@ template <class PoolT>
 #endif
 
 #ifdef CITOR_BENCH_HAS_TASKFLOW
-[[nodiscard]] BenchRow measureTaskflow(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureTaskflow(std::size_t participants,
+                                       const CyclesPerNanosecond &cal) {
   static_assert(RecursiveForkJoinTraits<::tf::Subflow>::supportsRecursiveSpawn,
                 "Taskflow Subflow must opt into recursive spawn for skynet");
   ::tf::Executor exec(participants);
@@ -212,8 +224,12 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
   return table;
 }
 
-BenchTable runSkynetJ8(const CyclesPerNanosecond &cal) { return buildTable(8, "j8", cal); }
-BenchTable runSkynetJ16(const CyclesPerNanosecond &cal) { return buildTable(16, "j16", cal); }
+BenchTable runSkynetJ8(const CyclesPerNanosecond &cal) {
+  return buildTable(8, "j8", cal);
+}
+BenchTable runSkynetJ16(const CyclesPerNanosecond &cal) {
+  return buildTable(16, "j16", cal);
+}
 
 struct SkynetRegistrar {
   SkynetRegistrar() {

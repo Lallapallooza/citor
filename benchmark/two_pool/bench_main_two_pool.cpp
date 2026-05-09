@@ -46,7 +46,8 @@ struct CliOptions {
 };
 
 void printUsage(std::ostream &out) {
-  out << "usage: parallel_bench_two_pool [--filter SUBSTR] [--filter=SUBSTR] [--list]\n"
+  out << "usage: parallel_bench_two_pool [--filter SUBSTR] [--filter=SUBSTR] "
+         "[--list]\n"
       << "       parallel_bench_two_pool SUBSTR\n";
 }
 
@@ -73,7 +74,8 @@ bool parseArgs(int argc, char **argv, CliOptions &opts) {
     if (arg.substr(0, kFilterPrefix.size()) == kFilterPrefix) {
       const std::string_view value = arg.substr(kFilterPrefix.size());
       if (value.empty()) {
-        std::cerr << "parallel_bench_two_pool: --filter requires a non-empty substring\n";
+        std::cerr << "parallel_bench_two_pool: --filter requires a non-empty "
+                     "substring\n";
         return false;
       }
       opts.filters.push_back(value);
@@ -89,7 +91,8 @@ bool parseArgs(int argc, char **argv, CliOptions &opts) {
   return true;
 }
 
-bool matchesFilters(std::string_view name, const std::vector<std::string_view> &filters) {
+bool matchesFilters(std::string_view name,
+                    const std::vector<std::string_view> &filters) {
   if (filters.empty()) {
     return true;
   }
@@ -111,7 +114,8 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
   if (registry().empty()) {
-    std::cerr << "parallel_bench_two_pool: no workloads registered; check link order\n";
+    std::cerr << "parallel_bench_two_pool: no workloads registered; check link "
+                 "order\n";
     return EXIT_FAILURE;
   }
   if (opts.listOnly) {
@@ -138,10 +142,12 @@ int main(int argc, char **argv) {
   // reports the value at checklist time, NOT each cell's per-cell override;
   // the per-cell value is captured inside the workload TU and reflected in
   // the cell's row name.
-  std::cout
-      << "[NOTE] parallel_bench_two_pool tests both KMP_BLOCKTIME values per cell.\n"
-      << "[NOTE] The libomp_blocktime=0 checklist gate below reads FAIL by design; each cell\n"
-      << "[NOTE] sets blocktime explicitly. See row labels for the per-cell value.\n";
+  std::cout << "[NOTE] parallel_bench_two_pool tests both KMP_BLOCKTIME values "
+               "per cell.\n"
+            << "[NOTE] The libomp_blocktime=0 checklist gate below reads FAIL "
+               "by design; each cell\n"
+            << "[NOTE] sets blocktime explicitly. See row labels for the "
+               "per-cell value.\n";
   printChecklist(std::cout);
   std::cout << '\n';
 
@@ -169,15 +175,19 @@ int main(int argc, char **argv) {
       const BenchTable table = reg.run(cal);
       formatTable(table, /*baselineName=*/"citor::ThreadPool", std::cout);
     } catch (const std::exception &ex) {
-      std::cout << "workload: " << reg.name << " SKIPPED: " << ex.what() << '\n';
+      std::cout << "workload: " << reg.name << " SKIPPED: " << ex.what()
+                << '\n';
     }
     const std::uint64_t rssAfterKb = readPeakRssKb();
     const RusageSample rusageAfter = readRusage();
     const std::uint64_t userDeltaUs = rusageAfter.userUs - rusageBefore.userUs;
-    const std::uint64_t systemDeltaUs = rusageAfter.systemUs - rusageBefore.systemUs;
+    const std::uint64_t systemDeltaUs =
+        rusageAfter.systemUs - rusageBefore.systemUs;
     std::cout << "[METRICS] " << reg.name << "  peak_rss_kb=" << rssAfterKb
-              << " (delta=" << (rssAfterKb >= rssBeforeKb ? rssAfterKb - rssBeforeKb : 0U)
-              << ")  user_us=" << userDeltaUs << "  system_us=" << systemDeltaUs << '\n';
+              << " (delta="
+              << (rssAfterKb >= rssBeforeKb ? rssAfterKb - rssBeforeKb : 0U)
+              << ")  user_us=" << userDeltaUs << "  system_us=" << systemDeltaUs
+              << '\n';
     std::cout << '\n';
     std::cout.flush();
     anyRan = true;

@@ -17,10 +17,12 @@
 //   - task_thread_pool         -> Same shape via N submit futures + join.
 //   - riften::Thiefpool        -> Same shape via N enqueue futures + join.
 //   - Taskflow                 -> Same shape via two taskflow runs.
-//   - Eigen::ThreadPool        -> Same shape via two `Schedule + Barrier` waves.
+//   - Eigen::ThreadPool        -> Same shape via two `Schedule + Barrier`
+//   waves.
 //   - OpenMP                   -> Same shape via two `#pragma omp parallel for`
 //                                 regions (OpenMP 5.0 has `scan` but support is
-//                                 uneven; the two-wave shape matches the others).
+//                                 uneven; the two-wave shape matches the
+//                                 others).
 
 #include <BS_thread_pool.hpp>
 #include <algorithm>
@@ -71,7 +73,8 @@ constexpr std::size_t kN = 1'000'000;
 /// in the scan output aborts the bench instead of reporting fast ns/op on
 /// garbage output.
 template <class RunFn, class ValidateFn>
-[[nodiscard]] BenchRow measureLoop(const char *name, const CyclesPerNanosecond &cal, RunFn run,
+[[nodiscard]] BenchRow measureLoop(const char *name,
+                                   const CyclesPerNanosecond &cal, RunFn run,
                                    ValidateFn validate) {
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     for (std::size_t k = 0; k < kBatchSize; ++k) {
@@ -87,7 +90,8 @@ template <class RunFn, class ValidateFn>
       run();
     }
     const std::uint64_t endCycles = readCyclesEnd();
-    samples.push_back(cyclesToNs(endCycles - startCycles, cal) / static_cast<double>(kBatchSize));
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal) /
+                      static_cast<double>(kBatchSize));
     validate(name);
   }
   return finalizeRow(name, samples);
@@ -95,17 +99,21 @@ template <class RunFn, class ValidateFn>
 
 /// Print a one-line diagnostic to stderr identifying the first index where the
 /// produced inclusive scan diverges from the sequential reference.
-inline void reportScanMismatch(const char *name, const std::vector<std::int64_t> &reference,
+inline void reportScanMismatch(const char *name,
+                               const std::vector<std::int64_t> &reference,
                                const std::vector<std::int64_t> &actual) {
   for (std::size_t i = 0; i < actual.size(); ++i) {
     if (actual[i] != reference[i]) {
-      std::fprintf(stderr, "[%s] scan mismatch at index %zu: expected=%lld actual=%lld\n", name, i,
-                   static_cast<long long>(reference[i]), static_cast<long long>(actual[i]));
+      std::fprintf(
+          stderr,
+          "[%s] scan mismatch at index %zu: expected=%lld actual=%lld\n", name,
+          i, static_cast<long long>(reference[i]),
+          static_cast<long long>(actual[i]));
       return;
     }
   }
-  std::fprintf(stderr, "[%s] scan size mismatch: expected=%zu actual=%zu\n", name, reference.size(),
-               actual.size());
+  std::fprintf(stderr, "[%s] scan size mismatch: expected=%zu actual=%zu\n",
+               name, reference.size(), actual.size());
 }
 
 /// Sequential inclusive prefix-sum reference. `out[i] = sum_{k=0..i} in[k]`.
@@ -136,7 +144,8 @@ struct ScanData {
   return d;
 }
 
-[[nodiscard]] BenchRow measureNewPool(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureNewPool(std::size_t participants,
+                                      const CyclesPerNanosecond &cal) {
   ThreadPool pool(participants);
   ScanData d = buildData();
   const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
@@ -152,9 +161,10 @@ struct ScanData {
   // the next `participants` are Pass 2 (write the inclusive scan).
   const std::size_t parts = pool.participants();
   std::atomic<int> totalCalls{0};
-  auto body = [&d, &totalCalls, parts](std::size_t /*chunkId*/, std::size_t lo, std::size_t hi,
-                                       std::int64_t initial,
-                                       std::int64_t * /*unused*/) -> std::int64_t {
+  auto body = [&d, &totalCalls,
+               parts](std::size_t /*chunkId*/, std::size_t lo, std::size_t hi,
+                      std::int64_t initial,
+                      std::int64_t * /*unused*/) -> std::int64_t {
     const int callIdx = totalCalls.fetch_add(1, std::memory_order_acq_rel);
     if (std::cmp_less(callIdx, parts)) {
       std::int64_t s = 0;
@@ -170,11 +180,14 @@ struct ScanData {
     }
     return running - initial;
   };
-  BenchRow row = measureLoop("citor::ThreadPool::parallelScan", cal, [&] {
-    totalCalls.store(0, std::memory_order_release);
-    (void)pool.parallelScan<citor::HintsDefaults>(kN, std::int64_t{0}, body,
-                                                  std::plus<std::int64_t>{});
-  }, validate);
+  BenchRow row = measureLoop(
+      "citor::ThreadPool::parallelScan", cal,
+      [&] {
+        totalCalls.store(0, std::memory_order_release);
+        (void)pool.parallelScan<citor::HintsDefaults>(
+            kN, std::int64_t{0}, body, std::plus<std::int64_t>{});
+      },
+      validate);
   // Touch out so the optimizer cannot drop the writes.
   (void)d.out[kN - 1];
   return row;
@@ -185,7 +198,8 @@ struct ScanData {
 /// Sequential prefix-sum on `partials` to derive each block's exclusive prefix.
 /// Pass 2: every block writes `out[i] = exclusivePrefix[blockIdx] + running`
 /// where `running` is its local running sum.
-template <class Wave> inline void runTwoWaveScan(ScanData &d, std::size_t blocks, Wave wave) {
+template <class Wave>
+inline void runTwoWaveScan(ScanData &d, std::size_t blocks, Wave wave) {
   std::vector<std::int64_t> partials(blocks, 0);
   // Pass 1: compute per-block partials.
   wave(blocks, [&](std::size_t blockIdx, std::size_t lo, std::size_t hi) {
@@ -210,15 +224,16 @@ template <class Wave> inline void runTwoWaveScan(ScanData &d, std::size_t blocks
   });
 }
 
-inline std::pair<std::size_t, std::size_t> blockRange(std::size_t blockIdx,
-                                                      std::size_t blocks) noexcept {
+inline std::pair<std::size_t, std::size_t>
+blockRange(std::size_t blockIdx, std::size_t blocks) noexcept {
   const std::size_t blockSize = (kN + blocks - 1) / blocks;
   const std::size_t lo = std::min(kN, blockIdx * blockSize);
   const std::size_t hi = std::min(kN, (blockIdx + 1) * blockSize);
   return {lo, hi};
 }
 
-[[nodiscard]] BenchRow measureBsPool(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureBsPool(std::size_t participants,
+                                     const CyclesPerNanosecond &cal) {
   BS::light_thread_pool pool(participants);
   ScanData d = buildData();
   const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
@@ -228,29 +243,35 @@ inline std::pair<std::size_t, std::size_t> blockRange(std::size_t blockIdx,
     }
     CITOR_ALWAYS_ASSERT(d.out == reference);
   };
-  BenchRow row = measureLoop("BS::thread_pool::scan_two_wave", cal, [&] {
-    runTwoWaveScan(d, participants, [&](std::size_t blocks, auto blockBody) {
-      // BS's `submit_blocks(0, n, fn, num_blocks)` invokes `fn(blockLo, blockHi)`,
-      // not `fn(blockIdx, ...)`. Reconstruct the block index from `lo`.
-      const std::size_t blockSize = (kN + blocks - 1) / blocks;
-      pool.submit_blocks(
-              std::size_t{0}, kN,
-              [blockSize, &blockBody](std::size_t lo, std::size_t hi) {
-                const std::size_t blockIdx = lo / blockSize;
-                blockBody(blockIdx, lo, hi);
-              },
-              blocks)
-          .wait();
-    });
-  }, validate);
+  BenchRow row = measureLoop(
+      "BS::thread_pool::scan_two_wave", cal,
+      [&] {
+        runTwoWaveScan(
+            d, participants, [&](std::size_t blocks, auto blockBody) {
+              // BS's `submit_blocks(0, n, fn, num_blocks)` invokes `fn(blockLo,
+              // blockHi)`, not `fn(blockIdx, ...)`. Reconstruct the block index
+              // from `lo`.
+              const std::size_t blockSize = (kN + blocks - 1) / blocks;
+              pool.submit_blocks(
+                      std::size_t{0}, kN,
+                      [blockSize, &blockBody](std::size_t lo, std::size_t hi) {
+                        const std::size_t blockIdx = lo / blockSize;
+                        blockBody(blockIdx, lo, hi);
+                      },
+                      blocks)
+                  .wait();
+            });
+      },
+      validate);
   (void)d.out[kN - 1];
   return row;
 }
 
 template <class Pool, class EnqueueFn>
-[[nodiscard]] BenchRow measureFutureScan(const char *name, std::size_t participants,
-                                         const CyclesPerNanosecond &cal, Pool &pool,
-                                         EnqueueFn enqueue) {
+[[nodiscard]] BenchRow measureFutureScan(const char *name,
+                                         std::size_t participants,
+                                         const CyclesPerNanosecond &cal,
+                                         Pool &pool, EnqueueFn enqueue) {
   ScanData d = buildData();
   const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
   auto validate = [&](const char *poolName) {
@@ -259,47 +280,60 @@ template <class Pool, class EnqueueFn>
     }
     CITOR_ALWAYS_ASSERT(d.out == reference);
   };
-  BenchRow row = measureLoop(name, cal, [&] {
-    runTwoWaveScan(d, participants, [&](std::size_t blocks, auto blockBody) {
-      std::vector<std::future<void>> futs;
-      futs.reserve(blocks);
-      for (std::size_t b = 0; b < blocks; ++b) {
-        auto [lo, hi] = blockRange(b, blocks);
-        if (lo == hi) {
-          continue;
-        }
-        futs.emplace_back(enqueue(pool, [b, lo, hi, &blockBody]() { blockBody(b, lo, hi); }));
-      }
-      for (auto &f : futs) {
-        f.get();
-      }
-    });
-  }, validate);
+  BenchRow row = measureLoop(
+      name, cal,
+      [&] {
+        runTwoWaveScan(
+            d, participants, [&](std::size_t blocks, auto blockBody) {
+              std::vector<std::future<void>> futs;
+              futs.reserve(blocks);
+              for (std::size_t b = 0; b < blocks; ++b) {
+                auto [lo, hi] = blockRange(b, blocks);
+                if (lo == hi) {
+                  continue;
+                }
+                futs.emplace_back(enqueue(
+                    pool, [b, lo, hi, &blockBody]() { blockBody(b, lo, hi); }));
+              }
+              for (auto &f : futs) {
+                f.get();
+              }
+            });
+      },
+      validate);
   (void)d.out[kN - 1];
   return row;
 }
 
-[[nodiscard]] BenchRow measureDpPool(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureDpPool(std::size_t participants,
+                                     const CyclesPerNanosecond &cal) {
   dp::thread_pool<> pool(static_cast<unsigned int>(participants));
-  return measureFutureScan("dp::thread_pool::scan_two_wave", participants, cal, pool,
-                           [](dp::thread_pool<> &p, auto fn) { return p.enqueue(std::move(fn)); });
-}
-
-[[nodiscard]] BenchRow measureTaskPool(std::size_t participants, const CyclesPerNanosecond &cal) {
-  ::task_thread_pool::task_thread_pool pool(static_cast<unsigned int>(participants));
   return measureFutureScan(
-      "task_thread_pool::scan_two_wave", participants, cal, pool,
-      [](::task_thread_pool::task_thread_pool &p, auto fn) { return p.submit(std::move(fn)); });
+      "dp::thread_pool::scan_two_wave", participants, cal, pool,
+      [](dp::thread_pool<> &p, auto fn) { return p.enqueue(std::move(fn)); });
 }
 
-[[nodiscard]] BenchRow measureRiftenPool(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureTaskPool(std::size_t participants,
+                                       const CyclesPerNanosecond &cal) {
+  ::task_thread_pool::task_thread_pool pool(
+      static_cast<unsigned int>(participants));
+  return measureFutureScan("task_thread_pool::scan_two_wave", participants, cal,
+                           pool,
+                           [](::task_thread_pool::task_thread_pool &p,
+                              auto fn) { return p.submit(std::move(fn)); });
+}
+
+[[nodiscard]] BenchRow measureRiftenPool(std::size_t participants,
+                                         const CyclesPerNanosecond &cal) {
   riften::Thiefpool pool(participants);
-  return measureFutureScan("riften::Thiefpool::scan_two_wave", participants, cal, pool,
-                           [](riften::Thiefpool &p, auto fn) { return p.enqueue(std::move(fn)); });
+  return measureFutureScan(
+      "riften::Thiefpool::scan_two_wave", participants, cal, pool,
+      [](riften::Thiefpool &p, auto fn) { return p.enqueue(std::move(fn)); });
 }
 
 #ifdef CITOR_BENCH_HAS_TBB
-[[nodiscard]] BenchRow measureTbbPool(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureTbbPool(std::size_t participants,
+                                      const CyclesPerNanosecond &cal) {
   auto arena = CompetitorTraits<::tbb::task_arena>::make(participants);
   ScanData d = buildData();
   const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
@@ -319,21 +353,25 @@ template <class Pool, class EnqueueFn>
   // One TBB task per block via task_group: the trait's `parallelFor` uses
   // `auto_partitioner` which slices finer than `blockSize`, causing pass 2
   // to reset `running` per sub-block and lose the cross-chunk prefix carry.
-  BenchRow row = measureLoop("oneTBB::scan_two_wave", cal, [&] {
-    runTwoWaveScan(d, participants, [&](std::size_t blocks, auto blockBody) {
-      arena->execute([&] {
-        ::tbb::task_group tg;
-        for (std::size_t b = 0; b < blocks; ++b) {
-          const auto [lo, hi] = blockRange(b, blocks);
-          if (lo == hi) {
-            continue;
-          }
-          tg.run([b, lo, hi, &blockBody] { blockBody(b, lo, hi); });
-        }
-        tg.wait();
-      });
-    });
-  }, validate);
+  BenchRow row = measureLoop(
+      "oneTBB::scan_two_wave", cal,
+      [&] {
+        runTwoWaveScan(
+            d, participants, [&](std::size_t blocks, auto blockBody) {
+              arena->execute([&] {
+                ::tbb::task_group tg;
+                for (std::size_t b = 0; b < blocks; ++b) {
+                  const auto [lo, hi] = blockRange(b, blocks);
+                  if (lo == hi) {
+                    continue;
+                  }
+                  tg.run([b, lo, hi, &blockBody] { blockBody(b, lo, hi); });
+                }
+                tg.wait();
+              });
+            });
+      },
+      validate);
   (void)d.out[kN - 1];
   return row;
 }
@@ -353,26 +391,31 @@ template <class Pool, class EnqueueFn>
   };
   // One Taskflow task per block. Direct emplace keeps the two-wave layout in
   // lockstep with `participants`-sized `partials` / `excl` arrays.
-  BenchRow row = measureLoop("Taskflow::scan_two_wave", cal, [&] {
-    runTwoWaveScan(d, participants, [&](std::size_t blocks, auto blockBody) {
-      ::tf::Taskflow flow;
-      for (std::size_t b = 0; b < blocks; ++b) {
-        const auto [lo, hi] = blockRange(b, blocks);
-        if (lo == hi) {
-          continue;
-        }
-        flow.emplace([b, lo, hi, &blockBody] { blockBody(b, lo, hi); });
-      }
-      exec->run(flow).wait();
-    });
-  }, validate);
+  BenchRow row = measureLoop(
+      "Taskflow::scan_two_wave", cal,
+      [&] {
+        runTwoWaveScan(
+            d, participants, [&](std::size_t blocks, auto blockBody) {
+              ::tf::Taskflow flow;
+              for (std::size_t b = 0; b < blocks; ++b) {
+                const auto [lo, hi] = blockRange(b, blocks);
+                if (lo == hi) {
+                  continue;
+                }
+                flow.emplace([b, lo, hi, &blockBody] { blockBody(b, lo, hi); });
+              }
+              exec->run(flow).wait();
+            });
+      },
+      validate);
   (void)d.out[kN - 1];
   return row;
 }
 #endif
 
 #ifdef CITOR_BENCH_HAS_EIGEN_THREADPOOL
-[[nodiscard]] BenchRow measureEigenPool(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureEigenPool(std::size_t participants,
+                                        const CyclesPerNanosecond &cal) {
   auto pool = CompetitorTraits<::Eigen::ThreadPool>::make(participants);
   ScanData d = buildData();
   const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
@@ -384,23 +427,27 @@ template <class Pool, class EnqueueFn>
   };
   // One Eigen Schedule per block via Barrier; the per-block index drives
   // pass 1 / pass 2 of the two-wave layout directly.
-  BenchRow row = measureLoop("Eigen::ThreadPool::scan_two_wave", cal, [&] {
-    runTwoWaveScan(d, participants, [&](std::size_t blocks, auto blockBody) {
-      ::Eigen::Barrier bar(static_cast<unsigned int>(blocks));
-      for (std::size_t b = 0; b < blocks; ++b) {
-        const auto [lo, hi] = blockRange(b, blocks);
-        if (lo == hi) {
-          bar.Notify();
-          continue;
-        }
-        pool->Schedule([b, lo, hi, &blockBody, &bar] {
-          blockBody(b, lo, hi);
-          bar.Notify();
-        });
-      }
-      bar.Wait();
-    });
-  }, validate);
+  BenchRow row = measureLoop(
+      "Eigen::ThreadPool::scan_two_wave", cal,
+      [&] {
+        runTwoWaveScan(
+            d, participants, [&](std::size_t blocks, auto blockBody) {
+              ::Eigen::Barrier bar(static_cast<unsigned int>(blocks));
+              for (std::size_t b = 0; b < blocks; ++b) {
+                const auto [lo, hi] = blockRange(b, blocks);
+                if (lo == hi) {
+                  bar.Notify();
+                  continue;
+                }
+                pool->Schedule([b, lo, hi, &blockBody, &bar] {
+                  blockBody(b, lo, hi);
+                  bar.Notify();
+                });
+              }
+              bar.Wait();
+            });
+      },
+      validate);
   (void)d.out[kN - 1];
   return row;
 }
@@ -420,22 +467,27 @@ template <class Pool, class EnqueueFn>
   };
   // One Leopard dispatch per block returning a future; the per-block index
   // drives pass 1 / pass 2 of the two-wave layout directly.
-  BenchRow row = measureLoop("Leopard::scan_two_wave", cal, [&] {
-    runTwoWaveScan(d, participants, [&](std::size_t blocks, auto blockBody) {
-      std::vector<std::future<void>> futs;
-      futs.reserve(blocks);
-      for (std::size_t b = 0; b < blocks; ++b) {
-        const auto [lo, hi] = blockRange(b, blocks);
-        if (lo == hi) {
-          continue;
-        }
-        futs.emplace_back(pool->dispatch(false, [b, lo, hi, &blockBody] { blockBody(b, lo, hi); }));
-      }
-      for (auto &f : futs) {
-        f.get();
-      }
-    });
-  }, validate);
+  BenchRow row = measureLoop(
+      "Leopard::scan_two_wave", cal,
+      [&] {
+        runTwoWaveScan(
+            d, participants, [&](std::size_t blocks, auto blockBody) {
+              std::vector<std::future<void>> futs;
+              futs.reserve(blocks);
+              for (std::size_t b = 0; b < blocks; ++b) {
+                const auto [lo, hi] = blockRange(b, blocks);
+                if (lo == hi) {
+                  continue;
+                }
+                futs.emplace_back(pool->dispatch(
+                    false, [b, lo, hi, &blockBody] { blockBody(b, lo, hi); }));
+              }
+              for (auto &f : futs) {
+                f.get();
+              }
+            });
+      },
+      validate);
   (void)d.out[kN - 1];
   return row;
 }
@@ -455,26 +507,31 @@ template <class Pool, class EnqueueFn>
   };
   // One dispenso TaskSet schedule per block; the per-block index drives
   // pass 1 / pass 2 of the two-wave layout directly.
-  BenchRow row = measureLoop("dispenso::scan_two_wave", cal, [&] {
-    runTwoWaveScan(d, participants, [&](std::size_t blocks, auto blockBody) {
-      dispenso::TaskSet ts(*pool);
-      for (std::size_t b = 0; b < blocks; ++b) {
-        const auto [lo, hi] = blockRange(b, blocks);
-        if (lo == hi) {
-          continue;
-        }
-        ts.schedule([b, lo, hi, &blockBody] { blockBody(b, lo, hi); });
-      }
-      ts.wait();
-    });
-  }, validate);
+  BenchRow row = measureLoop(
+      "dispenso::scan_two_wave", cal,
+      [&] {
+        runTwoWaveScan(
+            d, participants, [&](std::size_t blocks, auto blockBody) {
+              dispenso::TaskSet ts(*pool);
+              for (std::size_t b = 0; b < blocks; ++b) {
+                const auto [lo, hi] = blockRange(b, blocks);
+                if (lo == hi) {
+                  continue;
+                }
+                ts.schedule([b, lo, hi, &blockBody] { blockBody(b, lo, hi); });
+              }
+              ts.wait();
+            });
+      },
+      validate);
   (void)d.out[kN - 1];
   return row;
 }
 #endif
 
 #ifdef CITOR_BENCH_HAS_OPENMP
-[[nodiscard]] BenchRow measureOpenMpPool(std::size_t participants, const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureOpenMpPool(std::size_t participants,
+                                         const CyclesPerNanosecond &cal) {
   ScanData d = buildData();
   const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
   auto validate = [&](const char *poolName) {
@@ -483,22 +540,26 @@ template <class Pool, class EnqueueFn>
     }
     CITOR_ALWAYS_ASSERT(d.out == reference);
   };
-  BenchRow row = measureLoop("OpenMP::scan_two_wave", cal, [&] {
-    runTwoWaveScan(d, participants, [&](std::size_t blocks, auto blockBody) {
-      const auto threads = static_cast<int>(blocks);
-      const std::size_t blockSize = (kN + blocks - 1) / blocks;
-      const auto blocksSigned = static_cast<std::ptrdiff_t>(blocks);
+  BenchRow row = measureLoop(
+      "OpenMP::scan_two_wave", cal,
+      [&] {
+        runTwoWaveScan(
+            d, participants, [&](std::size_t blocks, auto blockBody) {
+              const auto threads = static_cast<int>(blocks);
+              const std::size_t blockSize = (kN + blocks - 1) / blocks;
+              const auto blocksSigned = static_cast<std::ptrdiff_t>(blocks);
 #pragma omp parallel for num_threads(threads) schedule(static)
-      for (std::ptrdiff_t b = 0; b < blocksSigned; ++b) {
-        const auto blockIdx = static_cast<std::size_t>(b);
-        const std::size_t lo = std::min(kN, blockIdx * blockSize);
-        const std::size_t hi = std::min(kN, (blockIdx + 1) * blockSize);
-        if (lo < hi) {
-          blockBody(blockIdx, lo, hi);
-        }
-      }
-    });
-  }, validate);
+              for (std::ptrdiff_t b = 0; b < blocksSigned; ++b) {
+                const auto blockIdx = static_cast<std::size_t>(b);
+                const std::size_t lo = std::min(kN, blockIdx * blockSize);
+                const std::size_t hi = std::min(kN, (blockIdx + 1) * blockSize);
+                if (lo < hi) {
+                  blockBody(blockIdx, lo, hi);
+                }
+              }
+            });
+      },
+      validate);
   (void)d.out[kN - 1];
   return row;
 }
@@ -547,8 +608,10 @@ BenchTable runScanJ8(const CyclesPerNanosecond &cal) {
 /// File-scope registrar.
 struct ScanRegistrar {
   ScanRegistrar() {
-    registerWorkload({.name = "scan_inclusive_j8_n1M_int64_plus", .run = &runScanJ8});
-    registerWorkload({.name = "scan_inclusive_j16_n1M_int64_plus", .run = &runScanJ16});
+    registerWorkload(
+        {.name = "scan_inclusive_j8_n1M_int64_plus", .run = &runScanJ8});
+    registerWorkload(
+        {.name = "scan_inclusive_j16_n1M_int64_plus", .run = &runScanJ16});
   }
 };
 

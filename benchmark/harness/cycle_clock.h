@@ -98,7 +98,8 @@ inline int openPerfCyclesCounter() noexcept {
   // Pin to the calling thread (`pid=0`) on the current CPU (`cpu=-1`) so the
   // counter follows the thread across migrations; the bench uses `taskset` at
   // run time to keep the thread stationary.
-  const long fd = syscall(__NR_perf_event_open, &attr, /*pid=*/0, /*cpu=*/-1, /*group_fd=*/-1,
+  const long fd = syscall(__NR_perf_event_open, &attr, /*pid=*/0, /*cpu=*/-1,
+                          /*group_fd=*/-1,
                           /*flags=*/0UL);
   if (fd < 0) {
     return -1;
@@ -134,14 +135,17 @@ inline int openPerfCyclesCounter() noexcept {
   // single core so TSC drift across cores is not a concern.
   do {
     clock_gettime(CLOCK_MONOTONIC_RAW, &ts1);
-  } while (((static_cast<std::uint64_t>(ts1.tv_sec - ts0.tv_sec) * 1'000'000'000ULL) +
-            static_cast<std::uint64_t>(ts1.tv_nsec - ts0.tv_nsec)) < 10'000'000ULL);
+  } while (((static_cast<std::uint64_t>(ts1.tv_sec - ts0.tv_sec) *
+             1'000'000'000ULL) +
+            static_cast<std::uint64_t>(ts1.tv_nsec - ts0.tv_nsec)) <
+           10'000'000ULL);
   const std::uint64_t cyc1 = readCyclesEnd();
   const std::uint64_t wallNs =
       (static_cast<std::uint64_t>(ts1.tv_sec - ts0.tv_sec) * 1'000'000'000ULL) +
       static_cast<std::uint64_t>(ts1.tv_nsec - ts0.tv_nsec);
   if (wallNs > 0) {
-    result.value = static_cast<double>(cyc1 - cyc0) / static_cast<double>(wallNs);
+    result.value =
+        static_cast<double>(cyc1 - cyc0) / static_cast<double>(wallNs);
   }
   return result;
 #endif
@@ -153,8 +157,8 @@ inline int openPerfCyclesCounter() noexcept {
 /// cal     Calibration constant from `calibrateCyclesPerNs`.
 /// Wall-time nanoseconds; on non-x86 platforms `cycles` is already in
 ///         nanoseconds and is returned unchanged.
-[[nodiscard]] inline double cyclesToNs(std::uint64_t cycles,
-                                       const CyclesPerNanosecond &cal) noexcept {
+[[nodiscard]] inline double
+cyclesToNs(std::uint64_t cycles, const CyclesPerNanosecond &cal) noexcept {
   if (cal.value <= 0.0) {
     return static_cast<double>(cycles);
   }

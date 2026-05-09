@@ -80,18 +80,19 @@ inline constexpr auto fibCoro = [](auto self, int n) -> lf::task<std::int64_t> {
   co_return a + b;
 };
 
-void seqQueensRec(int n, int row, std::uint64_t cols, std::uint64_t diag1, std::uint64_t diag2,
-                  std::int64_t &count) noexcept {
+void seqQueensRec(int n, int row, std::uint64_t cols, std::uint64_t diag1,
+                  std::uint64_t diag2, std::int64_t &count) noexcept {
   if (row == n) {
     ++count;
     return;
   }
-  std::uint64_t bits =
-      ~(cols | diag1 | diag2) & ((std::uint64_t{1} << static_cast<unsigned>(n)) - 1);
+  std::uint64_t bits = ~(cols | diag1 | diag2) &
+                       ((std::uint64_t{1} << static_cast<unsigned>(n)) - 1);
   while (bits != 0U) {
     const std::uint64_t pick = bits & (~bits + 1U);
     bits ^= pick;
-    seqQueensRec(n, row + 1, cols | pick, (diag1 | pick) << 1U, (diag2 | pick) >> 1U, count);
+    seqQueensRec(n, row + 1, cols | pick, (diag1 | pick) << 1U,
+                 (diag2 | pick) >> 1U, count);
   }
 }
 
@@ -107,12 +108,13 @@ struct QueensRoot {
     std::vector<QueensRoot> next;
     next.reserve(frontier.size() * static_cast<std::size_t>(n));
     for (const QueensRoot &s : frontier) {
-      std::uint64_t bits =
-          ~(s.cols | s.diag1 | s.diag2) & ((std::uint64_t{1} << static_cast<unsigned>(n)) - 1);
+      std::uint64_t bits = ~(s.cols | s.diag1 | s.diag2) &
+                           ((std::uint64_t{1} << static_cast<unsigned>(n)) - 1);
       while (bits != 0U) {
         const std::uint64_t pick = bits & (~bits + 1U);
         bits ^= pick;
-        next.push_back({s.cols | pick, (s.diag1 | pick) << 1U, (s.diag2 | pick) >> 1U});
+        next.push_back(
+            {s.cols | pick, (s.diag1 | pick) << 1U, (s.diag2 | pick) >> 1U});
       }
     }
     frontier = std::move(next);
@@ -120,9 +122,9 @@ struct QueensRoot {
   return frontier;
 }
 
-inline constexpr auto queensCoro = [](auto self, const QueensRoot *roots, std::int64_t *partials,
-                                      std::size_t lo, std::size_t hi,
-                                      int n) -> lf::task<void> {
+inline constexpr auto queensCoro = [](auto self, const QueensRoot *roots,
+                                      std::int64_t *partials, std::size_t lo,
+                                      std::size_t hi, int n) -> lf::task<void> {
   if (hi - lo == 1) {
     const QueensRoot &s = roots[lo];
     std::int64_t count = 0;
@@ -145,7 +147,8 @@ inline constexpr auto queensCoro = [](auto self, const QueensRoot *roots, std::i
 // changes once the canonical T1 inputs are fixed.
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] constexpr std::uint32_t rotl32(std::uint32_t x, unsigned n) noexcept {
+[[nodiscard]] constexpr std::uint32_t rotl32(std::uint32_t x,
+                                             unsigned n) noexcept {
   return (x << n) | (x >> (32U - n));
 }
 
@@ -198,8 +201,8 @@ inline void sha1Compress(std::array<std::uint32_t, 5> &h,
 
 inline void sha1Compute(const std::uint8_t *data, std::size_t len,
                         std::array<std::uint8_t, 20> &out) noexcept {
-  std::array<std::uint32_t, 5> h = {0x67452301U, 0xEFCDAB89U, 0x98BADCFEU, 0x10325476U,
-                                    0xC3D2E1F0U};
+  std::array<std::uint32_t, 5> h = {0x67452301U, 0xEFCDAB89U, 0x98BADCFEU,
+                                    0x10325476U, 0xC3D2E1F0U};
   const std::uint64_t totalBits = static_cast<std::uint64_t>(len) * 8U;
   std::array<std::uint8_t, 64> block{};
   std::size_t pos = 0;
@@ -281,7 +284,8 @@ constexpr std::uint32_t kRootSeed = 19U;
 constexpr std::int64_t kExpectedNodes = 4'130'071;
 constexpr int kSeqCutoffDepth = 5;
 
-[[nodiscard]] inline int utsNumChildrenGeo(const UtsRngState &state, int depth) noexcept {
+[[nodiscard]] inline int utsNumChildrenGeo(const UtsRngState &state,
+                                           int depth) noexcept {
   const double bI = (depth < kMaxDepth) ? static_cast<double>(kRootB0) : 0.0;
   const double p = 1.0 / (1.0 + bI);
   const std::int32_t h = rngRand(state);
@@ -292,7 +296,8 @@ constexpr int kSeqCutoffDepth = 5;
   return static_cast<int>(std::floor(std::log(1.0 - u) / std::log(1.0 - p)));
 }
 
-[[nodiscard]] std::int64_t utsSeqWalk(const UtsRngState &state, int depth) noexcept {
+[[nodiscard]] std::int64_t utsSeqWalk(const UtsRngState &state,
+                                      int depth) noexcept {
   std::int64_t count = 1;
   const int n = utsNumChildrenGeo(state, depth);
   for (int i = 0; i < n; ++i) {
@@ -327,13 +332,16 @@ inline constexpr auto utsCoro = [](auto self, UtsRngState state, int depth,
   std::vector<std::int64_t> childCounts(static_cast<std::size_t>(n), 0);
   for (int i = 0; i < n - 1; ++i) {
     const UtsRngState child = rngSpawn(state, static_cast<std::uint32_t>(i));
-    co_await lf::fork[self](child, depth + 1, &childCounts[static_cast<std::size_t>(i)]);
+    co_await lf::fork[self](child, depth + 1,
+                            &childCounts[static_cast<std::size_t>(i)]);
   }
   // Last child runs inline; this matches libfork's own UTS bench pattern
   // (fork n-1 children, call the nth) and lets the worker descend into the
   // last subtree without paying the spawn-and-steal overhead for it.
-  const UtsRngState lastChild = rngSpawn(state, static_cast<std::uint32_t>(n - 1));
-  co_await lf::call[self](lastChild, depth + 1, &childCounts[static_cast<std::size_t>(n - 1)]);
+  const UtsRngState lastChild =
+      rngSpawn(state, static_cast<std::uint32_t>(n - 1));
+  co_await lf::call[self](lastChild, depth + 1,
+                          &childCounts[static_cast<std::size_t>(n - 1)]);
   co_await lf::join;
   std::int64_t total = 1;
   for (std::int64_t v : childCounts) {
@@ -352,7 +360,8 @@ inline constexpr auto utsCoro = [](auto self, UtsRngState state, int depth,
 // (`bench/source/fib/libfork.cpp`) which has NO cutoff at all. Our `kFibFineN`
 // + `kFibFineCutoff=2` cells expose the per-spawn-cost regime where libfork's
 // continuation-stealing wins.
-inline constexpr auto fibCutoffCoro = [](auto self, int n, int cutoff) -> lf::task<std::int64_t> {
+inline constexpr auto fibCutoffCoro = [](auto self, int n,
+                                         int cutoff) -> lf::task<std::int64_t> {
   if (n <= cutoff) {
     co_return seqFib(n);
   }
@@ -369,7 +378,8 @@ BenchRow runLibforkFibFine(std::size_t participants, int n, int cutoff,
   lf::lazy_pool pool(participants);
   std::atomic<std::int64_t> sink{0};
   for (std::size_t i = 0; i < kFibWarmupIterations; ++i) {
-    sink.store(lf::sync_wait(pool, fibCutoffCoro, n, cutoff), std::memory_order_relaxed);
+    sink.store(lf::sync_wait(pool, fibCutoffCoro, n, cutoff),
+               std::memory_order_relaxed);
   }
   std::vector<double> samples;
   samples.reserve(kFibIterations);
@@ -384,13 +394,14 @@ BenchRow runLibforkFibFine(std::size_t participants, int n, int cutoff,
   return finalizeRow("libfork", samples);
 }
 
-BenchRow runLibforkFib28(std::size_t participants, const CyclesPerNanosecond &cal) {
+BenchRow runLibforkFib28(std::size_t participants,
+                         const CyclesPerNanosecond &cal) {
   // lazy_pool is libfork's recommended general-purpose scheduler. It parks
-// idle workers aggressively (which costs a wake-up at the start of each
-// iteration on tight benches) but is what a real application would use,
-// and busy_pool produced pathological numbers on fib28_j16 in this fixture
-// (orders of magnitude slower than lazy_pool).
-lf::lazy_pool pool(participants);
+  // idle workers aggressively (which costs a wake-up at the start of each
+  // iteration on tight benches) but is what a real application would use,
+  // and busy_pool produced pathological numbers on fib28_j16 in this fixture
+  // (orders of magnitude slower than lazy_pool).
+  lf::lazy_pool pool(participants);
   std::atomic<std::int64_t> sink{0};
   for (std::size_t i = 0; i < kFibWarmupIterations; ++i) {
     sink.store(lf::sync_wait(pool, fibCoro, kFibN), std::memory_order_relaxed);
@@ -408,21 +419,22 @@ lf::lazy_pool pool(participants);
   return finalizeRow("libfork", samples);
 }
 
-BenchRow runLibforkNQueens12(std::size_t participants, const CyclesPerNanosecond &cal) {
+BenchRow runLibforkNQueens12(std::size_t participants,
+                             const CyclesPerNanosecond &cal) {
   // lazy_pool is libfork's recommended general-purpose scheduler. It parks
-// idle workers aggressively (which costs a wake-up at the start of each
-// iteration on tight benches) but is what a real application would use,
-// and busy_pool produced pathological numbers on fib28_j16 in this fixture
-// (orders of magnitude slower than lazy_pool).
-lf::lazy_pool pool(participants);
+  // idle workers aggressively (which costs a wake-up at the start of each
+  // iteration on tight benches) but is what a real application would use,
+  // and busy_pool produced pathological numbers on fib28_j16 in this fixture
+  // (orders of magnitude slower than lazy_pool).
+  lf::lazy_pool pool(participants);
   const std::vector<QueensRoot> roots = buildQueensRoots(kQueensN);
   std::vector<std::int64_t> partials(roots.size(), 0);
 
   auto runOnce = [&]() -> std::int64_t {
     std::fill(partials.begin(), partials.end(), 0);
     if (!roots.empty()) {
-      lf::sync_wait(pool, queensCoro, roots.data(), partials.data(), std::size_t{0}, roots.size(),
-                    kQueensN);
+      lf::sync_wait(pool, queensCoro, roots.data(), partials.data(),
+                    std::size_t{0}, roots.size(), kQueensN);
     }
     std::int64_t total = 0;
     for (std::int64_t v : partials) {
@@ -448,13 +460,14 @@ lf::lazy_pool pool(participants);
   return finalizeRow("libfork", samples);
 }
 
-BenchRow runLibforkUtsT1(std::size_t participants, const CyclesPerNanosecond &cal) {
+BenchRow runLibforkUtsT1(std::size_t participants,
+                         const CyclesPerNanosecond &cal) {
   // lazy_pool is libfork's recommended general-purpose scheduler. It parks
-// idle workers aggressively (which costs a wake-up at the start of each
-// iteration on tight benches) but is what a real application would use,
-// and busy_pool produced pathological numbers on fib28_j16 in this fixture
-// (orders of magnitude slower than lazy_pool).
-lf::lazy_pool pool(participants);
+  // idle workers aggressively (which costs a wake-up at the start of each
+  // iteration on tight benches) but is what a real application would use,
+  // and busy_pool produced pathological numbers on fib28_j16 in this fixture
+  // (orders of magnitude slower than lazy_pool).
+  lf::lazy_pool pool(participants);
   const UtsRngState root = rngInit(kRootSeed);
 
   auto runOnce = [&]() -> std::int64_t {
@@ -522,7 +535,8 @@ inline AlignedFloatBuffer allocateAlignedFloats(std::size_t count) {
   return AlignedFloatBuffer{static_cast<float *>(raw)};
 }
 
-inline void deterministicFill(float *p, std::size_t count, std::uint32_t seed) noexcept {
+inline void deterministicFill(float *p, std::size_t count,
+                              std::uint32_t seed) noexcept {
   std::mt19937 rng{seed};
   std::uniform_real_distribution<float> dist(-1.0F, 1.0F);
   for (std::size_t i = 0; i < count; ++i) {
@@ -588,13 +602,16 @@ inline void seqMatmul(const Sub &c, const Sub &a, const Sub &b) noexcept {
   }
 }
 
-[[nodiscard]] inline Sub quadrant(const Sub &m, std::size_t row, std::size_t col) noexcept {
+[[nodiscard]] inline Sub quadrant(const Sub &m, std::size_t row,
+                                  std::size_t col) noexcept {
   const std::size_t half = m.n / 2U;
-  return Sub{
-      .data = m.data + (row * half * m.stride) + (col * half), .stride = m.stride, .n = half};
+  return Sub{.data = m.data + (row * half * m.stride) + (col * half),
+             .stride = m.stride,
+             .n = half};
 }
 
-[[nodiscard]] constexpr std::size_t scratchBudget(std::size_t n, std::size_t depth) noexcept {
+[[nodiscard]] constexpr std::size_t scratchBudget(std::size_t n,
+                                                  std::size_t depth) noexcept {
   if (n <= kSeqCutoff) {
     return 0U;
   }
@@ -607,8 +624,9 @@ inline void seqMatmul(const Sub &c, const Sub &a, const Sub &b) noexcept {
 [[nodiscard]] inline float strassenTolerance(std::size_t n) noexcept {
   constexpr double kEpsFloat = 1.1920929e-7;
   constexpr double kHighamScale = 1.5;
-  const double bound =
-      kHighamScale * std::pow(static_cast<double>(n), 2.8073549220576041) * kEpsFloat;
+  const double bound = kHighamScale *
+                       std::pow(static_cast<double>(n), 2.8073549220576041) *
+                       kEpsFloat;
   return static_cast<float>(bound);
 }
 
@@ -617,7 +635,8 @@ inline void seqMatmul(const Sub &c, const Sub &a, const Sub &b) noexcept {
 // buffers live in `scratch`; each parallel sub-product gets a disjoint slice
 // while depth < kStrassenParallelDepth, otherwise the seven mults serially
 // reuse a single child slice.
-inline constexpr auto strassenCoro = [](auto self, Sub c, Sub a, Sub b, float *scratch,
+inline constexpr auto strassenCoro = [](auto self, Sub c, Sub a, Sub b,
+                                        float *scratch,
                                         std::size_t depth) -> lf::task<void> {
   if (c.n <= kSeqCutoff) {
     seqMatmul(c, a, b);
@@ -676,12 +695,18 @@ inline constexpr auto strassenCoro = [](auto self, Sub c, Sub a, Sub b, float *s
 
   if (depth < kStrassenParallelDepth) {
     co_await lf::fork[self](mBufs[0], t1A, t1B, childScratch, depth + 1U);
-    co_await lf::fork[self](mBufs[1], t2A, b11, childScratch + childBudget, depth + 1U);
-    co_await lf::fork[self](mBufs[2], a11, t3B, childScratch + (2U * childBudget), depth + 1U);
-    co_await lf::fork[self](mBufs[3], a22, t4B, childScratch + (3U * childBudget), depth + 1U);
-    co_await lf::fork[self](mBufs[4], t5A, b22, childScratch + (4U * childBudget), depth + 1U);
-    co_await lf::fork[self](mBufs[5], t6A, t6B, childScratch + (5U * childBudget), depth + 1U);
-    co_await lf::call[self](mBufs[6], t7A, t7B, childScratch + (6U * childBudget), depth + 1U);
+    co_await lf::fork[self](mBufs[1], t2A, b11, childScratch + childBudget,
+                            depth + 1U);
+    co_await lf::fork[self](mBufs[2], a11, t3B,
+                            childScratch + (2U * childBudget), depth + 1U);
+    co_await lf::fork[self](mBufs[3], a22, t4B,
+                            childScratch + (3U * childBudget), depth + 1U);
+    co_await lf::fork[self](mBufs[4], t5A, b22,
+                            childScratch + (4U * childBudget), depth + 1U);
+    co_await lf::fork[self](mBufs[5], t6A, t6B,
+                            childScratch + (5U * childBudget), depth + 1U);
+    co_await lf::call[self](mBufs[6], t7A, t7B,
+                            childScratch + (6U * childBudget), depth + 1U);
     co_await lf::join;
   } else {
     co_await lf::call[self](mBufs[0], t1A, t1B, childScratch, depth + 1U);
@@ -726,17 +751,18 @@ constexpr std::size_t kCilksortWarmupIterations = 3;
 [[nodiscard]] inline std::vector<std::int32_t> buildInput(std::size_t n) {
   std::vector<std::int32_t> v(n);
   std::mt19937 rng{0xc1701U};
-  std::uniform_int_distribution<std::int32_t> dist(std::numeric_limits<std::int32_t>::min(),
-                                                   std::numeric_limits<std::int32_t>::max());
+  std::uniform_int_distribution<std::int32_t> dist(
+      std::numeric_limits<std::int32_t>::min(),
+      std::numeric_limits<std::int32_t>::max());
   for (std::size_t i = 0; i < n; ++i) {
     v[i] = dist(rng);
   }
   return v;
 }
 
-inline std::size_t seqMerge(const std::int32_t *src, std::size_t aLo, std::size_t aHi,
-                            std::size_t bLo, std::size_t bHi, std::int32_t *dst,
-                            std::size_t outLo) noexcept {
+inline std::size_t seqMerge(const std::int32_t *src, std::size_t aLo,
+                            std::size_t aHi, std::size_t bLo, std::size_t bHi,
+                            std::int32_t *dst, std::size_t outLo) noexcept {
   std::size_t i = aLo;
   std::size_t j = bLo;
   std::size_t k = outLo;
@@ -756,8 +782,9 @@ inline std::size_t seqMerge(const std::int32_t *src, std::size_t aLo, std::size_
   return k - outLo;
 }
 
-inline void serialMerge(std::int32_t *src, std::size_t aLo, std::size_t aHi, std::size_t bLo,
-                        std::size_t bHi, std::int32_t *dst, std::size_t outLo) {
+inline void serialMerge(std::int32_t *src, std::size_t aLo, std::size_t aHi,
+                        std::size_t bLo, std::size_t bHi, std::int32_t *dst,
+                        std::size_t outLo) {
   const std::size_t nA = aHi - aLo;
   const std::size_t nB = bHi - bLo;
   const std::size_t total = nA + nB;
@@ -787,7 +814,8 @@ inline void serialMerge(std::int32_t *src, std::size_t aLo, std::size_t aHi, std
   for (std::size_t k = 1; k < kMergeBuckets; ++k) {
     primSplit[k] = primLo + ((nPrim * k) / kMergeBuckets);
     const std::int32_t key = src[primSplit[k]];
-    secSplit[k] = static_cast<std::size_t>(std::lower_bound(src + secLo, src + secHi, key) - src);
+    secSplit[k] = static_cast<std::size_t>(
+        std::lower_bound(src + secLo, src + secHi, key) - src);
   }
   std::size_t running = outLo;
   for (std::size_t k = 0; k < kMergeBuckets; ++k) {
@@ -799,8 +827,9 @@ inline void serialMerge(std::int32_t *src, std::size_t aLo, std::size_t aHi, std
   }
 }
 
-inline constexpr auto cilksortCoro = [](auto self, std::int32_t *data, std::int32_t *tmp,
-                                        std::size_t lo, std::size_t hi) -> lf::task<void> {
+inline constexpr auto cilksortCoro = [](auto self, std::int32_t *data,
+                                        std::int32_t *tmp, std::size_t lo,
+                                        std::size_t hi) -> lf::task<void> {
   const std::size_t n = hi - lo;
   if (n <= kSeqCutoff) {
     std::sort(data + lo, data + hi);
@@ -851,14 +880,16 @@ BenchRow runLibforkStrassen(std::size_t participants, std::size_t n,
   };
 
   for (std::size_t i = 0; i < kStrassenWarmupIterations; ++i) {
-    lf::sync_wait(pool, strassenCoro, cSub, aSub, bSub, scratch.data(), std::size_t{0});
+    lf::sync_wait(pool, strassenCoro, cSub, aSub, bSub, scratch.data(),
+                  std::size_t{0});
     verify();
   }
   std::vector<double> samples;
   samples.reserve(kStrassenIterations);
   for (std::size_t i = 0; i < kStrassenIterations; ++i) {
     const std::uint64_t startCycles = readCyclesStart();
-    lf::sync_wait(pool, strassenCoro, cSub, aSub, bSub, scratch.data(), std::size_t{0});
+    lf::sync_wait(pool, strassenCoro, cSub, aSub, bSub, scratch.data(),
+                  std::size_t{0});
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
     verify();
@@ -878,7 +909,8 @@ BenchRow runLibforkCilksort(std::size_t participants, std::size_t n,
 
   for (std::size_t i = 0; i < kCilksortWarmupIterations; ++i) {
     data = input;
-    lf::sync_wait(pool, cilksortCoro, data.data(), tmp.data(), std::size_t{0}, n);
+    lf::sync_wait(pool, cilksortCoro, data.data(), tmp.data(), std::size_t{0},
+                  n);
     CITOR_ALWAYS_ASSERT(data == reference);
   }
 
@@ -887,7 +919,8 @@ BenchRow runLibforkCilksort(std::size_t participants, std::size_t n,
   for (std::size_t i = 0; i < kCilksortIterations; ++i) {
     data = input;
     const std::uint64_t startCycles = readCyclesStart();
-    lf::sync_wait(pool, cilksortCoro, data.data(), tmp.data(), std::size_t{0}, n);
+    lf::sync_wait(pool, cilksortCoro, data.data(), tmp.data(), std::size_t{0},
+                  n);
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
     CITOR_ALWAYS_ASSERT(data == reference);
@@ -929,7 +962,8 @@ inline AlignedFloatBuffer allocateAlignedFloats(std::size_t count) {
   return AlignedFloatBuffer{static_cast<float *>(raw)};
 }
 
-inline void deterministicFill(float *p, std::size_t count, std::uint32_t seed) noexcept {
+inline void deterministicFill(float *p, std::size_t count,
+                              std::uint32_t seed) noexcept {
   std::mt19937 rng{seed};
   std::uniform_real_distribution<float> dist(-1.0F, 1.0F);
   for (std::size_t i = 0; i < count; ++i) {
@@ -937,8 +971,8 @@ inline void deterministicFill(float *p, std::size_t count, std::uint32_t seed) n
   }
 }
 
-inline void leafMultiply(const float *A, const float *B, float *R, std::size_t n,
-                         std::size_t stride, bool add) noexcept {
+inline void leafMultiply(const float *A, const float *B, float *R,
+                         std::size_t n, std::size_t stride, bool add) noexcept {
   for (std::size_t i = 0; i < n; ++i) {
     float *rRow = R + (i * stride);
     if (!add) {
@@ -956,9 +990,9 @@ inline void leafMultiply(const float *A, const float *B, float *R, std::size_t n
   }
 }
 
-inline constexpr auto matmulCoro = [](auto self, const float *A, const float *B, float *R,
-                                      std::size_t n, std::size_t stride,
-                                      bool add) -> lf::task<void> {
+inline constexpr auto matmulCoro =
+    [](auto self, const float *A, const float *B, float *R, std::size_t n,
+       std::size_t stride, bool add) -> lf::task<void> {
   if (n <= kSeqCutoff) {
     leafMultiply(A, B, R, n, stride, add);
     co_return;
@@ -1013,14 +1047,16 @@ BenchRow runLibforkMatmulDac(std::size_t participants, std::size_t n,
   };
 
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
-    lf::sync_wait(pool, matmulCoro, aBuf.get(), bBuf.get(), cBuf.get(), n, n, /*add=*/false);
+    lf::sync_wait(pool, matmulCoro, aBuf.get(), bBuf.get(), cBuf.get(), n, n,
+                  /*add=*/false);
     verify();
   }
   std::vector<double> samples;
   samples.reserve(kIterations);
   for (std::size_t i = 0; i < kIterations; ++i) {
     const std::uint64_t startCycles = readCyclesStart();
-    lf::sync_wait(pool, matmulCoro, aBuf.get(), bBuf.get(), cBuf.get(), n, n, /*add=*/false);
+    lf::sync_wait(pool, matmulCoro, aBuf.get(), bBuf.get(), cBuf.get(), n, n,
+                  /*add=*/false);
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
     verify();
@@ -1054,7 +1090,8 @@ inline constexpr auto skynetCoro = [](auto self, std::int64_t label, int depth,
     co_await lf::fork[self](base + static_cast<std::int64_t>(i), depth - 1,
                             &partials[static_cast<std::size_t>(i)]);
   }
-  co_await lf::call[self](base + static_cast<std::int64_t>(kFanout - 1), depth - 1,
+  co_await lf::call[self](base + static_cast<std::int64_t>(kFanout - 1),
+                          depth - 1,
                           &partials[static_cast<std::size_t>(kFanout - 1)]);
   co_await lf::join;
   std::int64_t total = 0;
@@ -1066,7 +1103,8 @@ inline constexpr auto skynetCoro = [](auto self, std::int64_t label, int depth,
 
 } // namespace skynet_lf
 
-BenchRow runLibforkSkynet(std::size_t participants, const CyclesPerNanosecond &cal) {
+BenchRow runLibforkSkynet(std::size_t participants,
+                          const CyclesPerNanosecond &cal) {
   using namespace skynet_lf;
   lf::lazy_pool pool(participants);
 

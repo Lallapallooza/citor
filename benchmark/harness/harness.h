@@ -27,11 +27,11 @@ namespace citor::bench {
 /// Sample budget shared by every cell that uses time-budget collection.
 ///
 /// The harness used to fix the iteration count per cell, which over-sampled the
-/// 1 ms-body cells and under-sampled the 1 us-body cells. Cells with a body cost
-/// around the bimodal-noise floor (THP defrag, NUMA scan, IRQ migration) need
-/// thousands of samples to converge a stable headline median; cells whose body
-/// is itself in the millisecond range only need a few dozen. A wall-time budget
-/// adapts both extremes in one knob.
+/// 1 ms-body cells and under-sampled the 1 us-body cells. Cells with a body
+/// cost around the bimodal-noise floor (THP defrag, NUMA scan, IRQ migration)
+/// need thousands of samples to converge a stable headline median; cells whose
+/// body is itself in the millisecond range only need a few dozen. A wall-time
+/// budget adapts both extremes in one knob.
 struct SampleBudget {
   /// Wall-time spent collecting samples per (pool, cell) pair, in nanoseconds.
   /// 400 ms gives the slowest adapters at the dispatch-floor cells enough
@@ -81,7 +81,8 @@ inline constexpr SampleBudget kDefaultSampleBudget{};
 ///         `budget.maxIters` entries.
 template <class Invoke>
 [[nodiscard]] std::vector<double> runUntilBudget(const CyclesPerNanosecond &cal,
-                                                 const SampleBudget &budget, Invoke &&invoke) {
+                                                 const SampleBudget &budget,
+                                                 Invoke &&invoke) {
   // Warmup: fixed iter count or budget, whichever expires first. Discarded
   // samples are not retained.
   const auto warmupStart = std::chrono::steady_clock::now();
@@ -89,7 +90,8 @@ template <class Invoke>
     (void)invoke();
     const auto now = std::chrono::steady_clock::now();
     const auto elapsedNs =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(now - warmupStart).count();
+        std::chrono::duration_cast<std::chrono::nanoseconds>(now - warmupStart)
+            .count();
     if (static_cast<std::uint64_t>(elapsedNs) >= budget.warmupBudgetNs) {
       break;
     }
@@ -104,7 +106,9 @@ template <class Invoke>
     if (samples.size() >= budget.minIters) {
       const auto now = std::chrono::steady_clock::now();
       const auto elapsedNs =
-          std::chrono::duration_cast<std::chrono::nanoseconds>(now - sampleStart).count();
+          std::chrono::duration_cast<std::chrono::nanoseconds>(now -
+                                                               sampleStart)
+              .count();
       if (static_cast<std::uint64_t>(elapsedNs) >= budget.budgetNs) {
         break;
       }
@@ -139,19 +143,24 @@ struct GateResult {
 /// not readable (e.g. virtualized host without cpufreq exposed).
 [[nodiscard]] inline GateResult probeGovernor() {
 #if defined(__linux__)
-  const std::string g = readFirstLine("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor");
+  const std::string g =
+      readFirstLine("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor");
   if (g.empty()) {
     return {.name = "governor=performance",
             .status = GateStatus::Unknown,
             .detail = "cpufreq scaling_governor not readable"};
   }
   if (g == "performance") {
-    return {.name = "governor=performance", .status = GateStatus::Pass, .detail = g};
+    return {.name = "governor=performance",
+            .status = GateStatus::Pass,
+            .detail = g};
   }
-  return {.name = "governor=performance", .status = GateStatus::Fail, .detail = g};
-#else
   return {
-      .name = "governor=performance", .status = GateStatus::Unknown, .detail = "non-linux host"};
+      .name = "governor=performance", .status = GateStatus::Fail, .detail = g};
+#else
+  return {.name = "governor=performance",
+          .status = GateStatus::Unknown,
+          .detail = "non-linux host"};
 #endif
 }
 
@@ -160,25 +169,37 @@ struct GateResult {
 /// boost is observed off.
 [[nodiscard]] inline GateResult probeBoost() {
 #if defined(__linux__)
-  const std::string amdBoost = readFirstLine("/sys/devices/system/cpu/cpufreq/boost");
+  const std::string amdBoost =
+      readFirstLine("/sys/devices/system/cpu/cpufreq/boost");
   if (!amdBoost.empty()) {
     if (amdBoost == "0") {
-      return {.name = "boost=off", .status = GateStatus::Pass, .detail = "amd boost=0"};
+      return {.name = "boost=off",
+              .status = GateStatus::Pass,
+              .detail = "amd boost=0"};
     }
-    return {.name = "boost=off", .status = GateStatus::Fail, .detail = "amd boost=" + amdBoost};
+    return {.name = "boost=off",
+            .status = GateStatus::Fail,
+            .detail = "amd boost=" + amdBoost};
   }
-  const std::string intelNoTurbo = readFirstLine("/sys/devices/system/cpu/intel_pstate/no_turbo");
+  const std::string intelNoTurbo =
+      readFirstLine("/sys/devices/system/cpu/intel_pstate/no_turbo");
   if (!intelNoTurbo.empty()) {
     if (intelNoTurbo == "1") {
-      return {.name = "boost=off", .status = GateStatus::Pass, .detail = "intel no_turbo=1"};
+      return {.name = "boost=off",
+              .status = GateStatus::Pass,
+              .detail = "intel no_turbo=1"};
     }
     return {.name = "boost=off",
             .status = GateStatus::Fail,
             .detail = "intel no_turbo=" + intelNoTurbo};
   }
-  return {.name = "boost=off", .status = GateStatus::Unknown, .detail = "boost knob not exposed"};
+  return {.name = "boost=off",
+          .status = GateStatus::Unknown,
+          .detail = "boost knob not exposed"};
 #else
-  return {.name = "boost=off", .status = GateStatus::Unknown, .detail = "non-linux host"};
+  return {.name = "boost=off",
+          .status = GateStatus::Unknown,
+          .detail = "non-linux host"};
 #endif
 }
 
@@ -187,14 +208,22 @@ struct GateResult {
 #if defined(__linux__)
   const std::string smt = readFirstLine("/sys/devices/system/cpu/smt/active");
   if (smt.empty()) {
-    return {.name = "smt=off", .status = GateStatus::Unknown, .detail = "smt/active not readable"};
+    return {.name = "smt=off",
+            .status = GateStatus::Unknown,
+            .detail = "smt/active not readable"};
   }
   if (smt == "0") {
-    return {.name = "smt=off", .status = GateStatus::Pass, .detail = "smt/active=0"};
+    return {.name = "smt=off",
+            .status = GateStatus::Pass,
+            .detail = "smt/active=0"};
   }
-  return {.name = "smt=off", .status = GateStatus::Fail, .detail = "smt/active=" + smt};
+  return {.name = "smt=off",
+          .status = GateStatus::Fail,
+          .detail = "smt/active=" + smt};
 #else
-  return {.name = "smt=off", .status = GateStatus::Unknown, .detail = "non-linux host"};
+  return {.name = "smt=off",
+          .status = GateStatus::Unknown,
+          .detail = "non-linux host"};
 #endif
 }
 
@@ -211,11 +240,17 @@ struct GateResult {
             .detail = "randomize_va_space not readable"};
   }
   if (aslr == "0") {
-    return {.name = "aslr=off", .status = GateStatus::Pass, .detail = "randomize_va_space=0"};
+    return {.name = "aslr=off",
+            .status = GateStatus::Pass,
+            .detail = "randomize_va_space=0"};
   }
-  return {.name = "aslr=off", .status = GateStatus::Fail, .detail = "randomize_va_space=" + aslr};
+  return {.name = "aslr=off",
+          .status = GateStatus::Fail,
+          .detail = "randomize_va_space=" + aslr};
 #else
-  return {.name = "aslr=off", .status = GateStatus::Unknown, .detail = "non-linux host"};
+  return {.name = "aslr=off",
+          .status = GateStatus::Unknown,
+          .detail = "non-linux host"};
 #endif
 }
 
@@ -226,13 +261,18 @@ struct GateResult {
 [[nodiscard]] inline GateResult probeTsanOff() {
 #if defined(__has_feature)
 #if __has_feature(thread_sanitizer)
-  return {.name = "tsan=off", .status = GateStatus::Fail, .detail = "ThreadSanitizer active"};
+  return {.name = "tsan=off",
+          .status = GateStatus::Fail,
+          .detail = "ThreadSanitizer active"};
 #endif
 #endif
 #if defined(__SANITIZE_THREAD__)
-  return {.name = "tsan=off", .status = GateStatus::Fail, .detail = "ThreadSanitizer active"};
+  return {.name = "tsan=off",
+          .status = GateStatus::Fail,
+          .detail = "ThreadSanitizer active"};
 #else
-  return {.name = "tsan=off", .status = GateStatus::Pass, .detail = "no sanitizer"};
+  return {
+      .name = "tsan=off", .status = GateStatus::Pass, .detail = "no sanitizer"};
 #endif
 }
 
@@ -309,8 +349,9 @@ struct RusageSample {
   if (getrusage(RUSAGE_SELF, &ru) == 0) {
     s.userUs = (static_cast<std::uint64_t>(ru.ru_utime.tv_sec) * 1'000'000ULL) +
                static_cast<std::uint64_t>(ru.ru_utime.tv_usec);
-    s.systemUs = (static_cast<std::uint64_t>(ru.ru_stime.tv_sec) * 1'000'000ULL) +
-                 static_cast<std::uint64_t>(ru.ru_stime.tv_usec);
+    s.systemUs =
+        (static_cast<std::uint64_t>(ru.ru_stime.tv_sec) * 1'000'000ULL) +
+        static_cast<std::uint64_t>(ru.ru_stime.tv_usec);
   }
 #endif
   return s;

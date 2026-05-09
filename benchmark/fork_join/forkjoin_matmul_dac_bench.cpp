@@ -83,7 +83,8 @@ AlignedFloatBuffer allocateAlignedFloats(std::size_t count) {
   return AlignedFloatBuffer{static_cast<float *>(raw)};
 }
 
-void deterministicFill(float *p, std::size_t count, std::uint32_t seed) noexcept {
+void deterministicFill(float *p, std::size_t count,
+                       std::uint32_t seed) noexcept {
   std::mt19937 rng{seed};
   std::uniform_real_distribution<float> dist(-1.0F, 1.0F);
   for (std::size_t i = 0; i < count; ++i) {
@@ -94,8 +95,8 @@ void deterministicFill(float *p, std::size_t count, std::uint32_t seed) noexcept
 /// Leaf multiply: ijk triple loop on a strided sub-matrix. `add` selects
 /// between overwrite (R = A*B) and accumulate (R += A*B), matching the two
 /// recursion phases above.
-inline void leafMultiply(const float *A, const float *B, float *R, std::size_t n,
-                         std::size_t stride, bool add) noexcept {
+inline void leafMultiply(const float *A, const float *B, float *R,
+                         std::size_t n, std::size_t stride, bool add) noexcept {
   for (std::size_t i = 0; i < n; ++i) {
     float *rRow = R + (i * stride);
     if (!add) {
@@ -116,8 +117,8 @@ inline void leafMultiply(const float *A, const float *B, float *R, std::size_t n
 /// Recursive matmul body. Pool reference is passed through so each level's
 /// `recursiveSpawnN` can dispatch to the correct primitive specialization.
 template <class Pool>
-void matmulRec(Pool &pool, const float *A, const float *B, float *R, std::size_t n,
-               std::size_t stride, bool add) {
+void matmulRec(Pool &pool, const float *A, const float *B, float *R,
+               std::size_t n, std::size_t stride, bool add) {
   if (n <= kSeqCutoff) {
     leafMultiply(A, B, R, n, stride, add);
     return;
@@ -172,7 +173,8 @@ void matmulRec(Pool &pool, const float *A, const float *B, float *R, std::size_t
 }
 
 template <class PoolT>
-[[nodiscard]] BenchRow measureMatmulDac(const char *name, std::size_t participants, std::size_t n,
+[[nodiscard]] BenchRow measureMatmulDac(const char *name,
+                                        std::size_t participants, std::size_t n,
                                         const CyclesPerNanosecond &cal) {
   static_assert(RecursiveForkJoinTraits<PoolT>::supportsRecursiveSpawn,
                 "matmul-dac bench requires recursive-spawn-capable pool");
@@ -225,7 +227,8 @@ template <class PoolT>
 
 [[nodiscard]] BenchRow measureCitor(std::size_t participants, std::size_t n,
                                     const CyclesPerNanosecond &cal) {
-  return measureMatmulDac<citor::ThreadPool>("citor::ThreadPool", participants, n, cal);
+  return measureMatmulDac<citor::ThreadPool>("citor::ThreadPool", participants,
+                                             n, cal);
 }
 
 #ifdef CITOR_BENCH_HAS_TBB
@@ -238,9 +241,11 @@ template <class PoolT>
 #ifdef CITOR_BENCH_HAS_DISPENSO
 [[nodiscard]] BenchRow measureDispenso(std::size_t participants, std::size_t n,
                                        const CyclesPerNanosecond &cal) {
-  static_assert(RecursiveForkJoinTraits<::dispenso::ThreadPool>::supportsRecursiveSpawn,
-                "dispenso must opt into recursive spawn for matmul-dac");
-  return measureMatmulDac<::dispenso::ThreadPool>("dispenso::ThreadPool", participants, n, cal);
+  static_assert(
+      RecursiveForkJoinTraits<::dispenso::ThreadPool>::supportsRecursiveSpawn,
+      "dispenso must opt into recursive spawn for matmul-dac");
+  return measureMatmulDac<::dispenso::ThreadPool>("dispenso::ThreadPool",
+                                                  participants, n, cal);
 }
 #endif
 
@@ -275,7 +280,8 @@ template <class PoolT>
     {
 #pragma omp single
       {
-        matmulRec(runner, aBuf.get(), bBuf.get(), cBuf.get(), n, n, /*add=*/false);
+        matmulRec(runner, aBuf.get(), bBuf.get(), cBuf.get(), n, n,
+                  /*add=*/false);
       }
     }
   };
@@ -313,10 +319,11 @@ constexpr std::array<MatmulCell, 2> kCells{{
     {.n = 2048U, .suffix = "n2048"},
 }};
 
-BenchTable buildTable(std::size_t participants, MatmulCell cell, const CyclesPerNanosecond &cal) {
+BenchTable buildTable(std::size_t participants, MatmulCell cell,
+                      const CyclesPerNanosecond &cal) {
   BenchTable table;
-  table.workload =
-      std::string{"forkjoin_matmul_dac_j"} + std::to_string(participants) + "_" + cell.suffix;
+  table.workload = std::string{"forkjoin_matmul_dac_j"} +
+                   std::to_string(participants) + "_" + cell.suffix;
   table.rows.push_back(measureCitor(participants, cell.n, cal));
 #ifdef CITOR_BENCH_HAS_TBB
   table.rows.push_back(measureTbb(participants, cell.n, cal));
@@ -344,10 +351,14 @@ BenchTable runMatmulDacCell(const CyclesPerNanosecond &cal) {
 
 struct MatmulDacRegistrar {
   MatmulDacRegistrar() {
-    registerWorkload({.name = "forkjoin_matmul_dac_j8_n1024", .run = &runMatmulDacCell<0, 8>});
-    registerWorkload({.name = "forkjoin_matmul_dac_j16_n1024", .run = &runMatmulDacCell<0, 16>});
-    registerWorkload({.name = "forkjoin_matmul_dac_j8_n2048", .run = &runMatmulDacCell<1, 8>});
-    registerWorkload({.name = "forkjoin_matmul_dac_j16_n2048", .run = &runMatmulDacCell<1, 16>});
+    registerWorkload({.name = "forkjoin_matmul_dac_j8_n1024",
+                      .run = &runMatmulDacCell<0, 8>});
+    registerWorkload({.name = "forkjoin_matmul_dac_j16_n1024",
+                      .run = &runMatmulDacCell<0, 16>});
+    registerWorkload({.name = "forkjoin_matmul_dac_j8_n2048",
+                      .run = &runMatmulDacCell<1, 8>});
+    registerWorkload({.name = "forkjoin_matmul_dac_j16_n2048",
+                      .run = &runMatmulDacCell<1, 16>});
   }
 };
 

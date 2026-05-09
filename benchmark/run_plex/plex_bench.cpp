@@ -86,12 +86,13 @@ inline void spinForNs(double targetNs,
 /// Expected `sink` value after one full measureLoop run.
 ///
 /// Each phase calls the body once per slot in `[0, participants)`, each adding
-/// `slot` (citor) or `i` (competitors); both sum to `participants * (participants - 1) / 2`
-/// per phase. Mismatch means a phase was skipped or an extra invocation slipped
-/// through and the timing column is bogus.
-[[nodiscard]] inline std::uint64_t expectedSink(std::size_t participants) noexcept {
-  return static_cast<std::uint64_t>(kWarmupIterations + kIterations) * kPlexPhases *
-         participants * (participants - 1) / 2;
+/// `slot` (citor) or `i` (competitors); both sum to `participants *
+/// (participants - 1) / 2` per phase. Mismatch means a phase was skipped or an
+/// extra invocation slipped through and the timing column is bogus.
+[[nodiscard]] inline std::uint64_t
+expectedSink(std::size_t participants) noexcept {
+  return static_cast<std::uint64_t>(kWarmupIterations + kIterations) *
+         kPlexPhases * participants * (participants - 1) / 2;
 }
 
 /// Compare the post-loop sink against the closed-form expected sum and abort
@@ -103,8 +104,9 @@ inline void assertExpectedSink(const char *name, std::size_t participants,
   const std::uint64_t expected = expectedSink(participants);
   const std::uint64_t actual = sink.load(std::memory_order_relaxed);
   if (actual != expected) [[unlikely]] {
-    std::fprintf(stderr, "[%s] plex sink mismatch: expected=%llu actual=%llu\n", name,
-                 static_cast<unsigned long long>(expected), static_cast<unsigned long long>(actual));
+    std::fprintf(stderr, "[%s] plex sink mismatch: expected=%llu actual=%llu\n",
+                 name, static_cast<unsigned long long>(expected),
+                 static_cast<unsigned long long>(actual));
   }
   CITOR_ALWAYS_ASSERT(actual == expected);
 }

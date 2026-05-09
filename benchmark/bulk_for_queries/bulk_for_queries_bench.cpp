@@ -12,12 +12,16 @@
 //   - citor pool              -> `bulkForQueries<BulkHints>`.
 //   - BS::thread_pool          -> `submit_blocks(0, q, body).wait()` (native).
 //   - dp::thread_pool          -> N back-to-back `enqueue` futures + waits;
-//                                 the pool ships no native multi-block primitive.
+//                                 the pool ships no native multi-block
+//                                 primitive.
 //   - task_thread_pool         -> N back-to-back `submit` futures + waits;
-//                                 the pool ships no native multi-block primitive.
+//                                 the pool ships no native multi-block
+//                                 primitive.
 //   - riften::Thiefpool        -> N back-to-back `enqueue` futures + waits;
-//                                 the pool ships no native multi-block primitive.
-//   - oneTBB                   -> `parallelFor` via `tbb::parallel_for` inside arena.
+//                                 the pool ships no native multi-block
+//                                 primitive.
+//   - oneTBB                   -> `parallelFor` via `tbb::parallel_for` inside
+//   arena.
 //   - Taskflow                 -> N-task taskflow + run + wait.
 //   - Eigen::ThreadPool        -> N-block schedule + barrier wait.
 //   - OpenMP                   -> `#pragma omp parallel for schedule(static)`.
@@ -64,17 +68,19 @@ constexpr std::size_t kRefPoints = 10'000;
 /// multiply-adds.
 constexpr std::size_t kDim = 64;
 
-/// Worker count for the bench. Lines up with the representative bulk-query workload size.
+/// Worker count for the bench. Lines up with the representative bulk-query
+/// workload size.
 constexpr std::size_t kParticipants = 16;
 
 /// Synthetic per-query body: compute the squared-Euclidean distance from
-///        `query[q]` to every reference point and store the minimum in `out[q]`.
+///        `query[q]` to every reference point and store the minimum in
+///        `out[q]`.
 ///
-/// The body is structurally a hot inner loop over a contiguous block: read a row, read a
-/// block of contiguous rows, accumulate per-pair squared sums, write a single
-/// scalar per query.
-inline void runOneQuery(std::size_t qIdx, const float *queries, const float *refs,
-                        float *out) noexcept {
+/// The body is structurally a hot inner loop over a contiguous block: read a
+/// row, read a block of contiguous rows, accumulate per-pair squared sums,
+/// write a single scalar per query.
+inline void runOneQuery(std::size_t qIdx, const float *queries,
+                        const float *refs, float *out) noexcept {
   const float *q = queries + (qIdx * kDim);
   float best = std::numeric_limits<float>::max();
   for (std::size_t r = 0; r < kRefPoints; ++r) {
@@ -116,8 +122,8 @@ struct Workload {
 /// `blocks` contiguous chunks. Used as the inline shim for pools whose only
 /// API is `enqueue`-style single-task submission (dp, task, riften); the
 /// helper computes block boundaries the same way every other adapter does.
-inline std::pair<std::size_t, std::size_t> blockRange(std::size_t blockIdx,
-                                                      std::size_t blocks) noexcept {
+inline std::pair<std::size_t, std::size_t>
+blockRange(std::size_t blockIdx, std::size_t blocks) noexcept {
   const std::size_t blockSize = (kQueries + blocks - 1) / blocks;
   const std::size_t lo = std::min(kQueries, blockIdx * blockSize);
   const std::size_t hi = std::min(kQueries, (blockIdx + 1) * blockSize);
@@ -127,7 +133,8 @@ inline std::pair<std::size_t, std::size_t> blockRange(std::size_t blockIdx,
 /// Generic measurement loop: invoke |run|() once per warmup iteration, then
 /// `kIterations` measured iterations stamping the cycle delta around each call.
 template <class RunFn>
-[[nodiscard]] BenchRow measureLoop(const char *name, const CyclesPerNanosecond &cal, RunFn run) {
+[[nodiscard]] BenchRow measureLoop(const char *name,
+                                   const CyclesPerNanosecond &cal, RunFn run) {
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     run();
   }
@@ -153,8 +160,9 @@ template <class RunFn>
       runOneQuery(q, queries, refs, out);
     }
   };
-  BenchRow row = measureLoop("citor::ThreadPool", cal,
-                             [&] { pool.bulkForQueries<citor::BulkHints>(kQueries, body); });
+  BenchRow row = measureLoop("citor::ThreadPool", cal, [&] {
+    pool.bulkForQueries<citor::BulkHints>(kQueries, body);
+  });
   (void)out[0];
   return row;
 }
@@ -170,8 +178,9 @@ template <class RunFn>
       runOneQuery(q, queries, refs, out);
     }
   };
-  BenchRow row = measureLoop("BS::thread_pool", cal,
-                             [&] { pool.submit_blocks(std::size_t{0}, kQueries, body).wait(); });
+  BenchRow row = measureLoop("BS::thread_pool", cal, [&] {
+    pool.submit_blocks(std::size_t{0}, kQueries, body).wait();
+  });
   (void)out[0];
   return row;
 }
@@ -199,7 +208,8 @@ template <class RunFn>
       if (lo == hi) {
         continue;
       }
-      futs.emplace_back(pool.enqueue([lo, hi, &bodyChunk]() { bodyChunk(lo, hi); }));
+      futs.emplace_back(
+          pool.enqueue([lo, hi, &bodyChunk]() { bodyChunk(lo, hi); }));
     }
     for (auto &f : futs) {
       f.get();
@@ -211,7 +221,8 @@ template <class RunFn>
 
 /// task_thread_pool ships no multi-block API; same N-future shape as dp.
 [[nodiscard]] BenchRow measureTaskPool(const CyclesPerNanosecond &cal) {
-  ::task_thread_pool::task_thread_pool pool(static_cast<unsigned int>(kParticipants));
+  ::task_thread_pool::task_thread_pool pool(
+      static_cast<unsigned int>(kParticipants));
   Workload w = buildWorkload();
   const float *queries = w.queries.data();
   const float *refs = w.refs.data();
@@ -230,7 +241,8 @@ template <class RunFn>
       if (lo == hi) {
         continue;
       }
-      futs.emplace_back(pool.submit([lo, hi, &bodyChunk]() { bodyChunk(lo, hi); }));
+      futs.emplace_back(
+          pool.submit([lo, hi, &bodyChunk]() { bodyChunk(lo, hi); }));
     }
     for (auto &f : futs) {
       f.get();
@@ -261,7 +273,8 @@ template <class RunFn>
       if (lo == hi) {
         continue;
       }
-      futs.emplace_back(pool.enqueue([lo, hi, &bodyChunk]() { bodyChunk(lo, hi); }));
+      futs.emplace_back(
+          pool.enqueue([lo, hi, &bodyChunk]() { bodyChunk(lo, hi); }));
     }
     for (auto &f : futs) {
       f.get();
@@ -284,10 +297,11 @@ template <class RunFn>
       runOneQuery(q, queries, refs, out);
     }
   };
-  BenchRow row = measureLoop(CompetitorTraits<::tbb::task_arena>::name, cal, [&] {
-    CompetitorTraits<::tbb::task_arena>::parallelFor(*arena, std::size_t{0}, kQueries, grain,
-                                                     bodyChunk);
-  });
+  BenchRow row =
+      measureLoop(CompetitorTraits<::tbb::task_arena>::name, cal, [&] {
+        CompetitorTraits<::tbb::task_arena>::parallelFor(
+            *arena, std::size_t{0}, kQueries, grain, bodyChunk);
+      });
   (void)out[0];
   return row;
 }
@@ -306,8 +320,8 @@ template <class RunFn>
     }
   };
   BenchRow row = measureLoop(CompetitorTraits<::tf::Executor>::name, cal, [&] {
-    CompetitorTraits<::tf::Executor>::parallelFor(*exec, std::size_t{0}, kQueries, kParticipants,
-                                                  bodyChunk);
+    CompetitorTraits<::tf::Executor>::parallelFor(
+        *exec, std::size_t{0}, kQueries, kParticipants, bodyChunk);
   });
   (void)out[0];
   return row;
@@ -326,10 +340,11 @@ template <class RunFn>
       runOneQuery(q, queries, refs, out);
     }
   };
-  BenchRow row = measureLoop(CompetitorTraits<::Eigen::ThreadPool>::name, cal, [&] {
-    CompetitorTraits<::Eigen::ThreadPool>::parallelFor(*pool, std::size_t{0}, kQueries,
-                                                       kParticipants, bodyChunk);
-  });
+  BenchRow row =
+      measureLoop(CompetitorTraits<::Eigen::ThreadPool>::name, cal, [&] {
+        CompetitorTraits<::Eigen::ThreadPool>::parallelFor(
+            *pool, std::size_t{0}, kQueries, kParticipants, bodyChunk);
+      });
   (void)out[0];
   return row;
 }
@@ -347,10 +362,11 @@ template <class RunFn>
       runOneQuery(q, queries, refs, out);
     }
   };
-  BenchRow row = measureLoop(CompetitorTraits<hmthrp::ThreadPool>::name, cal, [&] {
-    CompetitorTraits<hmthrp::ThreadPool>::parallelFor(*pool, std::size_t{0}, kQueries,
-                                                      kParticipants, bodyChunk);
-  });
+  BenchRow row =
+      measureLoop(CompetitorTraits<hmthrp::ThreadPool>::name, cal, [&] {
+        CompetitorTraits<hmthrp::ThreadPool>::parallelFor(
+            *pool, std::size_t{0}, kQueries, kParticipants, bodyChunk);
+      });
   (void)out[0];
   return row;
 }
@@ -368,10 +384,11 @@ template <class RunFn>
       runOneQuery(q, queries, refs, out);
     }
   };
-  BenchRow row = measureLoop(CompetitorTraits<dispenso::ThreadPool>::name, cal, [&] {
-    CompetitorTraits<dispenso::ThreadPool>::parallelFor(*pool, std::size_t{0}, kQueries,
-                                                        kParticipants, bodyChunk);
-  });
+  BenchRow row =
+      measureLoop(CompetitorTraits<dispenso::ThreadPool>::name, cal, [&] {
+        CompetitorTraits<dispenso::ThreadPool>::parallelFor(
+            *pool, std::size_t{0}, kQueries, kParticipants, bodyChunk);
+      });
   (void)out[0];
   return row;
 }
@@ -386,9 +403,9 @@ template <class RunFn>
   float *out = w.outBuf.data();
   // The OpenMP `parallelFor` trait runs item-by-item (`fn(i, i+1)`); for this
   // workload we want a per-block call so the shape matches the other adapters,
-  // so route through `parallelChain` with one stage to invoke `fn(stage, lo, hi)`
-  // is wrong shape. Use a direct `#pragma omp parallel for` over kQueries with
-  // one item per thread block via static schedule.
+  // so route through `parallelChain` with one stage to invoke `fn(stage, lo,
+  // hi)` is wrong shape. Use a direct `#pragma omp parallel for` over kQueries
+  // with one item per thread block via static schedule.
   auto bodyChunk = [queries, refs, out](std::size_t lo, std::size_t hi) {
     for (std::size_t q = lo; q < hi; ++q) {
       runOneQuery(q, queries, refs, out);
@@ -446,7 +463,8 @@ BenchTable buildTable(const CyclesPerNanosecond &cal) {
 /// initialization time.
 struct BulkForQueriesRegistrar {
   BulkForQueriesRegistrar() {
-    registerWorkload({.name = "bulk_for_queries_q10k_n10k_d64_j16", .run = &buildTable});
+    registerWorkload(
+        {.name = "bulk_for_queries_q10k_n10k_d64_j16", .run = &buildTable});
   }
 };
 

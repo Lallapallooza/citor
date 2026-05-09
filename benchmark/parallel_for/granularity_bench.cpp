@@ -25,15 +25,18 @@
 namespace citor::bench {
 namespace {
 
-template <class PoolT> class MeasurementScope {
+template <class PoolT>
+class MeasurementScope {
 public:
   explicit MeasurementScope(PoolT &) noexcept {}
 };
 
-template <> class MeasurementScope<citor::ThreadPool> {
+template <>
+class MeasurementScope<citor::ThreadPool> {
 public:
   explicit MeasurementScope(citor::ThreadPool &pool) noexcept
-      : m_producerGuard(pool.bindProducerSlot()), m_latencyGuard(pool.lowLatencyScope()) {}
+      : m_producerGuard(pool.bindProducerSlot()),
+        m_latencyGuard(pool.lowLatencyScope()) {}
 
 private:
   citor::ThreadPool::ProducerAffinityGuard m_producerGuard;
@@ -48,7 +51,8 @@ private:
 ///
 /// targetNs Target spin duration in wall-time nanoseconds.
 /// cal      Calibration constant for converting cycles to ns.
-inline void spinForNs(double targetNs, const CyclesPerNanosecond &cal) noexcept {
+inline void spinForNs(double targetNs,
+                      const CyclesPerNanosecond &cal) noexcept {
   if (targetNs <= 0.0) {
     return;
   }
@@ -88,11 +92,11 @@ inline void spinForNs(double targetNs, const CyclesPerNanosecond &cal) noexcept 
   if (bodyNs <= 10'000.0) {
     return 8U;
   }
-  // Body cells at >= 100 us run a single dispatch per bracket: their per-bracket
-  // wall time already dwarfs both the `__rdtscp` overhead and the host's
-  // 1 ms timer-tick interval, so further batching only risks straddling the
-  // tick boundary and reintroducing bimodal noise (observed: at body=100 us,
-  // batch=2 made `task_thread_pool`'s err% go from 17 % to 24 %).
+  // Body cells at >= 100 us run a single dispatch per bracket: their
+  // per-bracket wall time already dwarfs both the `__rdtscp` overhead and the
+  // host's 1 ms timer-tick interval, so further batching only risks straddling
+  // the tick boundary and reintroducing bimodal noise (observed: at body=100
+  // us, batch=2 made `task_thread_pool`'s err% go from 17 % to 24 %).
   return 1U;
 }
 
@@ -104,9 +108,10 @@ inline void spinForNs(double targetNs, const CyclesPerNanosecond &cal) noexcept 
 /// cal            Calibration constant for converting cycles to ns.
 /// A populated `BenchRow` ready for the comparison table.
 template <class PoolT, class Dispatch>
-[[nodiscard]] BenchRow measureGranularityWith(const char *displayName, std::size_t participants,
-                                              double bodyNs, const CyclesPerNanosecond &cal,
-                                              Dispatch dispatch) {
+[[nodiscard]] BenchRow
+measureGranularityWith(const char *displayName, std::size_t participants,
+                       double bodyNs, const CyclesPerNanosecond &cal,
+                       Dispatch dispatch) {
   if (!engineEnabled(displayName)) {
     BenchRow row{};
     row.name = displayName;
@@ -118,7 +123,8 @@ template <class PoolT, class Dispatch>
   [[maybe_unused]] const MeasurementScope<PoolT> measurementScope(*pool);
 
   std::atomic<std::uint64_t> sink{0};
-  const auto body = [&sink, bodyNs, &cal](std::size_t lo, std::size_t hi) noexcept {
+  const auto body = [&sink, bodyNs, &cal](std::size_t lo,
+                                          std::size_t hi) noexcept {
     spinForNs(bodyNs, cal);
     sink.fetch_add(hi - lo, std::memory_order_relaxed);
   };
@@ -139,7 +145,8 @@ template <class PoolT, class Dispatch>
 }
 
 template <class PoolT>
-[[nodiscard]] BenchRow measureGranularity(std::size_t participants, double bodyNs,
+[[nodiscard]] BenchRow measureGranularity(std::size_t participants,
+                                          double bodyNs,
                                           const CyclesPerNanosecond &cal) {
   using Traits = CompetitorTraits<PoolT>;
   return measureGranularityWith<PoolT>(
@@ -150,14 +157,14 @@ template <class PoolT>
 }
 
 template <class HintsT>
-[[nodiscard]] BenchRow measureCitorGranularityWithHint(const char *displayName,
-                                                       std::size_t participants, double bodyNs,
-                                                       const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow
+measureCitorGranularityWithHint(const char *displayName,
+                                std::size_t participants, double bodyNs,
+                                const CyclesPerNanosecond &cal) {
   return measureGranularityWith<citor::ThreadPool>(
       displayName, participants, bodyNs, cal,
-      [](citor::ThreadPool &pool, std::size_t first, std::size_t last, auto fn) {
-        pool.parallelFor<HintsT>(first, last, fn);
-      });
+      [](citor::ThreadPool &pool, std::size_t first, std::size_t last,
+         auto fn) { pool.parallelFor<HintsT>(first, last, fn); });
 }
 
 /// One body-cost decade in the METG sweep.
@@ -183,8 +190,8 @@ constexpr std::array<BodyCell, 6> kBodyCells{{
 /// cell         Body-cost decade.
 /// cal          Calibration constant for converting cycles to ns.
 /// Fully-populated `BenchTable`.
-BenchTable buildTable(std::size_t participants, const char *jSuffix, BodyCell cell,
-                      const CyclesPerNanosecond &cal) {
+BenchTable buildTable(std::size_t participants, const char *jSuffix,
+                      BodyCell cell, const CyclesPerNanosecond &cal) {
   BenchTable table;
   table.workload = std::string{"granularity_"} + jSuffix + "_" + cell.suffix;
 
@@ -192,28 +199,37 @@ BenchTable buildTable(std::size_t participants, const char *jSuffix, BodyCell ce
       "citor::ThreadPool[Static]", participants, cell.bodyNs, cal));
   table.rows.push_back(measureCitorGranularityWithHint<citor::DynamicHints>(
       "citor::ThreadPool[Dynamic]", participants, cell.bodyNs, cal));
-  table.rows.push_back(measureGranularity<BS::light_thread_pool>(participants, cell.bodyNs, cal));
-  table.rows.push_back(measureGranularity<dp::thread_pool<>>(participants, cell.bodyNs, cal));
+  table.rows.push_back(measureGranularity<BS::light_thread_pool>(
+      participants, cell.bodyNs, cal));
   table.rows.push_back(
-      measureGranularity<::task_thread_pool::task_thread_pool>(participants, cell.bodyNs, cal));
-  table.rows.push_back(measureGranularity<riften::Thiefpool>(participants, cell.bodyNs, cal));
+      measureGranularity<dp::thread_pool<>>(participants, cell.bodyNs, cal));
+  table.rows.push_back(measureGranularity<::task_thread_pool::task_thread_pool>(
+      participants, cell.bodyNs, cal));
+  table.rows.push_back(
+      measureGranularity<riften::Thiefpool>(participants, cell.bodyNs, cal));
 #ifdef CITOR_BENCH_HAS_TBB
-  table.rows.push_back(measureGranularity<::tbb::task_arena>(participants, cell.bodyNs, cal));
+  table.rows.push_back(
+      measureGranularity<::tbb::task_arena>(participants, cell.bodyNs, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_TASKFLOW
-  table.rows.push_back(measureGranularity<::tf::Executor>(participants, cell.bodyNs, cal));
+  table.rows.push_back(
+      measureGranularity<::tf::Executor>(participants, cell.bodyNs, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_EIGEN_THREADPOOL
-  table.rows.push_back(measureGranularity<::Eigen::ThreadPool>(participants, cell.bodyNs, cal));
+  table.rows.push_back(
+      measureGranularity<::Eigen::ThreadPool>(participants, cell.bodyNs, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
-  table.rows.push_back(measureGranularity<OpenMpRunner>(participants, cell.bodyNs, cal));
+  table.rows.push_back(
+      measureGranularity<OpenMpRunner>(participants, cell.bodyNs, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_LEOPARD
-  table.rows.push_back(measureGranularity<hmthrp::ThreadPool>(participants, cell.bodyNs, cal));
+  table.rows.push_back(
+      measureGranularity<hmthrp::ThreadPool>(participants, cell.bodyNs, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_DISPENSO
-  table.rows.push_back(measureGranularity<dispenso::ThreadPool>(participants, cell.bodyNs, cal));
+  table.rows.push_back(
+      measureGranularity<dispenso::ThreadPool>(participants, cell.bodyNs, cal));
 #endif
 
   return table;
@@ -243,25 +259,36 @@ struct GranularityRegistrar {
   GranularityRegistrar() {
     // j = 2
     registerWorkload({.name = "granularity_j2_body0", .run = &runCell<2, 0>});
-    registerWorkload({.name = "granularity_j2_body100ns", .run = &runCell<2, 1>});
+    registerWorkload(
+        {.name = "granularity_j2_body100ns", .run = &runCell<2, 1>});
     registerWorkload({.name = "granularity_j2_body1us", .run = &runCell<2, 2>});
-    registerWorkload({.name = "granularity_j2_body10us", .run = &runCell<2, 3>});
-    registerWorkload({.name = "granularity_j2_body100us", .run = &runCell<2, 4>});
+    registerWorkload(
+        {.name = "granularity_j2_body10us", .run = &runCell<2, 3>});
+    registerWorkload(
+        {.name = "granularity_j2_body100us", .run = &runCell<2, 4>});
     registerWorkload({.name = "granularity_j2_body1ms", .run = &runCell<2, 5>});
     // j = 8
     registerWorkload({.name = "granularity_j8_body0", .run = &runCell<8, 0>});
-    registerWorkload({.name = "granularity_j8_body100ns", .run = &runCell<8, 1>});
+    registerWorkload(
+        {.name = "granularity_j8_body100ns", .run = &runCell<8, 1>});
     registerWorkload({.name = "granularity_j8_body1us", .run = &runCell<8, 2>});
-    registerWorkload({.name = "granularity_j8_body10us", .run = &runCell<8, 3>});
-    registerWorkload({.name = "granularity_j8_body100us", .run = &runCell<8, 4>});
+    registerWorkload(
+        {.name = "granularity_j8_body10us", .run = &runCell<8, 3>});
+    registerWorkload(
+        {.name = "granularity_j8_body100us", .run = &runCell<8, 4>});
     registerWorkload({.name = "granularity_j8_body1ms", .run = &runCell<8, 5>});
     // j = 16
     registerWorkload({.name = "granularity_j16_body0", .run = &runCell<16, 0>});
-    registerWorkload({.name = "granularity_j16_body100ns", .run = &runCell<16, 1>});
-    registerWorkload({.name = "granularity_j16_body1us", .run = &runCell<16, 2>});
-    registerWorkload({.name = "granularity_j16_body10us", .run = &runCell<16, 3>});
-    registerWorkload({.name = "granularity_j16_body100us", .run = &runCell<16, 4>});
-    registerWorkload({.name = "granularity_j16_body1ms", .run = &runCell<16, 5>});
+    registerWorkload(
+        {.name = "granularity_j16_body100ns", .run = &runCell<16, 1>});
+    registerWorkload(
+        {.name = "granularity_j16_body1us", .run = &runCell<16, 2>});
+    registerWorkload(
+        {.name = "granularity_j16_body10us", .run = &runCell<16, 3>});
+    registerWorkload(
+        {.name = "granularity_j16_body100us", .run = &runCell<16, 4>});
+    registerWorkload(
+        {.name = "granularity_j16_body1ms", .run = &runCell<16, 5>});
   }
 };
 

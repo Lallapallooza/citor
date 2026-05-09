@@ -35,6 +35,8 @@ inline std::vector<WorkloadRegistration> &registry() {
 /// Add a workload to the registry; called from each workload TU.
 ///
 /// reg Registration record describing the workload.
-inline void registerWorkload(WorkloadRegistration reg) { registry().push_back(reg); }
+inline void registerWorkload(WorkloadRegistration reg) {
+  registry().push_back(reg);
+}
 
 } // namespace citor::bench

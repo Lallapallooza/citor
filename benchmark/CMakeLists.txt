@@ -475,7 +475,10 @@ if(TARGET tmc_headers)
     # tmc compiles at C++20 (project default). Skip linting on the impl TU --
     # the TMC_IMPL definitions pull in the full implementation surface and
     # tidy diagnostics on third-party headers are not actionable here.
-    set_source_files_properties(harness/tmc_runners.cpp PROPERTIES SKIP_LINTING ON)
+    set_source_files_properties(
+        harness/tmc_runners.cpp
+        PROPERTIES SKIP_LINTING ON
+    )
 endif()
 
 if(UNIX AND NOT APPLE)

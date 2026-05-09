@@ -72,42 +72,47 @@ namespace citor::bench {
 /// range partitioning differently; the empty-fan-out workload submits the full
 /// range as a single block, which is sufficient to measure dispatch latency.
 ///
-/// Shim primitive contract: `parallelFor`, `parallelReduce`, and `parallelChain`
-/// shims early-return when `participantCount == 0` (`parallelReduce` returns
-/// |identity|, `parallelChain` is a no-op) for the BS::light_thread_pool
-/// specialization. Callers must pass at least 1. The empty-range guard
+/// Shim primitive contract: `parallelFor`, `parallelReduce`, and
+/// `parallelChain` shims early-return when `participantCount == 0`
+/// (`parallelReduce` returns |identity|, `parallelChain` is a no-op) for the
+/// BS::light_thread_pool specialization. Callers must pass at least 1. The
+/// empty-range guard
 /// (`last <= first`) is uniform across the three primitives. Other future-pool
 /// adapters (dp / task / riften) historically clamp `participantCount==0` to
 /// `blocks=1`; bench callers always pass a positive count, so the two paths
 /// agree in practice.
-template <class Pool> struct CompetitorTraits;
+template <class Pool>
+struct CompetitorTraits;
 
 /// Trait for the new `citor::ThreadPool`.
 ///
-/// Routes through citor's public `DynamicHints` preset so the bench measures the user-facing
-/// default the engine ships with (DynamicChunked balance, engine-derived chunk size,
-/// cold-collapse on). Cells that want a side-by-side Static-vs-Dynamic comparison call
-/// `pool.parallelFor<H>` directly with `citor::StaticHints` / `citor::DynamicHints` and bypass
-/// this shim.
-template <> struct CompetitorTraits<citor::ThreadPool> {
+/// Routes through citor's public `DynamicHints` preset so the bench measures
+/// the user-facing default the engine ships with (DynamicChunked balance,
+/// engine-derived chunk size, cold-collapse on). Cells that want a side-by-side
+/// Static-vs-Dynamic comparison call `pool.parallelFor<H>` directly with
+/// `citor::StaticHints` / `citor::DynamicHints` and bypass this shim.
+template <>
+struct CompetitorTraits<citor::ThreadPool> {
   /// Display name used in the bench table's rightmost column.
   static constexpr const char *name = "citor::ThreadPool";
 
-  /// Construct the new pool with |participants| total participants. citor counts the producer
-  /// as slot 0, so the pool spawns `participants - 1` background pthreads.
+  /// Construct the new pool with |participants| total participants. citor
+  /// counts the producer as slot 0, so the pool spawns `participants - 1`
+  /// background pthreads.
   static auto make(std::size_t participants) {
     return std::make_unique<citor::ThreadPool>(participants);
   }
 
   template <class Fn>
-  static void submitBlocksAndWait(citor::ThreadPool &pool, std::size_t first, std::size_t last,
-                                  Fn fn) {
+  static void submitBlocksAndWait(citor::ThreadPool &pool, std::size_t first,
+                                  std::size_t last, Fn fn) {
     pool.parallelFor<citor::DynamicHints>(first, last, fn);
   }
 
   template <class Fn>
-  static void parallelFor(citor::ThreadPool &pool, std::size_t first, std::size_t last,
-                          std::size_t /*participantCount*/, Fn fn) {
+  static void parallelFor(citor::ThreadPool &pool, std::size_t first,
+                          std::size_t last, std::size_t /*participantCount*/,
+                          Fn fn) {
     pool.parallelFor<citor::DynamicHints>(first, last, fn);
   }
 };
@@ -118,7 +123,8 @@ template <> struct CompetitorTraits<citor::ThreadPool> {
 /// and waits on the returned `multi_future`. The single-block invocation
 /// isolates dispatch latency from any per-block range partitioning the BS pool
 /// would otherwise apply.
-template <> struct CompetitorTraits<BS::light_thread_pool> {
+template <>
+struct CompetitorTraits<BS::light_thread_pool> {
   /// Display name used in the bench table's rightmost column.
   static constexpr const char *name = "BS::thread_pool";
 
@@ -138,13 +144,13 @@ template <> struct CompetitorTraits<BS::light_thread_pool> {
   /// Submit `last - first` blocks of size 1 and wait for all of them.
   ///
   /// Per-block dispatch with one body invocation per element matches the shape
-  /// citor's `parallelFor<citor::DynamicHints>` produces (auto-derived chunk, blockCount =
-  /// range size), so the comparison measures the same logical work for every
-  /// pool: every block of every range is a separate scheduling decision rather
-  /// than one task running on one worker.
+  /// citor's `parallelFor<citor::DynamicHints>` produces (auto-derived chunk,
+  /// blockCount = range size), so the comparison measures the same logical work
+  /// for every pool: every block of every range is a separate scheduling
+  /// decision rather than one task running on one worker.
   template <class Fn>
-  static void submitBlocksAndWait(BS::light_thread_pool &pool, std::size_t first, std::size_t last,
-                                  Fn fn) {
+  static void submitBlocksAndWait(BS::light_thread_pool &pool,
+                                  std::size_t first, std::size_t last, Fn fn) {
     const std::size_t blocks = last > first ? (last - first) : std::size_t{0};
     if (blocks == 0U) {
       return;
@@ -155,8 +161,9 @@ template <> struct CompetitorTraits<BS::light_thread_pool> {
   /// Range-partitioned for using `submit_blocks` with `participantCount` blocks
   /// (one block per worker), matching BS's natural single-fanout shape.
   template <class Fn>
-  static void parallelFor(BS::light_thread_pool &pool, std::size_t first, std::size_t last,
-                          std::size_t participantCount, Fn fn) {
+  static void parallelFor(BS::light_thread_pool &pool, std::size_t first,
+                          std::size_t last, std::size_t participantCount,
+                          Fn fn) {
     if (last <= first || participantCount == 0U) {
       return;
     }
@@ -174,8 +181,9 @@ template <> struct CompetitorTraits<BS::light_thread_pool> {
   /// across all four future-pool adapters so call sites do not need
   /// per-pool branching to derive it.
   template <class T, class Map, class Combine>
-  static T parallelReduce(BS::light_thread_pool &pool, std::size_t first, std::size_t last,
-                          std::size_t participantCount, T identity, Map map, Combine combine) {
+  static T parallelReduce(BS::light_thread_pool &pool, std::size_t first,
+                          std::size_t last, std::size_t participantCount,
+                          T identity, Map map, Combine combine) {
     if (last <= first || participantCount == 0U) {
       return identity;
     }
@@ -188,8 +196,10 @@ template <> struct CompetitorTraits<BS::light_thread_pool> {
     std::atomic<std::size_t> nextIdx{0};
     pool.submit_blocks(
             first, last,
-            [&partials, &map, identity, &nextIdx](std::size_t bf, std::size_t bl) {
-              const std::size_t idx = nextIdx.fetch_add(1U, std::memory_order_relaxed);
+            [&partials, &map, identity, &nextIdx](std::size_t bf,
+                                                  std::size_t bl) {
+              const std::size_t idx =
+                  nextIdx.fetch_add(1U, std::memory_order_relaxed);
               partials[idx] = map(bf, bl, identity);
             },
             blocks)
@@ -205,15 +215,16 @@ template <> struct CompetitorTraits<BS::light_thread_pool> {
   /// over the future-mutex path would not converge to a sub-millisecond
   /// per-stage cost the bench could measure honestly.
   template <class T, class Body>
-  static T parallelScan(BS::light_thread_pool &pool, std::size_t first, std::size_t last,
-                        T identity, Body body) {
+  static T parallelScan(BS::light_thread_pool &pool, std::size_t first,
+                        std::size_t last, T identity, Body body) {
     (void)pool;
     return body(first, last, identity);
   }
 
   /// Fan-out: single closure dispatched via `submit_task`; `multi_future::wait`
   /// is the rendezvous.
-  template <class Fn> static void fanout(BS::light_thread_pool &pool, Fn fn) {
+  template <class Fn>
+  static void fanout(BS::light_thread_pool &pool, Fn fn) {
     pool.submit_task(std::move(fn)).wait();
   }
 
@@ -225,15 +236,19 @@ template <> struct CompetitorTraits<BS::light_thread_pool> {
   /// uniformly across BS / dp / task / riften so call sites can use the same
   /// signature regardless of which future-pool adapter is the row's subject.
   template <class Fn>
-  static void parallelChain(BS::light_thread_pool &pool, std::size_t first, std::size_t last,
-                            std::size_t participantCount, std::size_t stageCount, Fn fn) {
+  static void parallelChain(BS::light_thread_pool &pool, std::size_t first,
+                            std::size_t last, std::size_t participantCount,
+                            std::size_t stageCount, Fn fn) {
     if (participantCount == 0U) {
       return;
     }
     const std::size_t blocks = participantCount;
     for (std::size_t stage = 0; stage < stageCount; ++stage) {
       pool.submit_blocks(
-              first, last, [stage, &fn](std::size_t bf, std::size_t bl) { fn(stage, bf, bl); },
+              first, last,
+              [stage, &fn](std::size_t bf, std::size_t bl) {
+                fn(stage, bf, bl);
+              },
               blocks)
           .wait();
     }
@@ -246,7 +261,8 @@ template <> struct CompetitorTraits<BS::light_thread_pool> {
 /// returns a `std::future<void>`) to submit a single closure invoking the body
 /// over the full range, then waits on the future. This isolates the pool's
 /// dispatch latency in the same shape as `submit_blocks(num_blocks=1)`.
-template <> struct CompetitorTraits<dp::thread_pool<>> {
+template <>
+struct CompetitorTraits<dp::thread_pool<>> {
   /// Display name used in the bench table's rightmost column.
   static constexpr const char *name = "dp::thread_pool";
 
@@ -259,7 +275,8 @@ template <> struct CompetitorTraits<dp::thread_pool<>> {
   /// participants Number of workers to spawn.
   /// Owning pointer to the constructed pool.
   static auto make(std::size_t participants) {
-    return std::make_unique<dp::thread_pool<>>(static_cast<unsigned int>(participants));
+    return std::make_unique<dp::thread_pool<>>(
+        static_cast<unsigned int>(participants));
   }
 
   /// Submit a closure spanning `[first, last)` and wait for it.
@@ -272,8 +289,8 @@ template <> struct CompetitorTraits<dp::thread_pool<>> {
   /// last  Exclusive upper bound of the range.
   /// fn    Callable invoked with the block's range.
   template <class Fn>
-  static void submitBlocksAndWait(dp::thread_pool<> &pool, std::size_t first, std::size_t last,
-                                  Fn fn) {
+  static void submitBlocksAndWait(dp::thread_pool<> &pool, std::size_t first,
+                                  std::size_t last, Fn fn) {
     // Per-block dispatch with one body invocation per element so the bench
     // measures actual N-way fan-out and not a single-task short-circuit. Each
     // enqueue returns a future; the loop waits on all of them.
@@ -295,8 +312,9 @@ template <> struct CompetitorTraits<dp::thread_pool<>> {
   /// path is the rendezvous bound; per-stage costs are not a decentralized
   /// done-epoch scan.
   template <class Fn>
-  static void parallelFor(dp::thread_pool<> &pool, std::size_t first, std::size_t last,
-                          std::size_t participantCount, Fn fn) {
+  static void parallelFor(dp::thread_pool<> &pool, std::size_t first,
+                          std::size_t last, std::size_t participantCount,
+                          Fn fn) {
     if (last <= first || participantCount == 0U) {
       return;
     }
@@ -325,9 +343,11 @@ template <> struct CompetitorTraits<dp::thread_pool<>> {
   /// uniformly across BS / dp / task / riften so call sites can use the same
   /// signature regardless of which future-pool adapter is the row's subject.
   template <class T, class Map, class Combine>
-  static T parallelReduce(dp::thread_pool<> &pool, std::size_t first, std::size_t last,
-                          std::size_t participantCount, T identity, Map map, Combine combine) {
-    const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
+  static T parallelReduce(dp::thread_pool<> &pool, std::size_t first,
+                          std::size_t last, std::size_t participantCount,
+                          T identity, Map map, Combine combine) {
+    const std::size_t blocks =
+        participantCount == 0U ? std::size_t{1} : participantCount;
     std::vector<T> partials(blocks, identity);
     const std::size_t span = last - first;
     const std::size_t block = (span + blocks - 1U) / blocks;
@@ -339,8 +359,10 @@ template <> struct CompetitorTraits<dp::thread_pool<>> {
       if (bf == bl) {
         continue;
       }
-      futures.emplace_back(pool.enqueue(
-          [bf, bl, b, &partials, &map, identity]() { partials[b] = map(bf, bl, identity); }));
+      futures.emplace_back(
+          pool.enqueue([bf, bl, b, &partials, &map, identity]() {
+            partials[b] = map(bf, bl, identity);
+          }));
     }
     for (auto &f : futures) {
       f.get();
@@ -354,14 +376,15 @@ template <> struct CompetitorTraits<dp::thread_pool<>> {
 
   /// Scan: serial fallback; dp has no scan primitive.
   template <class T, class Body>
-  static T parallelScan(dp::thread_pool<> &pool, std::size_t first, std::size_t last, T identity,
-                        Body body) {
+  static T parallelScan(dp::thread_pool<> &pool, std::size_t first,
+                        std::size_t last, T identity, Body body) {
     (void)pool;
     return body(first, last, identity);
   }
 
   /// Fan-out: enqueue one closure, wait on its future.
-  template <class Fn> static void fanout(dp::thread_pool<> &pool, Fn fn) {
+  template <class Fn>
+  static void fanout(dp::thread_pool<> &pool, Fn fn) {
     pool.enqueue(std::move(fn)).get();
   }
 
@@ -372,12 +395,15 @@ template <> struct CompetitorTraits<dp::thread_pool<>> {
   /// uniformly across BS / dp / task / riften so call sites can use the same
   /// signature regardless of which future-pool adapter is the row's subject.
   template <class Fn>
-  static void parallelChain(dp::thread_pool<> &pool, std::size_t first, std::size_t last,
-                            std::size_t participantCount, std::size_t stageCount, Fn fn) {
-    const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
+  static void parallelChain(dp::thread_pool<> &pool, std::size_t first,
+                            std::size_t last, std::size_t participantCount,
+                            std::size_t stageCount, Fn fn) {
+    const std::size_t blocks =
+        participantCount == 0U ? std::size_t{1} : participantCount;
     for (std::size_t stage = 0; stage < stageCount; ++stage) {
-      parallelFor(pool, first, last, blocks,
-                  [stage, &fn](std::size_t bf, std::size_t bl) { fn(stage, bf, bl); });
+      parallelFor(
+          pool, first, last, blocks,
+          [stage, &fn](std::size_t bf, std::size_t bl) { fn(stage, bf, bl); });
     }
   }
 };
@@ -388,7 +414,8 @@ template <> struct CompetitorTraits<dp::thread_pool<>> {
 /// a single closure and wait. `wait_for_tasks` exists but does not return
 /// exceptions per-task; the future-based shape gives consistent error
 /// surfacing.
-template <> struct CompetitorTraits<::task_thread_pool::task_thread_pool> {
+template <>
+struct CompetitorTraits<::task_thread_pool::task_thread_pool> {
   /// Display name used in the bench table's rightmost column.
   static constexpr const char *name = "task_thread_pool";
 
@@ -408,8 +435,8 @@ template <> struct CompetitorTraits<::task_thread_pool::task_thread_pool> {
   /// last  Exclusive upper bound of the range.
   /// fn    Callable invoked with the block's range.
   template <class Fn>
-  static void submitBlocksAndWait(::task_thread_pool::task_thread_pool &pool, std::size_t first,
-                                  std::size_t last, Fn fn) {
+  static void submitBlocksAndWait(::task_thread_pool::task_thread_pool &pool,
+                                  std::size_t first, std::size_t last, Fn fn) {
     // Per-block dispatch matching every other adapter's shape.
     if (last <= first) {
       return;
@@ -424,10 +451,12 @@ template <> struct CompetitorTraits<::task_thread_pool::task_thread_pool> {
     }
   }
 
-  /// Range-partitioned for. One block per worker; future-mutex barrier is the rendezvous.
+  /// Range-partitioned for. One block per worker; future-mutex barrier is the
+  /// rendezvous.
   template <class Fn>
-  static void parallelFor(::task_thread_pool::task_thread_pool &pool, std::size_t first,
-                          std::size_t last, std::size_t participantCount, Fn fn) {
+  static void parallelFor(::task_thread_pool::task_thread_pool &pool,
+                          std::size_t first, std::size_t last,
+                          std::size_t participantCount, Fn fn) {
     if (last <= first || participantCount == 0U) {
       return;
     }
@@ -455,10 +484,12 @@ template <> struct CompetitorTraits<::task_thread_pool::task_thread_pool> {
   /// uniformly across BS / dp / task / riften so call sites can use the same
   /// signature regardless of which future-pool adapter is the row's subject.
   template <class T, class Map, class Combine>
-  static T parallelReduce(::task_thread_pool::task_thread_pool &pool, std::size_t first,
-                          std::size_t last, std::size_t participantCount, T identity, Map map,
+  static T parallelReduce(::task_thread_pool::task_thread_pool &pool,
+                          std::size_t first, std::size_t last,
+                          std::size_t participantCount, T identity, Map map,
                           Combine combine) {
-    const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
+    const std::size_t blocks =
+        participantCount == 0U ? std::size_t{1} : participantCount;
     std::vector<T> partials(blocks, identity);
     const std::size_t span = last - first;
     const std::size_t block = (span + blocks - 1U) / blocks;
@@ -470,8 +501,10 @@ template <> struct CompetitorTraits<::task_thread_pool::task_thread_pool> {
       if (bf == bl) {
         continue;
       }
-      futures.emplace_back(pool.submit(
-          [bf, bl, b, &partials, &map, identity]() { partials[b] = map(bf, bl, identity); }));
+      futures.emplace_back(
+          pool.submit([bf, bl, b, &partials, &map, identity]() {
+            partials[b] = map(bf, bl, identity);
+          }));
     }
     for (auto &f : futures) {
       f.get();
@@ -485,14 +518,16 @@ template <> struct CompetitorTraits<::task_thread_pool::task_thread_pool> {
 
   /// Scan: serial fallback; task_thread_pool has no scan primitive.
   template <class T, class Body>
-  static T parallelScan(::task_thread_pool::task_thread_pool &pool, std::size_t first,
-                        std::size_t last, T identity, Body body) {
+  static T parallelScan(::task_thread_pool::task_thread_pool &pool,
+                        std::size_t first, std::size_t last, T identity,
+                        Body body) {
     (void)pool;
     return body(first, last, identity);
   }
 
   /// Fan-out: submit one closure, wait on its future.
-  template <class Fn> static void fanout(::task_thread_pool::task_thread_pool &pool, Fn fn) {
+  template <class Fn>
+  static void fanout(::task_thread_pool::task_thread_pool &pool, Fn fn) {
     pool.submit(std::move(fn)).get();
   }
 
@@ -502,13 +537,16 @@ template <> struct CompetitorTraits<::task_thread_pool::task_thread_pool> {
   /// uniformly across BS / dp / task / riften so call sites can use the same
   /// signature regardless of which future-pool adapter is the row's subject.
   template <class Fn>
-  static void parallelChain(::task_thread_pool::task_thread_pool &pool, std::size_t first,
-                            std::size_t last, std::size_t participantCount, std::size_t stageCount,
-                            Fn fn) {
-    const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
+  static void parallelChain(::task_thread_pool::task_thread_pool &pool,
+                            std::size_t first, std::size_t last,
+                            std::size_t participantCount,
+                            std::size_t stageCount, Fn fn) {
+    const std::size_t blocks =
+        participantCount == 0U ? std::size_t{1} : participantCount;
     for (std::size_t stage = 0; stage < stageCount; ++stage) {
-      parallelFor(pool, first, last, blocks,
-                  [stage, &fn](std::size_t bf, std::size_t bl) { fn(stage, bf, bl); });
+      parallelFor(
+          pool, first, last, blocks,
+          [stage, &fn](std::size_t bf, std::size_t bl) { fn(stage, bf, bl); });
     }
   }
 };
@@ -518,7 +556,8 @@ template <> struct CompetitorTraits<::task_thread_pool::task_thread_pool> {
 /// `Thiefpool` uses a `riften::Deque` backbone with work-stealing; `enqueue`
 /// returns `std::future<R>` so the bench follows the same single-closure +
 /// wait pattern as `dp::thread_pool` and `task_thread_pool`.
-template <> struct CompetitorTraits<riften::Thiefpool> {
+template <>
+struct CompetitorTraits<riften::Thiefpool> {
   /// Display name used in the bench table's rightmost column.
   static constexpr const char *name = "riften::Thiefpool";
 
@@ -537,8 +576,8 @@ template <> struct CompetitorTraits<riften::Thiefpool> {
   /// last  Exclusive upper bound of the range.
   /// fn    Callable invoked with the block's range.
   template <class Fn>
-  static void submitBlocksAndWait(riften::Thiefpool &pool, std::size_t first, std::size_t last,
-                                  Fn fn) {
+  static void submitBlocksAndWait(riften::Thiefpool &pool, std::size_t first,
+                                  std::size_t last, Fn fn) {
     // Per-block dispatch matching every other adapter's shape.
     if (last <= first) {
       return;
@@ -560,8 +599,9 @@ template <> struct CompetitorTraits<riften::Thiefpool> {
   /// scan, so this adapter is honestly slower than the same workload through
   /// citor's first-class `parallelFor`.
   template <class Fn>
-  static void parallelFor(riften::Thiefpool &pool, std::size_t first, std::size_t last,
-                          std::size_t participantCount, Fn fn) {
+  static void parallelFor(riften::Thiefpool &pool, std::size_t first,
+                          std::size_t last, std::size_t participantCount,
+                          Fn fn) {
     if (last <= first || participantCount == 0U) {
       return;
     }
@@ -587,9 +627,11 @@ template <> struct CompetitorTraits<riften::Thiefpool> {
   /// caller supplies the participant count for the partition (riften has no
   /// public worker-count query; see `parallelFor`).
   template <class T, class Map, class Combine>
-  static T parallelReduce(riften::Thiefpool &pool, std::size_t first, std::size_t last,
-                          std::size_t participantCount, T identity, Map map, Combine combine) {
-    const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
+  static T parallelReduce(riften::Thiefpool &pool, std::size_t first,
+                          std::size_t last, std::size_t participantCount,
+                          T identity, Map map, Combine combine) {
+    const std::size_t blocks =
+        participantCount == 0U ? std::size_t{1} : participantCount;
     std::vector<T> partials(blocks, identity);
     const std::size_t span = last - first;
     const std::size_t block = (span + blocks - 1U) / blocks;
@@ -601,8 +643,10 @@ template <> struct CompetitorTraits<riften::Thiefpool> {
       if (bf == bl) {
         continue;
       }
-      futures.emplace_back(pool.enqueue(
-          [bf, bl, b, &partials, &map, identity]() { partials[b] = map(bf, bl, identity); }));
+      futures.emplace_back(
+          pool.enqueue([bf, bl, b, &partials, &map, identity]() {
+            partials[b] = map(bf, bl, identity);
+          }));
     }
     for (auto &f : futures) {
       f.get();
@@ -616,14 +660,15 @@ template <> struct CompetitorTraits<riften::Thiefpool> {
 
   /// Scan: serial fallback; riften has no scan primitive.
   template <class T, class Body>
-  static T parallelScan(riften::Thiefpool &pool, std::size_t first, std::size_t last, T identity,
-                        Body body) {
+  static T parallelScan(riften::Thiefpool &pool, std::size_t first,
+                        std::size_t last, T identity, Body body) {
     (void)pool;
     return body(first, last, identity);
   }
 
   /// Fan-out: enqueue one closure, wait on its future.
-  template <class Fn> static void fanout(riften::Thiefpool &pool, Fn fn) {
+  template <class Fn>
+  static void fanout(riften::Thiefpool &pool, Fn fn) {
     pool.enqueue(std::move(fn)).get();
   }
 
@@ -631,11 +676,13 @@ template <> struct CompetitorTraits<riften::Thiefpool> {
   /// stage pays the future-mutex barrier; riften has no shared rendezvous
   /// chain primitive.
   template <class Fn>
-  static void parallelChain(riften::Thiefpool &pool, std::size_t first, std::size_t last,
-                            std::size_t participantCount, std::size_t stageCount, Fn fn) {
+  static void parallelChain(riften::Thiefpool &pool, std::size_t first,
+                            std::size_t last, std::size_t participantCount,
+                            std::size_t stageCount, Fn fn) {
     for (std::size_t stage = 0; stage < stageCount; ++stage) {
-      parallelFor(pool, first, last, participantCount,
-                  [stage, &fn](std::size_t bf, std::size_t bl) { fn(stage, bf, bl); });
+      parallelFor(
+          pool, first, last, participantCount,
+          [stage, &fn](std::size_t bf, std::size_t bl) { fn(stage, bf, bl); });
     }
   }
 };
@@ -660,20 +707,22 @@ template <> struct CompetitorTraits<riften::Thiefpool> {
 ///   - `parallelChain`       -> emulated as a back-to-back sequence of
 ///     `tbb::parallel_for` waves; oneTBB does not ship a first-class chain
 ///     primitive.
-template <> struct CompetitorTraits<::tbb::task_arena> {
+template <>
+struct CompetitorTraits<::tbb::task_arena> {
   /// Display name used in the bench table's rightmost column.
   static constexpr const char *name = "oneTBB";
 
   /// Construct a `task_arena` sized to |participants|.
   ///
-  /// `tbb::task_arena` accepts a max-concurrency parameter and a reserved-for-master
-  /// count; the bench reserves one slot for the producer thread, mirroring how
-  /// `citor::ThreadPool` treats slot 0 as the producer.
+  /// `tbb::task_arena` accepts a max-concurrency parameter and a
+  /// reserved-for-master count; the bench reserves one slot for the producer
+  /// thread, mirroring how `citor::ThreadPool` treats slot 0 as the producer.
   ///
   /// participants Total participant count, including the producer.
   /// Owning pointer to the constructed arena.
   static auto make(std::size_t participants) {
-    return std::make_unique<::tbb::task_arena>(static_cast<int>(participants), /*reserved=*/1);
+    return std::make_unique<::tbb::task_arena>(static_cast<int>(participants),
+                                               /*reserved=*/1);
   }
 
   /// Per-block fan-out, used by `empty_fanout_bench.cpp` style workloads. The
@@ -682,12 +731,14 @@ template <> struct CompetitorTraits<::tbb::task_arena> {
   /// TBB's auto-partitioner collapses small ranges to a single inline block on
   /// the producer thread and reports a measurement that bypasses real fan-out.
   template <class Fn>
-  static void submitBlocksAndWait(::tbb::task_arena &arena, std::size_t first, std::size_t last,
-                                  Fn fn) {
+  static void submitBlocksAndWait(::tbb::task_arena &arena, std::size_t first,
+                                  std::size_t last, Fn fn) {
     arena.execute([&] {
       ::tbb::parallel_for(
           ::tbb::blocked_range<std::size_t>{first, last, /*grainsize=*/1},
-          [&](const ::tbb::blocked_range<std::size_t> &r) { fn(r.begin(), r.end()); },
+          [&](const ::tbb::blocked_range<std::size_t> &r) {
+            fn(r.begin(), r.end());
+          },
           ::tbb::simple_partitioner{});
     });
   }
@@ -698,20 +749,24 @@ template <> struct CompetitorTraits<::tbb::task_arena> {
   /// construction hint via `make()`; the partitioner picks the per-task
   /// grain itself.
   template <class Fn>
-  static void parallelFor(::tbb::task_arena &arena, std::size_t first, std::size_t last,
-                          std::size_t /*participantCount*/, Fn fn) {
+  static void parallelFor(::tbb::task_arena &arena, std::size_t first,
+                          std::size_t last, std::size_t /*participantCount*/,
+                          Fn fn) {
     arena.execute([&] {
       ::tbb::parallel_for(
           ::tbb::blocked_range<std::size_t>{first, last},
-          [&](const ::tbb::blocked_range<std::size_t> &r) { fn(r.begin(), r.end()); },
+          [&](const ::tbb::blocked_range<std::size_t> &r) {
+            fn(r.begin(), r.end());
+          },
           ::tbb::auto_partitioner{});
     });
   }
 
   /// Reduction with associative `combine`. Identity is the seed value.
   template <class T, class Map, class Combine>
-  static T parallelReduce(::tbb::task_arena &arena, std::size_t first, std::size_t last, T identity,
-                          Map map, Combine combine) {
+  static T parallelReduce(::tbb::task_arena &arena, std::size_t first,
+                          std::size_t last, T identity, Map map,
+                          Combine combine) {
     T result = identity;
     arena.execute([&] {
       result = ::tbb::parallel_reduce(
@@ -726,28 +781,31 @@ template <> struct CompetitorTraits<::tbb::task_arena> {
 
   /// Inclusive scan. `body` mirrors oneTBB's `parallel_scan` body shape.
   template <class T, class Body>
-  static T parallelScan(::tbb::task_arena &arena, std::size_t first, std::size_t last, T identity,
-                        Body body) {
+  static T parallelScan(::tbb::task_arena &arena, std::size_t first,
+                        std::size_t last, T identity, Body body) {
     T result = identity;
     arena.execute([&] {
-      result = ::tbb::parallel_scan(::tbb::blocked_range<std::size_t>{first, last}, identity, body,
-                                    std::plus<T>{});
+      result =
+          ::tbb::parallel_scan(::tbb::blocked_range<std::size_t>{first, last},
+                               identity, body, std::plus<T>{});
     });
     return result;
   }
 
   /// Fan-out / submit-detached emulation; oneTBB has no detached primitive,
   /// so the closure runs to completion under the arena and the producer waits.
-  template <class Fn> static void fanout(::tbb::task_arena &arena, Fn fn) {
+  template <class Fn>
+  static void fanout(::tbb::task_arena &arena, Fn fn) {
     arena.execute(std::move(fn));
   }
 
-  /// Emulate `parallelChain` via |stageCount| back-to-back `parallel_for` waves.
+  /// Emulate `parallelChain` via |stageCount| back-to-back `parallel_for`
+  /// waves.
   ///
-  /// oneTBB has no first-class chain primitive (no shared rendezvous, no per-stage
-  /// descriptor reuse). Each stage closes a fresh `parallel_for`, paying full
-  /// dispatch + join overhead per stage. This shape is the honest comparison
-  /// baseline for our `parallelChain` primitive.
+  /// oneTBB has no first-class chain primitive (no shared rendezvous, no
+  /// per-stage descriptor reuse). Each stage closes a fresh `parallel_for`,
+  /// paying full dispatch + join overhead per stage. This shape is the honest
+  /// comparison baseline for our `parallelChain` primitive.
   ///
   /// |participantCount| is the grain hint passed through to the inner
   /// `parallel_for`. The argument exists so call sites can template over the
@@ -758,19 +816,22 @@ template <> struct CompetitorTraits<::tbb::task_arena> {
   /// arena            Arena to dispatch into.
   /// first            Inclusive lower bound of the stage range.
   /// last             Exclusive upper bound of the stage range.
-  /// participantCount Per-stage block count (used as `parallel_for` grain hint).
-  /// stageCount       Number of sequential stages.
-  /// fn               Body invoked as `fn(stageIdx, blockFirst, blockAfterLast)`.
+  /// participantCount Per-stage block count (used as `parallel_for` grain
+  /// hint). stageCount       Number of sequential stages. fn               Body
+  /// invoked as `fn(stageIdx, blockFirst, blockAfterLast)`.
   template <class Fn>
-  static void parallelChain(::tbb::task_arena &arena, std::size_t first, std::size_t last,
-                            std::size_t participantCount, std::size_t stageCount, Fn fn) {
+  static void parallelChain(::tbb::task_arena &arena, std::size_t first,
+                            std::size_t last, std::size_t participantCount,
+                            std::size_t stageCount, Fn fn) {
     const std::size_t span = last - first;
-    const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
+    const std::size_t blocks =
+        participantCount == 0U ? std::size_t{1} : participantCount;
     const std::size_t grain = (span + blocks - 1U) / blocks;
     for (std::size_t stage = 0; stage < stageCount; ++stage) {
       arena.execute([&] {
         ::tbb::parallel_for(
-            ::tbb::blocked_range<std::size_t>{first, last, grain == 0U ? std::size_t{1} : grain},
+            ::tbb::blocked_range<std::size_t>{
+                first, last, grain == 0U ? std::size_t{1} : grain},
             [&, stage](const ::tbb::blocked_range<std::size_t> &r) {
               fn(stage, r.begin(), r.end());
             });
@@ -800,20 +861,22 @@ template <> struct CompetitorTraits<::tbb::task_arena> {
 ///   - `fanout`              -> single-task taskflow.
 ///   - `parallelChain`       -> N taskflows joined back-to-back; Taskflow has
 ///     no shared rendezvous chain, so each stage is a fresh graph.
-template <> struct CompetitorTraits<::tf::Executor> {
+template <>
+struct CompetitorTraits<::tf::Executor> {
   /// Display name used in the bench table's rightmost column.
   static constexpr const char *name = "Taskflow";
 
   /// Construct an executor with |participants| workers.
   static auto make(std::size_t participants) {
-    return std::make_unique<::tf::Executor>(static_cast<std::size_t>(participants));
+    return std::make_unique<::tf::Executor>(
+        static_cast<std::size_t>(participants));
   }
 
-  /// Per-block fan-out used by the dispatch-floor workload. One task per element
-  /// matches the shape every other adapter uses.
+  /// Per-block fan-out used by the dispatch-floor workload. One task per
+  /// element matches the shape every other adapter uses.
   template <class Fn>
-  static void submitBlocksAndWait(::tf::Executor &exec, std::size_t first, std::size_t last,
-                                  Fn fn) {
+  static void submitBlocksAndWait(::tf::Executor &exec, std::size_t first,
+                                  std::size_t last, Fn fn) {
     if (last <= first) {
       return;
     }
@@ -828,8 +891,9 @@ template <> struct CompetitorTraits<::tf::Executor> {
   /// blocks. Taskflow's executor work-steals between workers, so an idle
   /// worker can pick up another's block when the tail straggles.
   template <class Fn>
-  static void parallelFor(::tf::Executor &exec, std::size_t first, std::size_t last,
-                          std::size_t participantCount, Fn fn) {
+  static void parallelFor(::tf::Executor &exec, std::size_t first,
+                          std::size_t last, std::size_t participantCount,
+                          Fn fn) {
     if (participantCount == 0) {
       participantCount = 1;
     }
@@ -852,10 +916,11 @@ template <> struct CompetitorTraits<::tf::Executor> {
   // inlines per-pool because the bookkeeping varies enough that a uniform
   // signature would obscure it.
 
-  /// Scan emulated as a serial pass on the producer; Taskflow has no parallel scan.
+  /// Scan emulated as a serial pass on the producer; Taskflow has no parallel
+  /// scan.
   template <class T, class Body>
-  static T parallelScan(::tf::Executor &exec, std::size_t first, std::size_t last, T identity,
-                        Body body) {
+  static T parallelScan(::tf::Executor &exec, std::size_t first,
+                        std::size_t last, T identity, Body body) {
     (void)exec;
     return body(first, last, identity);
   }
@@ -863,7 +928,8 @@ template <> struct CompetitorTraits<::tf::Executor> {
   /// Fan-out / submit-detached: dispatch one task and wait. Taskflow has
   /// `silent_async` for true detached, but the bench measures dispatch latency,
   /// so we wait on the run handle to keep the timing honest.
-  template <class Fn> static void fanout(::tf::Executor &exec, Fn fn) {
+  template <class Fn>
+  static void fanout(::tf::Executor &exec, Fn fn) {
     ::tf::Taskflow flow;
     flow.emplace(std::move(fn));
     exec.run(flow).wait();
@@ -875,9 +941,11 @@ template <> struct CompetitorTraits<::tf::Executor> {
   /// |participantCount| is the per-stage block count (caller-supplied so
   /// every adapter's `parallelChain` shares the same signature).
   template <class Fn>
-  static void parallelChain(::tf::Executor &exec, std::size_t first, std::size_t last,
-                            std::size_t participantCount, std::size_t stageCount, Fn fn) {
-    const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
+  static void parallelChain(::tf::Executor &exec, std::size_t first,
+                            std::size_t last, std::size_t participantCount,
+                            std::size_t stageCount, Fn fn) {
+    const std::size_t blocks =
+        participantCount == 0U ? std::size_t{1} : participantCount;
     const std::size_t span = last - first;
     const std::size_t block = (span + blocks - 1U) / blocks;
     for (std::size_t stage = 0; stage < stageCount; ++stage) {
@@ -913,21 +981,23 @@ template <> struct CompetitorTraits<::tf::Executor> {
 ///   - `parallelScan`        -> serial fallback; Eigen has no scan primitive.
 ///   - `fanout`              -> single `Schedule` + barrier wait.
 ///   - `parallelChain`       -> back-to-back parallelFor waves.
-template <> struct CompetitorTraits<::Eigen::ThreadPool> {
+template <>
+struct CompetitorTraits<::Eigen::ThreadPool> {
   /// Display name used in the bench table's rightmost column.
   static constexpr const char *name = "Eigen::ThreadPool";
 
   /// Construct an Eigen non-blocking thread pool with |participants| workers.
   static auto make(std::size_t participants) {
-    return std::make_unique<::Eigen::ThreadPool>(static_cast<int>(participants));
+    return std::make_unique<::Eigen::ThreadPool>(
+        static_cast<int>(participants));
   }
 
   /// Per-element schedule fan-out + barrier wait. One Schedule call per element
   /// matches every other adapter's shape so the comparison measures actual
   /// fan-out cost, not a collapsed single-task path.
   template <class Fn>
-  static void submitBlocksAndWait(::Eigen::ThreadPool &pool, std::size_t first, std::size_t last,
-                                  Fn fn) {
+  static void submitBlocksAndWait(::Eigen::ThreadPool &pool, std::size_t first,
+                                  std::size_t last, Fn fn) {
     if (last <= first) {
       return;
     }
@@ -944,8 +1014,9 @@ template <> struct CompetitorTraits<::Eigen::ThreadPool> {
 
   /// Range-partitioned for. Each block = one `Schedule()` + barrier `Notify`.
   template <class Fn>
-  static void parallelFor(::Eigen::ThreadPool &pool, std::size_t first, std::size_t last,
-                          std::size_t participantCount, Fn fn) {
+  static void parallelFor(::Eigen::ThreadPool &pool, std::size_t first,
+                          std::size_t last, std::size_t participantCount,
+                          Fn fn) {
     if (participantCount == 0) {
       participantCount = 1;
     }
@@ -982,14 +1053,15 @@ template <> struct CompetitorTraits<::Eigen::ThreadPool> {
 
   /// Scan: serial fallback; Eigen has no scan primitive.
   template <class T, class Body>
-  static T parallelScan(::Eigen::ThreadPool &pool, std::size_t first, std::size_t last, T identity,
-                        Body body) {
+  static T parallelScan(::Eigen::ThreadPool &pool, std::size_t first,
+                        std::size_t last, T identity, Body body) {
     (void)pool;
     return body(first, last, identity);
   }
 
   /// Fan-out: one `Schedule()` + barrier wait.
-  template <class Fn> static void fanout(::Eigen::ThreadPool &pool, Fn fn) {
+  template <class Fn>
+  static void fanout(::Eigen::ThreadPool &pool, Fn fn) {
     ::Eigen::Barrier bar(/*count=*/1);
     pool.Schedule([&bar, fn = std::move(fn)]() mutable {
       fn();
@@ -1003,12 +1075,15 @@ template <> struct CompetitorTraits<::Eigen::ThreadPool> {
   /// |participantCount| is the per-stage block count (caller-supplied so
   /// every adapter's `parallelChain` shares the same signature).
   template <class Fn>
-  static void parallelChain(::Eigen::ThreadPool &pool, std::size_t first, std::size_t last,
-                            std::size_t participantCount, std::size_t stageCount, Fn fn) {
-    const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
+  static void parallelChain(::Eigen::ThreadPool &pool, std::size_t first,
+                            std::size_t last, std::size_t participantCount,
+                            std::size_t stageCount, Fn fn) {
+    const std::size_t blocks =
+        participantCount == 0U ? std::size_t{1} : participantCount;
     for (std::size_t stage = 0; stage < stageCount; ++stage) {
-      parallelFor(pool, first, last, blocks,
-                  [&fn, stage](std::size_t bf, std::size_t bl) { fn(stage, bf, bl); });
+      parallelFor(
+          pool, first, last, blocks,
+          [&fn, stage](std::size_t bf, std::size_t bl) { fn(stage, bf, bl); });
     }
   }
 };
@@ -1029,7 +1104,8 @@ struct OpenMpRunner {
 /// Trait for the OpenMP shim wrapper.
 ///
 /// Primitive mapping (each opens a fresh `parallel` region):
-///   - `submitBlocksAndWait` -> single-block `parallel for` over `[first, last)`.
+///   - `submitBlocksAndWait` -> single-block `parallel for` over `[first,
+///   last)`.
 ///   - `parallelFor`         -> `parallel for schedule(static)`.
 ///   - `parallelReduce`      -> not provided; the Pareto-reduce bench inlines
 ///     per-pool because the bookkeeping varies enough that a uniform signature
@@ -1042,7 +1118,8 @@ struct OpenMpRunner {
 ///     thread (the closure receives the thread index).
 ///   - `parallelChain`       -> |stageCount| back-to-back `parallel for`
 ///     regions. OpenMP has no chain primitive; each stage pays full overhead.
-template <> struct CompetitorTraits<OpenMpRunner> {
+template <>
+struct CompetitorTraits<OpenMpRunner> {
   /// Display name used in the bench table's rightmost column.
   static constexpr const char *name = "OpenMP";
 
@@ -1055,8 +1132,8 @@ template <> struct CompetitorTraits<OpenMpRunner> {
   /// other adapter's shape so the comparison measures actual N-way fan-out and
   /// not a `single` short-circuit.
   template <class Fn>
-  static void submitBlocksAndWait(OpenMpRunner &runner, std::size_t first, std::size_t last,
-                                  Fn fn) {
+  static void submitBlocksAndWait(OpenMpRunner &runner, std::size_t first,
+                                  std::size_t last, Fn fn) {
     if (last <= first) {
       return;
     }
@@ -1074,8 +1151,9 @@ template <> struct CompetitorTraits<OpenMpRunner> {
   /// workers pull additional blocks past their static share when one rank
   /// straggles.
   template <class Fn>
-  static void parallelFor(OpenMpRunner &runner, std::size_t first, std::size_t last,
-                          std::size_t /*participantCount*/, Fn fn) {
+  static void parallelFor(OpenMpRunner &runner, std::size_t first,
+                          std::size_t last, std::size_t /*participantCount*/,
+                          Fn fn) {
     if (last <= first) {
       return;
     }
@@ -1086,8 +1164,10 @@ template <> struct CompetitorTraits<OpenMpRunner> {
     const auto blocksSigned = static_cast<std::ptrdiff_t>(blocks);
 #pragma omp parallel for num_threads(threads) schedule(dynamic, 1)
     for (std::ptrdiff_t b = 0; b < blocksSigned; ++b) {
-      const std::size_t lo = first + std::min(span, static_cast<std::size_t>(b) * block);
-      const std::size_t hi = first + std::min(span, (static_cast<std::size_t>(b) + 1U) * block);
+      const std::size_t lo =
+          first + std::min(span, static_cast<std::size_t>(b) * block);
+      const std::size_t hi =
+          first + std::min(span, (static_cast<std::size_t>(b) + 1U) * block);
       if (lo < hi) {
         fn(lo, hi);
       }
@@ -1100,14 +1180,15 @@ template <> struct CompetitorTraits<OpenMpRunner> {
 
   /// Scan: serial fallback. OpenMP 5.0's `scan` directive is uneven in support.
   template <class T, class Body>
-  static T parallelScan(OpenMpRunner &runner, std::size_t first, std::size_t last, T identity,
-                        Body body) {
+  static T parallelScan(OpenMpRunner &runner, std::size_t first,
+                        std::size_t last, T identity, Body body) {
     (void)runner;
     return body(first, last, identity);
   }
 
   /// Fan-out: open a parallel region; |fn| is invoked once per thread.
-  template <class Fn> static void fanout(OpenMpRunner &runner, Fn fn) {
+  template <class Fn>
+  static void fanout(OpenMpRunner &runner, Fn fn) {
     const int threads = static_cast<int>(runner.threads);
 #pragma omp parallel num_threads(threads)
     {
@@ -1122,8 +1203,9 @@ template <> struct CompetitorTraits<OpenMpRunner> {
   /// drives `num_threads`); the argument exists so call sites can use the
   /// same `parallelChain` signature across every adapter.
   template <class Fn>
-  static void parallelChain(OpenMpRunner &runner, std::size_t first, std::size_t last,
-                            std::size_t /*participantCount*/, std::size_t stageCount, Fn fn) {
+  static void parallelChain(OpenMpRunner &runner, std::size_t first,
+                            std::size_t last, std::size_t /*participantCount*/,
+                            std::size_t stageCount, Fn fn) {
     const int threads = static_cast<int>(runner.threads);
     const auto firstSigned = static_cast<std::ptrdiff_t>(first);
     const auto lastSigned = static_cast<std::ptrdiff_t>(last);
@@ -1138,15 +1220,18 @@ template <> struct CompetitorTraits<OpenMpRunner> {
 #endif // CITOR_BENCH_HAS_OPENMP
 
 #ifdef CITOR_BENCH_HAS_LEOPARD
-/// Trait for `hmthrp::ThreadPool` (Leopard) -- C++20 work-stealing pool with `dispatch`
+/// Trait for `hmthrp::ThreadPool` (Leopard) -- C++20 work-stealing pool with
+/// `dispatch`
 ///        and `parallel_loop`.
 ///
-/// Leopard's `parallel_loop` auto-partitions into one block per worker thread and returns a
-/// vector of futures (one per chunk). The bench shim wires it through `dispatch()` directly so
-/// the partition is `participantCount` blocks (one per worker), matching every other peer.
-/// `submitBlocksAndWait` on this adapter issues `last - first` per-element tasks, mirroring
-/// BS / dp / task / riften.
-template <> struct CompetitorTraits<hmthrp::ThreadPool> {
+/// Leopard's `parallel_loop` auto-partitions into one block per worker thread
+/// and returns a vector of futures (one per chunk). The bench shim wires it
+/// through `dispatch()` directly so the partition is `participantCount` blocks
+/// (one per worker), matching every other peer. `submitBlocksAndWait` on this
+/// adapter issues `last - first` per-element tasks, mirroring BS / dp / task /
+/// riften.
+template <>
+struct CompetitorTraits<hmthrp::ThreadPool> {
   static constexpr const char *name = "Leopard::ThreadPool";
 
   static auto make(std::size_t participants) {
@@ -1154,8 +1239,8 @@ template <> struct CompetitorTraits<hmthrp::ThreadPool> {
   }
 
   template <class Fn>
-  static void submitBlocksAndWait(hmthrp::ThreadPool &pool, std::size_t first, std::size_t last,
-                                  Fn fn) {
+  static void submitBlocksAndWait(hmthrp::ThreadPool &pool, std::size_t first,
+                                  std::size_t last, Fn fn) {
     if (last <= first) {
       return;
     }
@@ -1170,8 +1255,9 @@ template <> struct CompetitorTraits<hmthrp::ThreadPool> {
   }
 
   template <class Fn>
-  static void parallelFor(hmthrp::ThreadPool &pool, std::size_t first, std::size_t last,
-                          std::size_t participantCount, Fn fn) {
+  static void parallelFor(hmthrp::ThreadPool &pool, std::size_t first,
+                          std::size_t last, std::size_t participantCount,
+                          Fn fn) {
     if (last <= first || participantCount == 0U) {
       return;
     }
@@ -1186,20 +1272,23 @@ template <> struct CompetitorTraits<hmthrp::ThreadPool> {
       if (bf == bl) {
         continue;
       }
-      futures.emplace_back(pool.dispatch(false, [bf, bl, &fn]() { fn(bf, bl); }));
+      futures.emplace_back(
+          pool.dispatch(false, [bf, bl, &fn]() { fn(bf, bl); }));
     }
     for (auto &f : futures) {
       f.get();
     }
   }
 
-  /// Reduction emulated as N dispatch + per-block partials + serial merge. Leopard has no
-  /// first-class reduce primitive; the bench measures fan-out + future-wait, mirroring the
-  /// riften / dp / task adapter shape.
+  /// Reduction emulated as N dispatch + per-block partials + serial merge.
+  /// Leopard has no first-class reduce primitive; the bench measures fan-out +
+  /// future-wait, mirroring the riften / dp / task adapter shape.
   template <class T, class Map, class Combine>
-  static T parallelReduce(hmthrp::ThreadPool &pool, std::size_t first, std::size_t last,
-                          std::size_t participantCount, T identity, Map map, Combine combine) {
-    const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
+  static T parallelReduce(hmthrp::ThreadPool &pool, std::size_t first,
+                          std::size_t last, std::size_t participantCount,
+                          T identity, Map map, Combine combine) {
+    const std::size_t blocks =
+        participantCount == 0U ? std::size_t{1} : participantCount;
     std::vector<T> partials(blocks, identity);
     const std::size_t span = last - first;
     const std::size_t block = (span + blocks - 1U) / blocks;
@@ -1211,8 +1300,10 @@ template <> struct CompetitorTraits<hmthrp::ThreadPool> {
       if (bf == bl) {
         continue;
       }
-      futures.emplace_back(pool.dispatch(
-          false, [bf, bl, b, &partials, &map, identity]() { partials[b] = map(bf, bl, identity); }));
+      futures.emplace_back(
+          pool.dispatch(false, [bf, bl, b, &partials, &map, identity]() {
+            partials[b] = map(bf, bl, identity);
+          }));
     }
     for (auto &f : futures) {
       f.get();
@@ -1226,24 +1317,27 @@ template <> struct CompetitorTraits<hmthrp::ThreadPool> {
 
   /// Scan: serial fallback. Leopard has no scan primitive.
   template <class T, class Body>
-  static T parallelScan(hmthrp::ThreadPool &pool, std::size_t first, std::size_t last, T identity,
-                        Body body) {
+  static T parallelScan(hmthrp::ThreadPool &pool, std::size_t first,
+                        std::size_t last, T identity, Body body) {
     (void)pool;
     return body(first, last, identity);
   }
 
   /// Fan-out: dispatch one closure, wait on its future.
-  template <class Fn> static void fanout(hmthrp::ThreadPool &pool, Fn fn) {
+  template <class Fn>
+  static void fanout(hmthrp::ThreadPool &pool, Fn fn) {
     pool.dispatch(false, std::move(fn)).get();
   }
 
   /// Chain emulated as |stageCount| back-to-back parallelFor waves.
   template <class Fn>
-  static void parallelChain(hmthrp::ThreadPool &pool, std::size_t first, std::size_t last,
-                            std::size_t participantCount, std::size_t stageCount, Fn fn) {
+  static void parallelChain(hmthrp::ThreadPool &pool, std::size_t first,
+                            std::size_t last, std::size_t participantCount,
+                            std::size_t stageCount, Fn fn) {
     for (std::size_t stage = 0; stage < stageCount; ++stage) {
-      parallelFor(pool, first, last, participantCount,
-                  [stage, &fn](std::size_t bf, std::size_t bl) { fn(stage, bf, bl); });
+      parallelFor(
+          pool, first, last, participantCount,
+          [stage, &fn](std::size_t bf, std::size_t bl) { fn(stage, bf, bl); });
     }
   }
 };
@@ -1253,55 +1347,65 @@ template <> struct CompetitorTraits<hmthrp::ThreadPool> {
 /// Trait for `dispenso::ThreadPool` (Meta) -- work-stealing pool with native
 ///        `parallel_for` over `ChunkedRange`.
 ///
-/// The shim binds a per-row `dispenso::ThreadPool` to a `dispenso::TaskSet` and routes the
-/// dispatch through `dispenso::parallel_for(taskSet, ChunkedRange, body)`. The chunk size is
-/// `participantCount` blocks (one per worker), matching every other peer's natural shape.
-template <> struct CompetitorTraits<dispenso::ThreadPool> {
+/// The shim binds a per-row `dispenso::ThreadPool` to a `dispenso::TaskSet` and
+/// routes the dispatch through `dispenso::parallel_for(taskSet, ChunkedRange,
+/// body)`. The chunk size is `participantCount` blocks (one per worker),
+/// matching every other peer's natural shape.
+template <>
+struct CompetitorTraits<dispenso::ThreadPool> {
   static constexpr const char *name = "dispenso::ThreadPool";
 
-  /// Construct a pool with the producer counted in the benchmark's total participant count.
-  /// dispenso's constructor spawns only background workers; `TaskSet::wait()` lets the caller
-  /// drain queued work as an additional participant.
+  /// Construct a pool with the producer counted in the benchmark's total
+  /// participant count. dispenso's constructor spawns only background workers;
+  /// `TaskSet::wait()` lets the caller drain queued work as an additional
+  /// participant.
   static auto make(std::size_t participants) {
     const std::size_t workerCount = participants > 0U ? participants - 1U : 0U;
     return std::make_unique<dispenso::ThreadPool>(workerCount);
   }
 
   template <class Fn>
-  static void submitBlocksAndWait(dispenso::ThreadPool &pool, std::size_t first, std::size_t last,
-                                  Fn fn) {
+  static void submitBlocksAndWait(dispenso::ThreadPool &pool, std::size_t first,
+                                  std::size_t last, Fn fn) {
     if (last <= first) {
       return;
     }
-    // Recommended form: `parallel_for(taskSet, start, end, body)` lets dispenso pick its
-    // default chunking strategy (`kStatic`). Avoids the explicit-ChunkedRange + small-range
-    // trap that triggers dispenso's inline-fallback with no consideration of body cost.
+    // Recommended form: `parallel_for(taskSet, start, end, body)` lets dispenso
+    // pick its default chunking strategy (`kStatic`). Avoids the
+    // explicit-ChunkedRange + small-range trap that triggers dispenso's
+    // inline-fallback with no consideration of body cost.
     dispenso::TaskSet taskSet(pool);
-    dispenso::parallel_for(taskSet, first, last,
-                           [&fn](std::size_t lo, std::size_t hi) { fn(lo, hi); });
+    dispenso::parallel_for(
+        taskSet, first, last,
+        [&fn](std::size_t lo, std::size_t hi) { fn(lo, hi); });
   }
 
   template <class Fn>
-  static void parallelFor(dispenso::ThreadPool &pool, std::size_t first, std::size_t last,
-                          std::size_t /*participantCount*/, Fn fn) {
+  static void parallelFor(dispenso::ThreadPool &pool, std::size_t first,
+                          std::size_t last, std::size_t /*participantCount*/,
+                          Fn fn) {
     if (last <= first) {
       return;
     }
-    // Same recommended form for the bulk-partition entry. dispenso's default chunking
-    // produces a partition shape comparable to citor's auto-derived chunk on bulk
-    // workloads.
+    // Same recommended form for the bulk-partition entry. dispenso's default
+    // chunking produces a partition shape comparable to citor's auto-derived
+    // chunk on bulk workloads.
     dispenso::TaskSet taskSet(pool);
-    dispenso::parallel_for(taskSet, first, last,
-                           [&fn](std::size_t lo, std::size_t hi) { fn(lo, hi); });
+    dispenso::parallel_for(
+        taskSet, first, last,
+        [&fn](std::size_t lo, std::size_t hi) { fn(lo, hi); });
   }
 
-  /// Reduction emulated as N parallel_for chunks + per-block partials + serial merge.
-  /// dispenso ships `parallel_for_deferred` and a TaskSet, but no first-class reduce; the
-  /// bench measures fan-out + barrier-wait through the TaskSet's destructor.
+  /// Reduction emulated as N parallel_for chunks + per-block partials + serial
+  /// merge. dispenso ships `parallel_for_deferred` and a TaskSet, but no
+  /// first-class reduce; the bench measures fan-out + barrier-wait through the
+  /// TaskSet's destructor.
   template <class T, class Map, class Combine>
-  static T parallelReduce(dispenso::ThreadPool &pool, std::size_t first, std::size_t last,
-                          std::size_t participantCount, T identity, Map map, Combine combine) {
-    const std::size_t blocks = participantCount == 0U ? std::size_t{1} : participantCount;
+  static T parallelReduce(dispenso::ThreadPool &pool, std::size_t first,
+                          std::size_t last, std::size_t participantCount,
+                          T identity, Map map, Combine combine) {
+    const std::size_t blocks =
+        participantCount == 0U ? std::size_t{1} : participantCount;
     std::vector<T> partials(blocks, identity);
     const std::size_t span = last - first;
     const std::size_t block = (span + blocks - 1U) / blocks;
@@ -1313,8 +1417,9 @@ template <> struct CompetitorTraits<dispenso::ThreadPool> {
         if (bf == bl) {
           continue;
         }
-        taskSet.schedule(
-            [bf, bl, b, &partials, &map, identity]() { partials[b] = map(bf, bl, identity); });
+        taskSet.schedule([bf, bl, b, &partials, &map, identity]() {
+          partials[b] = map(bf, bl, identity);
+        });
       }
     }
     T result = identity;
@@ -1326,25 +1431,28 @@ template <> struct CompetitorTraits<dispenso::ThreadPool> {
 
   /// Scan: serial fallback. dispenso has no scan primitive.
   template <class T, class Body>
-  static T parallelScan(dispenso::ThreadPool &pool, std::size_t first, std::size_t last, T identity,
-                        Body body) {
+  static T parallelScan(dispenso::ThreadPool &pool, std::size_t first,
+                        std::size_t last, T identity, Body body) {
     (void)pool;
     return body(first, last, identity);
   }
 
   /// Fan-out: schedule one closure, wait on the TaskSet's destructor.
-  template <class Fn> static void fanout(dispenso::ThreadPool &pool, Fn fn) {
+  template <class Fn>
+  static void fanout(dispenso::ThreadPool &pool, Fn fn) {
     dispenso::TaskSet taskSet(pool);
     taskSet.schedule(std::move(fn));
   }
 
   /// Chain emulated as |stageCount| back-to-back parallelFor waves.
   template <class Fn>
-  static void parallelChain(dispenso::ThreadPool &pool, std::size_t first, std::size_t last,
-                            std::size_t participantCount, std::size_t stageCount, Fn fn) {
+  static void parallelChain(dispenso::ThreadPool &pool, std::size_t first,
+                            std::size_t last, std::size_t participantCount,
+                            std::size_t stageCount, Fn fn) {
     for (std::size_t stage = 0; stage < stageCount; ++stage) {
-      parallelFor(pool, first, last, participantCount,
-                  [stage, &fn](std::size_t bf, std::size_t bl) { fn(stage, bf, bl); });
+      parallelFor(
+          pool, first, last, participantCount,
+          [stage, &fn](std::size_t bf, std::size_t bl) { fn(stage, bf, bl); });
     }
   }
 };

@@ -25,15 +25,18 @@
 namespace citor::bench {
 namespace {
 
-template <class PoolT> class MeasurementScope {
+template <class PoolT>
+class MeasurementScope {
 public:
   explicit MeasurementScope(PoolT &) noexcept {}
 };
 
-template <> class MeasurementScope<citor::ThreadPool> {
+template <>
+class MeasurementScope<citor::ThreadPool> {
 public:
   explicit MeasurementScope(citor::ThreadPool &pool) noexcept
-      : m_producerGuard(pool.bindProducerSlot()), m_latencyGuard(pool.lowLatencyScope()) {}
+      : m_producerGuard(pool.bindProducerSlot()),
+        m_latencyGuard(pool.lowLatencyScope()) {}
 
 private:
   citor::ThreadPool::ProducerAffinityGuard m_producerGuard;
@@ -46,10 +49,10 @@ private:
 /// p25 of per-dispatch ns across `kIterations` brackets.
 constexpr std::size_t kIterations = 2'000;
 
-/// Inner-batch size. Empty fan-out dispatch spans roughly two orders of magnitude across the
-/// surveyed pools; batching 64 dispatches per bracket pushes the slowest pool
-/// safely above the timer-tick floor and amortizes the `__rdtscp` overhead
-/// below the noise floor for the fastest pool.
+/// Inner-batch size. Empty fan-out dispatch spans roughly two orders of
+/// magnitude across the surveyed pools; batching 64 dispatches per bracket
+/// pushes the slowest pool safely above the timer-tick floor and amortizes the
+/// `__rdtscp` overhead below the noise floor for the fastest pool.
 constexpr std::size_t kBatchSize = 64;
 
 /// Warmup iterations dropped from the sample window. Hot dispatch numbers are
@@ -72,8 +75,9 @@ constexpr std::size_t kWarmupIterations = 50;
 /// cal     Calibration constant for converting cycles to ns.
 /// A populated `BenchRow` ready for the comparison table.
 template <class PoolT, class Dispatch>
-[[nodiscard]] BenchRow measureEmptyFanoutWith(const char *displayName, std::size_t participants,
-                                              const CyclesPerNanosecond &cal, Dispatch dispatch) {
+[[nodiscard]] BenchRow
+measureEmptyFanoutWith(const char *displayName, std::size_t participants,
+                       const CyclesPerNanosecond &cal, Dispatch dispatch) {
   if (!engineEnabled(displayName)) {
     BenchRow row{};
     row.name = displayName;
@@ -104,7 +108,8 @@ template <class PoolT, class Dispatch>
       dispatch(*pool, 0, participants, body);
     }
     const std::uint64_t endCycles = readCyclesEnd();
-    samples.push_back(cyclesToNs(endCycles - startCycles, cal) / static_cast<double>(kBatchSize));
+    samples.push_back(cyclesToNs(endCycles - startCycles, cal) /
+                      static_cast<double>(kBatchSize));
   }
 
   (void)sink.load(std::memory_order_relaxed);
@@ -124,14 +129,14 @@ template <class PoolT>
 }
 
 template <class HintsT>
-[[nodiscard]] BenchRow measureCitorEmptyFanoutWithHint(const char *displayName,
-                                                       std::size_t participants,
-                                                       const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow
+measureCitorEmptyFanoutWithHint(const char *displayName,
+                                std::size_t participants,
+                                const CyclesPerNanosecond &cal) {
   return measureEmptyFanoutWith<citor::ThreadPool>(
       displayName, participants, cal,
-      [](citor::ThreadPool &pool, std::size_t first, std::size_t last, auto fn) {
-        pool.parallelFor<HintsT>(first, last, fn);
-      });
+      [](citor::ThreadPool &pool, std::size_t first, std::size_t last,
+         auto fn) { pool.parallelFor<HintsT>(first, last, fn); });
 }
 
 /// Build an empty-fan-out comparison table for a single `j` value.
@@ -154,27 +159,35 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
       "citor::ThreadPool[Static]", participants, cal));
   table.rows.push_back(measureCitorEmptyFanoutWithHint<citor::DynamicHints>(
       "citor::ThreadPool[Dynamic]", participants, cal));
-  table.rows.push_back(measureEmptyFanout<BS::light_thread_pool>(participants, cal));
-  table.rows.push_back(measureEmptyFanout<dp::thread_pool<>>(participants, cal));
-  table.rows.push_back(measureEmptyFanout<::task_thread_pool::task_thread_pool>(participants, cal));
-  table.rows.push_back(measureEmptyFanout<riften::Thiefpool>(participants, cal));
+  table.rows.push_back(
+      measureEmptyFanout<BS::light_thread_pool>(participants, cal));
+  table.rows.push_back(
+      measureEmptyFanout<dp::thread_pool<>>(participants, cal));
+  table.rows.push_back(measureEmptyFanout<::task_thread_pool::task_thread_pool>(
+      participants, cal));
+  table.rows.push_back(
+      measureEmptyFanout<riften::Thiefpool>(participants, cal));
 #ifdef CITOR_BENCH_HAS_TBB
-  table.rows.push_back(measureEmptyFanout<::tbb::task_arena>(participants, cal));
+  table.rows.push_back(
+      measureEmptyFanout<::tbb::task_arena>(participants, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_TASKFLOW
   table.rows.push_back(measureEmptyFanout<::tf::Executor>(participants, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_EIGEN_THREADPOOL
-  table.rows.push_back(measureEmptyFanout<::Eigen::ThreadPool>(participants, cal));
+  table.rows.push_back(
+      measureEmptyFanout<::Eigen::ThreadPool>(participants, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
   table.rows.push_back(measureEmptyFanout<OpenMpRunner>(participants, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_LEOPARD
-  table.rows.push_back(measureEmptyFanout<hmthrp::ThreadPool>(participants, cal));
+  table.rows.push_back(
+      measureEmptyFanout<hmthrp::ThreadPool>(participants, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_DISPENSO
-  table.rows.push_back(measureEmptyFanout<dispenso::ThreadPool>(participants, cal));
+  table.rows.push_back(
+      measureEmptyFanout<dispenso::ThreadPool>(participants, cal));
 #endif
 
   return table;
@@ -187,7 +200,8 @@ BenchTable runEmptyFanoutJ16Hot(const CyclesPerNanosecond &cal) {
 }
 
 /// Bench runner for the j=8 hot variant; covers the canonical mid-tier
-/// representative shape so the harness's multi-`j` story is exercised end-to-end.
+/// representative shape so the harness's multi-`j` story is exercised
+/// end-to-end.
 BenchTable runEmptyFanoutJ8Hot(const CyclesPerNanosecond &cal) {
   return buildTable(/*participants=*/8, "j8_hot", cal);
 }
@@ -202,9 +216,12 @@ BenchTable runEmptyFanoutJ2Hot(const CyclesPerNanosecond &cal) {
 /// with the bench driver in registration order.
 struct EmptyFanoutRegistrar {
   EmptyFanoutRegistrar() {
-    registerWorkload({.name = "empty_fan_out_j2_hot", .run = &runEmptyFanoutJ2Hot});
-    registerWorkload({.name = "empty_fan_out_j8_hot", .run = &runEmptyFanoutJ8Hot});
-    registerWorkload({.name = "empty_fan_out_j16_hot", .run = &runEmptyFanoutJ16Hot});
+    registerWorkload(
+        {.name = "empty_fan_out_j2_hot", .run = &runEmptyFanoutJ2Hot});
+    registerWorkload(
+        {.name = "empty_fan_out_j8_hot", .run = &runEmptyFanoutJ8Hot});
+    registerWorkload(
+        {.name = "empty_fan_out_j16_hot", .run = &runEmptyFanoutJ16Hot});
   }
 };
 

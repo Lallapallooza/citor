@@ -52,16 +52,19 @@ namespace citor::bench {
 ///
 /// The trait is consumed by `recursiveSpawn` below; specializing it for a new
 /// pool is the contract for adding it to the recursive-fork-join benches.
-template <class Pool> struct RecursiveForkJoinTraits {
+template <class Pool>
+struct RecursiveForkJoinTraits {
   static constexpr bool supportsRecursiveSpawn = false;
 };
 
-template <> struct RecursiveForkJoinTraits<::citor::ThreadPool> {
+template <>
+struct RecursiveForkJoinTraits<::citor::ThreadPool> {
   static constexpr bool supportsRecursiveSpawn = true;
 };
 
 #ifdef CITOR_BENCH_HAS_TBB
-template <> struct RecursiveForkJoinTraits<::tbb::task_arena> {
+template <>
+struct RecursiveForkJoinTraits<::tbb::task_arena> {
   static constexpr bool supportsRecursiveSpawn = true;
 };
 #endif
@@ -71,7 +74,8 @@ template <> struct RecursiveForkJoinTraits<::tbb::task_arena> {
 // the trait can specialize without dragging the OpenMP shim's full header
 // into every TU that pulls this helper.
 struct OpenMpRunner;
-template <> struct RecursiveForkJoinTraits<OpenMpRunner> {
+template <>
+struct RecursiveForkJoinTraits<OpenMpRunner> {
   static constexpr bool supportsRecursiveSpawn = true;
 };
 #endif
@@ -82,7 +86,8 @@ template <> struct RecursiveForkJoinTraits<OpenMpRunner> {
 // helper template surfaces the constraint at compile time: callers pass
 // `tf::Subflow*` rather than the executor itself, and `recursiveSpawn` keys
 // off this specialization.
-template <> struct RecursiveForkJoinTraits<::tf::Subflow> {
+template <>
+struct RecursiveForkJoinTraits<::tf::Subflow> {
   static constexpr bool supportsRecursiveSpawn = true;
 };
 #endif
@@ -91,11 +96,12 @@ template <> struct RecursiveForkJoinTraits<::tf::Subflow> {
 // dispenso supports recursive spawn via `dispenso::TaskSet::schedule` from
 // inside a worker; the TaskSet destructor coordinates with the worker's
 // scheduler so the parent task yields scheduling rights to its children.
-// Verified empirically against a fib(22) probe (`scratch/forkjoin_dispenso_probe.cpp`):
-// recursive `TaskSet::schedule(...)` inside a worker completes without
-// deadlock, unlike Leopard's `dispatch` which blocks the calling worker on a
-// future and livelocks the global queue.
-template <> struct RecursiveForkJoinTraits<::dispenso::ThreadPool> {
+// Verified empirically against a fib(22) probe
+// (`scratch/forkjoin_dispenso_probe.cpp`): recursive `TaskSet::schedule(...)`
+// inside a worker completes without deadlock, unlike Leopard's `dispatch` which
+// blocks the calling worker on a future and livelocks the global queue.
+template <>
+struct RecursiveForkJoinTraits<::dispenso::ThreadPool> {
   static constexpr bool supportsRecursiveSpawn = true;
 };
 #endif
@@ -106,7 +112,8 @@ namespace detail {
 /// actually instantiated; relying on `false` directly would fire even on the
 /// supported specializations because the assert is evaluated unconditionally
 /// during template definition.
-template <class> struct AlwaysFalse : std::false_type {};
+template <class>
+struct AlwaysFalse : std::false_type {};
 
 } // namespace detail
 
@@ -131,14 +138,16 @@ struct DefaultRecursiveSpawnHints {
 /// deliberately instructive ("use a different bench shape") rather than
 /// generic so the substitution rationale is visible at the call site.
 ///
-/// Pool  Pool type satisfying `RecursiveForkJoinTraits<Pool>::supportsRecursiveSpawn`.
-/// Body  Callable invoked as `body(pool)` for each child.
-/// pool  Pool reference passed to each child body.
-/// body  Body to spawn twice; not moved (called twice).
-template <class Pool, class Body> inline void recursiveSpawn(Pool &pool, Body &&body) {
+/// Pool  Pool type satisfying
+/// `RecursiveForkJoinTraits<Pool>::supportsRecursiveSpawn`. Body  Callable
+/// invoked as `body(pool)` for each child. pool  Pool reference passed to each
+/// child body. body  Body to spawn twice; not moved (called twice).
+template <class Pool, class Body>
+inline void recursiveSpawn(Pool &pool, Body &&body) {
   if constexpr (!RecursiveForkJoinTraits<Pool>::supportsRecursiveSpawn) {
-    static_assert(detail::AlwaysFalse<Pool>::value,
-                  "Pool does not support recursive spawn; use a different bench shape.");
+    static_assert(
+        detail::AlwaysFalse<Pool>::value,
+        "Pool does not support recursive spawn; use a different bench shape.");
   } else if constexpr (std::is_same_v<Pool, ::citor::ThreadPool>) {
     // citor's `forkJoin` runs both children with the producer as slot 0; the
     // wait drains the local queue so depth is bounded only by stack size.
@@ -206,17 +215,18 @@ template <class Pool, class Body> inline void recursiveSpawn(Pool &pool, Body &&
 /// `supportsRecursiveSpawn == false` fail to compile, with a diagnostic
 /// pointing at the alternative bench shape.
 ///
-/// Pool   Pool type satisfying `RecursiveForkJoinTraits<Pool>::supportsRecursiveSpawn`.
-/// Left   Callable invoked as `left(pool)`; runs once on the left child.
-/// Right  Callable invoked as `right(pool)`; runs once on the right child.
-/// pool   Pool reference passed to both child bodies.
-/// left   Left-child body; not moved (called once).
-/// right  Right-child body; not moved (called once).
+/// Pool   Pool type satisfying
+/// `RecursiveForkJoinTraits<Pool>::supportsRecursiveSpawn`. Left   Callable
+/// invoked as `left(pool)`; runs once on the left child. Right  Callable
+/// invoked as `right(pool)`; runs once on the right child. pool   Pool
+/// reference passed to both child bodies. left   Left-child body; not moved
+/// (called once). right  Right-child body; not moved (called once).
 template <class Pool, class Left, class Right>
 inline void recursiveSpawn2(Pool &pool, Left &&left, Right &&right) {
   if constexpr (!RecursiveForkJoinTraits<Pool>::supportsRecursiveSpawn) {
-    static_assert(detail::AlwaysFalse<Pool>::value,
-                  "Pool does not support recursive spawn; use a different bench shape.");
+    static_assert(
+        detail::AlwaysFalse<Pool>::value,
+        "Pool does not support recursive spawn; use a different bench shape.");
   } else if constexpr (std::is_same_v<Pool, ::citor::ThreadPool>) {
     pool.template forkJoin<DefaultRecursiveSpawnHints>([&]() { left(pool); },
                                                        [&]() { right(pool); });
@@ -257,29 +267,34 @@ inline void recursiveSpawn2(Pool &pool, Left &&left, Right &&right) {
 #endif
 }
 
-/// Recursively spawn |n| distinct children indexed `[0, n)` and wait for all to join.
+/// Recursively spawn |n| distinct children indexed `[0, n)` and wait for all to
+/// join.
 ///
-/// N-way sibling of `recursiveSpawn2` for divide-and-conquer workloads where the natural
-/// fan-out is data-dependent (UTS geometric branching, k-way merge sort partitions). Bisecting
-/// those down to two stealable units artificially caps parallel decomposition at `2^depth`
-/// instead of `b0^depth`; libfork's published UTS win is essentially this asymmetry.
+/// N-way sibling of `recursiveSpawn2` for divide-and-conquer workloads where
+/// the natural fan-out is data-dependent (UTS geometric branching, k-way merge
+/// sort partitions). Bisecting those down to two stealable units artificially
+/// caps parallel decomposition at `2^depth` instead of `b0^depth`; libfork's
+/// published UTS win is essentially this asymmetry.
 ///
-/// The body is invoked as `body(pool, i)` for `i` in `[0, n)`. Each invocation is a separate
-/// stealable task on pools that support N-way fan-out natively; pools without an N-way primitive
-/// fall back to a loop of single-task spawns inside one task-set / arena.
+/// The body is invoked as `body(pool, i)` for `i` in `[0, n)`. Each invocation
+/// is a separate stealable task on pools that support N-way fan-out natively;
+/// pools without an N-way primitive fall back to a loop of single-task spawns
+/// inside one task-set / arena.
 ///
-/// Pool  Pool type satisfying `RecursiveForkJoinTraits<Pool>::supportsRecursiveSpawn`.
-/// Body  Callable invoked as `body(pool, i)`.
-/// pool  Pool reference passed to each child body.
+/// Pool  Pool type satisfying
+/// `RecursiveForkJoinTraits<Pool>::supportsRecursiveSpawn`. Body  Callable
+/// invoked as `body(pool, i)`. pool  Pool reference passed to each child body.
 /// n     Task count.
 /// body  Body invoked once per task index.
 template <class Pool, class Body>
 inline void recursiveSpawnN(Pool &pool, std::size_t n, Body &&body) {
   if constexpr (!RecursiveForkJoinTraits<Pool>::supportsRecursiveSpawn) {
-    static_assert(detail::AlwaysFalse<Pool>::value,
-                  "Pool does not support recursive spawn; use a different bench shape.");
+    static_assert(
+        detail::AlwaysFalse<Pool>::value,
+        "Pool does not support recursive spawn; use a different bench shape.");
   } else if constexpr (std::is_same_v<Pool, ::citor::ThreadPool>) {
-    // citor's runtime-N forkJoinAll: stack-allocates up to 32 tasks, heap-spills beyond.
+    // citor's runtime-N forkJoinAll: stack-allocates up to 32 tasks,
+    // heap-spills beyond.
     pool.template forkJoinAll<DefaultRecursiveSpawnHints>(
         n, [&](std::size_t i) { body(pool, i); });
   }
