@@ -6,6 +6,11 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(
+    FILES "${PROJECT_SOURCE_DIR}/single_include/citor.hpp"
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    OPTIONAL
+)
 install(TARGETS citor EXPORT citor-targets)
 install(
     EXPORT citor-targets
