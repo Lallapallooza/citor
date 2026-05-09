@@ -186,7 +186,7 @@ inline Topology detectTopology() {
     const std::uint32_t scanLimit =
         topo.logicalCount < cpuMax ? topo.logicalCount : cpuMax;
     for (std::uint32_t cpu = 0; cpu < scanLimit; ++cpu) {
-      if (CPU_ISSET(static_cast<int>(cpu), &mask)) {
+      if (CPU_ISSET(static_cast<std::size_t>(cpu), &mask)) {
         allowed.push_back(cpu);
       }
     }
@@ -376,7 +376,7 @@ inline void bindAffinityOnce(std::uint32_t cpuId) noexcept {
 #ifdef __linux__
   cpu_set_t set;
   CPU_ZERO(&set);
-  CPU_SET(static_cast<int>(cpuId), &set);
+  CPU_SET(static_cast<std::size_t>(cpuId), &set);
   (void)pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
 #else
   (void)cpuId;

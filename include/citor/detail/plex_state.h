@@ -127,7 +127,7 @@ struct PlexState {
   /// `(lo, hi)` pair denoting the slot's contiguous range over `[0, n)`.
   [[nodiscard]] std::pair<std::size_t, std::size_t>
   slotRange(std::uint32_t slot) const noexcept {
-    using u128 = unsigned __int128;
+    __extension__ using u128 = unsigned __int128;
     const std::size_t lo =
         static_cast<std::size_t>((static_cast<u128>(n) * slot) / participants);
     const std::size_t hi = static_cast<std::size_t>(

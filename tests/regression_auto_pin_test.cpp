@@ -48,7 +48,7 @@ TEST(
   ASSERT_EQ(pthread_getaffinity_np(pthread_self(), sizeof(after), &after), 0);
 
   bool match = true;
-  for (int i = 0; i < CPU_SETSIZE; ++i) {
+  for (std::size_t i = 0; i < static_cast<std::size_t>(CPU_SETSIZE); ++i) {
     if (CPU_ISSET(i, &before) != CPU_ISSET(i, &after)) {
       match = false;
       break;

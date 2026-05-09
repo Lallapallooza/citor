@@ -324,7 +324,9 @@ inline double bootstrapMedianCiPercent(std::vector<double> samples,
       resample[i] = samples[pick(rng)];
     }
     std::nth_element(resample.begin(),
-                     resample.begin() + (resample.size() / 2U), resample.end());
+                     resample.begin() +
+                         static_cast<std::ptrdiff_t>(resample.size() / 2U),
+                     resample.end());
     medians.push_back(resample[resample.size() / 2U]);
   }
   std::sort(medians.begin(), medians.end());

@@ -23,7 +23,7 @@ std::size_t allowedLogicalCpus() noexcept {
     return std::thread::hardware_concurrency();
   }
   std::size_t count = 0;
-  for (int i = 0; i < CPU_SETSIZE; ++i) {
+  for (std::size_t i = 0; i < static_cast<std::size_t>(CPU_SETSIZE); ++i) {
     if (CPU_ISSET(i, &mask)) {
       ++count;
     }
@@ -127,7 +127,7 @@ TEST(ThreadPoolLifecycleConstruction,
   CPU_ZERO(&mask);
   ASSERT_EQ(sched_getaffinity(0, sizeof(mask), &mask), 0);
   std::size_t allowed = 0;
-  for (int i = 0; i < CPU_SETSIZE; ++i) {
+  for (std::size_t i = 0; i < static_cast<std::size_t>(CPU_SETSIZE); ++i) {
     if (CPU_ISSET(i, &mask)) {
       ++allowed;
     }

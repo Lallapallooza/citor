@@ -71,7 +71,7 @@ void backToBack() {
   }
 }
 
-}  // namespace
+} // namespace
 
 TEST(RegressionBackToBackDispatch,
      AlternatingHintsKindsProduceMatchingOutputsUnderOversubscription) {

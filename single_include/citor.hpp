@@ -2,8 +2,8 @@
 //
 // citor -- header-only C++20 thread pool
 // version: 0.1.0
-// commit:  912469bdc19054fa2cc76018a726bc23e84eaadc
-// generated: 2026-05-09
+// commit:  0d7997e93d718404832555d55b82939d03a6154c
+// generated: 2026-05-10
 //
 // GENERATED FILE -- DO NOT EDIT.
 // Run `python tools/amalgamate.py` to regenerate.
@@ -1079,7 +1079,7 @@ inline Topology detectTopology() {
     const std::uint32_t scanLimit =
         topo.logicalCount < cpuMax ? topo.logicalCount : cpuMax;
     for (std::uint32_t cpu = 0; cpu < scanLimit; ++cpu) {
-      if (CPU_ISSET(static_cast<int>(cpu), &mask)) {
+      if (CPU_ISSET(static_cast<std::size_t>(cpu), &mask)) {
         allowed.push_back(cpu);
       }
     }
@@ -1269,7 +1269,7 @@ inline void bindAffinityOnce(std::uint32_t cpuId) noexcept {
 #ifdef __linux__
   cpu_set_t set;
   CPU_ZERO(&set);
-  CPU_SET(static_cast<int>(cpuId), &set);
+  CPU_SET(static_cast<std::size_t>(cpuId), &set);
   (void)pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
 #else
   (void)cpuId;
@@ -2055,7 +2055,7 @@ struct ChainState {
   /// `(lo, hi)` pair denoting the slot's contiguous range over `[0, n)`.
   [[nodiscard]] std::pair<std::size_t, std::size_t>
   slotRange(std::uint32_t slot) const noexcept {
-    using u128 = unsigned __int128;
+    __extension__ using u128 = unsigned __int128;
     const std::size_t lo =
         static_cast<std::size_t>((static_cast<u128>(n) * slot) / participants);
     const std::size_t hi = static_cast<std::size_t>(
@@ -3045,7 +3045,7 @@ struct PlexState {
   /// `(lo, hi)` pair denoting the slot's contiguous range over `[0, n)`.
   [[nodiscard]] std::pair<std::size_t, std::size_t>
   slotRange(std::uint32_t slot) const noexcept {
-    using u128 = unsigned __int128;
+    __extension__ using u128 = unsigned __int128;
     const std::size_t lo =
         static_cast<std::size_t>((static_cast<u128>(n) * slot) / participants);
     const std::size_t hi = static_cast<std::size_t>(
@@ -3487,7 +3487,7 @@ struct ScanState {
   /// `(lo, hi)` pair denoting the slot's contiguous range over `[0, n)`.
   [[nodiscard]] std::pair<std::size_t, std::size_t>
   slotRange(std::uint32_t slot) const noexcept {
-    using u128 = unsigned __int128;
+    __extension__ using u128 = unsigned __int128;
     const std::size_t lo =
         static_cast<std::size_t>((static_cast<u128>(n) * slot) / participants);
     const std::size_t hi = static_cast<std::size_t>(
@@ -4793,7 +4793,7 @@ private:
     }
     cpu_set_t set;
     CPU_ZERO(&set);
-    CPU_SET(static_cast<int>(cpuId), &set);
+    CPU_SET(static_cast<std::size_t>(cpuId), &set);
     if (pthread_setaffinity_np(pthread_self(), sizeof(set), &set) == 0) {
       // Only capture `saved` when no prior pool has already done so on this
       // thread. Otherwise the prior pool's saved record is the right one to
@@ -5224,25 +5224,25 @@ public:
           "/sys/devices/system/cpu/cpu" + std::to_string(cpuId) +
           "/topology/thread_siblings_list");
       bool siblingExposed = false;
+      cpu_set_t set;
       for (const std::uint32_t sib : siblings) {
         if (sib == cpuId) {
           continue;
         }
-        if (CPU_ISSET(static_cast<int>(sib), &m_saved)) {
+        if (CPU_ISSET(static_cast<std::size_t>(sib), &m_saved)) {
           continue;
         }
         siblingExposed = true;
         break;
       }
-      cpu_set_t set;
       CPU_ZERO(&set);
       if (!siblingExposed) {
-        CPU_SET(static_cast<int>(cpuId), &set);
+        CPU_SET(static_cast<std::size_t>(cpuId), &set);
       } else if (cpuId < topo.ccdOfCpu.size()) {
         const std::uint32_t ccd = topo.ccdOfCpu[cpuId];
         if (ccd < topo.ccdGroups.size()) {
           for (const std::uint32_t peer : topo.ccdGroups[ccd]) {
-            if (!CPU_ISSET(static_cast<int>(peer), &m_saved)) {
+            if (!CPU_ISSET(static_cast<std::size_t>(peer), &m_saved)) {
               continue;
             }
             bool isWorkerPin = false;
@@ -5255,13 +5255,13 @@ public:
             if (isWorkerPin) {
               continue;
             }
-            CPU_SET(static_cast<int>(peer), &set);
+            CPU_SET(static_cast<std::size_t>(peer), &set);
           }
         }
         if (CPU_COUNT(&set) == 0) {
           // Every CCD peer is either out-of-mask or worker-pinned; fall back to
           // the single-CPU pin on the producer's reserved slot.
-          CPU_SET(static_cast<int>(cpuId), &set);
+          CPU_SET(static_cast<std::size_t>(cpuId), &set);
         }
       } else {
         return;
@@ -8998,8 +8998,8 @@ private:
   // `1 / 2^32` per bucket, irrelevant for victim selection. |n| must be
   // non-zero.
   static std::uint32_t fastRange32(std::uint64_t x, std::uint32_t n) noexcept {
-    return static_cast<std::uint32_t>(
-        (static_cast<unsigned __int128>(x >> 32) * n) >> 32);
+    __extension__ using u128 = unsigned __int128;
+    return static_cast<std::uint32_t>((static_cast<u128>(x >> 32) * n) >> 32);
   }
 
   // Common job-publish/join helper used by the reduce paths. Builds a
