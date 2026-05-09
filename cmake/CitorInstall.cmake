@@ -11,9 +11,9 @@ install(
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     OPTIONAL
 )
-install(TARGETS citor EXPORT citor-targets)
+install(TARGETS citor EXPORT citorTargets)
 install(
-    EXPORT citor-targets
+    EXPORT citorTargets
     FILE citorTargets.cmake
     NAMESPACE citor::
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/citor
