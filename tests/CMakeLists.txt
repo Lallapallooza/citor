@@ -83,8 +83,13 @@ set(_citor_tests
     thread_pool_tsan_stress_test
 )
 
+set(_citor_test_extra_sources)
+if(CITOR_BUILD_WITH_SANITIZER)
+    list(APPEND _citor_test_extra_sources tsan_default_options.cpp)
+endif()
+
 foreach(_t IN LISTS _citor_tests)
-    add_executable(${_t} ${_t}.cpp)
+    add_executable(${_t} ${_t}.cpp ${_citor_test_extra_sources})
     target_link_libraries(${_t} PRIVATE citor::citor GTest::gtest_main)
     if(CITOR_IS_TOP_LEVEL)
         target_link_libraries(${_t} PRIVATE citor_warnings)
@@ -94,3 +99,49 @@ foreach(_t IN LISTS _citor_tests)
     endif()
     gtest_discover_tests(${_t})
 endforeach()
+
+# `TSAN_OPTIONS` applied to every TSan-built test:
+#   * `second_deadlock_stack=1` emits the second mutex-acquisition frame
+#     on lock-order diagnostics.
+#   * `print_full_thread_history=1` shows thread-creation stacks for every
+#     thread named in a report.
+#   * `atexit_sleep_ms=0` skips the runtime's unused post-exit pause.
+#   * `external_symbolizer_path` points at the resolved `llvm-symbolizer-*`
+#     binary so frames resolve to `file:line` under ctest's sanitized
+#     environment.
+#
+# `FAIL_REGULAR_EXPRESSION` matches every TSan summary header (data race,
+# lock-order inversion, thread leak) so a TSan report fails the test even
+# when the process exits 0.
+if(CITOR_BUILD_WITH_SANITIZER)
+    find_program(
+        LLVM_SYMBOLIZER_EXE
+        NAMES
+            llvm-symbolizer-21
+            llvm-symbolizer-20
+            llvm-symbolizer-19
+            llvm-symbolizer-18
+            llvm-symbolizer
+    )
+    set(_citor_tsan_options
+        "halt_on_error=0:second_deadlock_stack=1:print_full_thread_history=1:atexit_sleep_ms=0"
+    )
+    if(LLVM_SYMBOLIZER_EXE)
+        set(_citor_tsan_options
+            "${_citor_tsan_options}:external_symbolizer_path=${LLVM_SYMBOLIZER_EXE}"
+        )
+    endif()
+    set(_citor_tsan_fail_regex
+        "WARNING: ThreadSanitizer;ThreadSanitizer: data race;ThreadSanitizer: lock-order-inversion;ThreadSanitizer: thread leak"
+    )
+    get_property(_citor_all_tests DIRECTORY PROPERTY TESTS)
+    foreach(_test IN LISTS _citor_all_tests)
+        set_tests_properties(
+            ${_test}
+            PROPERTIES
+                ENVIRONMENT "TSAN_OPTIONS=${_citor_tsan_options}"
+                FAIL_REGULAR_EXPRESSION "${_citor_tsan_fail_regex}"
+                TIMEOUT 120
+        )
+    endforeach()
+endif()

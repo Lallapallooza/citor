@@ -37,9 +37,12 @@ if(CITOR_ENABLE_POOL_COUNTERS)
 endif()
 
 if(CITOR_BUILD_WITH_SANITIZER)
+    # `-g` is required even in Release: without DWARF debug info, TSan stack
+    # traces resolve to `<null>` instead of `file:line` and the report is
+    # impossible to read.
     target_compile_options(
         citor
-        INTERFACE -fsanitize=thread -fno-omit-frame-pointer
+        INTERFACE -fsanitize=thread -fno-omit-frame-pointer -g
     )
     target_link_options(citor INTERFACE -fsanitize=thread)
 endif()

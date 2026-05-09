@@ -24,6 +24,9 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt-get update
+          # llvm-18 brings `llvm-symbolizer-18`, which TSan picks up for
+          # symbolized stack traces under ctest's sanitized environment.
+          sudo apt-get install -y llvm-18
           if [[ "${{ matrix.compiler }}" == clang-* ]]; then
             sudo apt-get install -y clang-18 clang-tidy-18 lld-18 ninja-build
             echo "CC=clang-18"  >> "$GITHUB_ENV"
