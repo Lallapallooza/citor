@@ -11,9 +11,7 @@
 #include "citor/hints.h"
 #include "citor/thread_pool.h"
 
-using citor::Balance;
 using citor::CancellationToken;
-using citor::CcdLocalForkJoinHints;
 using citor::forkJoin;
 using citor::HintsDefaults;
 using citor::ThreadPool;

@@ -10,7 +10,6 @@
 
 using citor::Balance;
 using citor::BulkHints;
-using citor::Hints;
 using citor::HintsDefaults;
 using citor::ThreadPool;
 

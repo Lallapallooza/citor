@@ -4,8 +4,6 @@
 
 #include "citor/thread_pool.h"
 
-using citor::ThreadPool;
-
 // Optional TSan stress: 10000 randomized construct/destroy cycles. Compiles in
 // only under a ThreadSanitizer build because under non-TSan builds the loop is
 // overkill for ctest. Under TSan it confirms the destructor's release/acquire
@@ -24,7 +22,7 @@ TEST(ThreadPoolLifecycleTsanStress,
      RandomizedConstructAndDestroyLoopIsRaceFreeUnderTsan) {
   for (int i = 0; i < 10000; ++i) {
     const std::size_t p = static_cast<std::size_t>((i % 8) + 1);
-    const ThreadPool pool(p);
+    const citor::ThreadPool pool(p);
     EXPECT_GE(pool.participants(), 1U);
   }
 }

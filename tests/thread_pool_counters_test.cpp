@@ -5,8 +5,6 @@
 #include "citor/hints.h"
 #include "citor/thread_pool.h"
 
-using citor::ThreadPool;
-
 // `snapshotCounters()` returns zero pool-level fields unless
 // `CITOR_ENABLE_POOL_COUNTERS` was defined at build time. When defined,
 // dispatches advance per fan-out and inlineFallbacks advances per `runInline`
@@ -14,7 +12,7 @@ using citor::ThreadPool;
 TEST(ThreadPoolLifecycleCounters,
      DispatchAndInlineFallbackCountersAdvanceMonotonicallyPerCall) {
 #ifdef CITOR_ENABLE_POOL_COUNTERS
-  ThreadPool pool(4);
+  citor::ThreadPool pool(4);
   const auto before = pool.snapshotCounters();
   for (int i = 0; i < 16; ++i) {
     pool.parallelFor<citor::DynamicHints>(
@@ -23,7 +21,7 @@ TEST(ThreadPoolLifecycleCounters,
   const auto after = pool.snapshotCounters();
   EXPECT_GE(after.dispatches, before.dispatches + 16U);
 
-  ThreadPool solo(1);
+  citor::ThreadPool solo(1);
   const auto soloBefore = solo.snapshotCounters();
   for (int i = 0; i < 8; ++i) {
     solo.parallelFor<citor::DynamicHints>(

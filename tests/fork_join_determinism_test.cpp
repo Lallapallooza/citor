@@ -9,7 +9,6 @@
 #include "citor/hints.h"
 #include "citor/thread_pool.h"
 
-using citor::Balance;
 using citor::HintsDefaults;
 using citor::ThreadPool;
 
