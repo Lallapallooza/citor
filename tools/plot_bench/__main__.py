@@ -10,6 +10,7 @@ from tools.plot_bench.loader import derive_family, load_export
 from tools.plot_bench.plot import (
     WorkloadFigureInputs,
     build_family_geomean_figure,
+    build_family_heatmap_figure,
     build_family_scatter_figure,
     build_losses_figure,
     build_overview_figure,
@@ -126,6 +127,11 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_overview and len(matched) > 1:
         fig = build_overview_figure(filtered, context, baseline_pool_prefix=args.baseline)
         out_path = out_dir / "_overview.svg"
+        _save(fig, out_path)
+        written.append(out_path)
+
+        fig = build_family_heatmap_figure(filtered, context, citor_pool=args.baseline)
+        out_path = out_dir / "_family_heatmap.svg"
         _save(fig, out_path)
         written.append(out_path)
 

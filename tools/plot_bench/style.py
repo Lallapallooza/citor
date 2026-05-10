@@ -37,6 +37,14 @@ TIME_TICK_LATTICE_NS: tuple[float, ...] = (
 )
 
 
+def _half_decade_lattice(lattice: Sequence[float]) -> list[float]:
+    """Interleave `2 x decade` and `5 x decade` between every pair of decades."""
+    out: list[float] = []
+    for v in lattice:
+        out.extend([v, 2.0 * v, 5.0 * v])
+    return sorted(set(out))
+
+
 def pick_log_ticks(
     lattice: Sequence[float],
     lo: float,
@@ -44,8 +52,19 @@ def pick_log_ticks(
     *,
     target_max: int = 7,
 ) -> list[float]:
-    """Pick major ticks from `lattice` inside `[lo, hi]`, thinned to `target_max`."""
+    """Pick major ticks from `lattice` inside `[lo, hi]`, thinned to `target_max`.
+
+    Falls back to a half-decade lattice (`1, 2, 5, 10, 20, 50, ...`) when fewer
+    than three decade ticks land in `[lo, hi]`; without the fallback narrow
+    ranges like `[10us, 100us]` rendered with a single tick, leaving the axis
+    near-blank.
+    """
     in_range = [t for t in lattice if lo <= t <= hi]
+    if len(in_range) < 3:
+        dense = _half_decade_lattice(lattice)
+        dense_in = [t for t in dense if lo <= t <= hi]
+        if len(dense_in) >= len(in_range):
+            in_range = dense_in
     if not in_range:
         below = [t for t in lattice if t < lo]
         above = [t for t in lattice if t > hi]

@@ -113,7 +113,17 @@ Numbers age out on every microarchitecture and compiler bump. The shape is what'
 - **Persistent-worker amortisation.** `runPlex` collapses N phases into one dispatch; per-phase overhead drops from a futex round-trip to a user-space rendezvous spin (typically a few hundred nanoseconds depending on participant count and contention).
 - **Inline fallback.** When `n * estimatedItemNs * 1e-3 < minTaskUs * participants`, the pool runs the call inline on the producer with zero wake. Set `minTaskUs > 0` and a non-zero `estimatedItemNs` on hot paths where the dispatch floor matters.
 
-The charts below are the per-family geomean from one run of `parallel_bench` on a 16-core Zen 5 CCD (governor=performance, boost off, ten peer pools). Lower is faster.
+The charts below are from one run of `parallel_bench` on a 16-core Zen 5 CCD (governor=performance, boost off, ten peer pools). Lower is faster.
+
+**Cross-suite summary** -- per-peer survival of citor's speedup ratios across every (workload, peer) cell. The Y value at X=k is the fraction of cells where citor is at least k times faster than that peer; the dot at the parity line is each peer's win-rate.
+
+[`docs/charts/overview.svg`](docs/charts/overview.svg)
+
+**Family scorecard** -- per-(family, peer) geomean speedup heatmap; cell colour is `log10(speedup)` on a diverging palette centred at parity. Marginal strips show the per-peer and per-family rollups.
+
+[`docs/charts/family_heatmap.svg`](docs/charts/family_heatmap.svg)
+
+**Per-family geomean** drill-downs:
 
 | family | what's measured | chart |
 |---|---|---|

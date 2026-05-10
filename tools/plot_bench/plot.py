@@ -23,8 +23,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from matplotlib.backends.backend_svg import FigureCanvasSVG
+from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
+from matplotlib.patches import Rectangle
 from matplotlib.ticker import FixedLocator, FuncFormatter, NullLocator
 
 from tools.plot_bench import style
@@ -42,24 +44,22 @@ class WorkloadFigureInputs:
 _BASELINE_LINE_COLOR = "#0072B2"
 
 # Vendor prefixes used to canonicalise pool variant names to one row per
-# competitor. Order matters: longer prefixes must come before shorter ones so
-# `Taskflow::Subflow` is matched before `Taskflow`. A pool name `P` is
-# canonicalised to the first prefix `K` such that `P == K`, `P.startswith(K +
-# "[")`, `P.startswith(K + "::")`, or `P.startswith(K + " ")`.
+# competitor. A pool name `P` is canonicalised to the first prefix `K` such
+# that `P == K`, `P.startswith(K + "[")`, `P.startswith(K + "::")`, or
+# `P.startswith(K + " ")`. The list is intentionally one entry per vendor:
+# `Leopard`, `Taskflow`, and `dispenso` cover their `::ThreadPool`,
+# `::Subflow`, `::dispatch`, etc. sub-variants by prefix match. citor is
+# special-cased into `citor::ThreadPool` (baseline) and `citor::PoolGroup`
+# (excluded from peer comparisons via `_is_peer`).
 _VENDOR_PREFIXES: tuple[str, ...] = (
     "citor::ThreadPool",
     "citor::PoolGroup",
     "BS::thread_pool",
     "Eigen::ThreadPool",
-    "Leopard::ThreadPool",
-    "Leopard::dispatch",
     "Leopard",
     "OpenMP",
     "Sequential",
-    "Taskflow::Subflow",
     "Taskflow",
-    "dispenso::ThreadPool",
-    "dispenso::parallel_for",
     "dispenso",
     "dp::thread_pool",
     "libfork",
@@ -237,12 +237,12 @@ def build_workload_figure(inputs: WorkloadFigureInputs) -> Figure:
                 continue
             ratio = median / baseline_median
             label = _format_ratio(ratio)
-            color = style.MUTED if pool == baseline_pool else style.TEXT
+            color = style.MUTED if 0.95 <= ratio < 1.05 else style.TEXT
             ax.annotate(
                 label,
                 xy=(1.005, y_idx),
                 xycoords=("axes fraction", "data"),
-                xytext=(0, 0),
+                xytext=(4, 0),
                 textcoords="offset points",
                 fontsize=9.0,
                 color=color,
@@ -266,97 +266,137 @@ def build_overview_figure(
     *,
     baseline_pool_prefix: str = "citor::ThreadPool",
 ) -> Figure:
-    """Cross-workload overview: per workload, peer dots laid out by median-ratio.
+    """Per-peer survival curves over (workload, peer) speedup ratios.
 
-    Pool variants are canonicalised to one dot per vendor (the fastest variant);
-    `Sequential` is excluded as a peer. The citor baseline is the fastest
-    variant whose canonical name equals `baseline_pool_prefix`.
+    For each canonical peer vendor, plot the empirical survival function of
+    `peer_median / citor_median` across every workload where that peer
+    competes. The Y value at X=k is the fraction of cells where citor is at
+    least `k` times faster than that peer. The Y value at X=1.0 is the peer's
+    win-rate (fraction of cells where citor wins).
+
+    A flat-and-high curve means citor dominates the peer; a steep early drop
+    means the peer is close to citor across the suite. The chart is one fixed
+    size regardless of workload count -- it scales with peer count, not with
+    cell count, which is why the previous one-row-per-workload overview was
+    unreadable at 90+ workloads.
     """
     if samples.empty:
         return _build_empty_figure("citor benchmark overview", "no samples")
 
-    workloads = sorted(samples["workload"].drop_duplicates().tolist())
-    rows: list[tuple[str, str, float, float]] = []
     medians_by_workload = _medians_by_workload(samples)
-    for workload in workloads:
-        by_pool = medians_by_workload.get(workload, {})
+    by_peer: dict[str, list[float]] = collections.defaultdict(list)
+    for by_pool in medians_by_workload.values():
         canonical = _canonical_best_medians(by_pool)
-        baseline_median = canonical.get(baseline_pool_prefix)
-        if baseline_median is None:
+        citor_ns = canonical.get(baseline_pool_prefix)
+        if citor_ns is None or citor_ns <= 0:
             continue
-        for pool, median in canonical.items():
+        for pool, ns in canonical.items():
             if not _is_peer(pool, baseline_pool_prefix):
                 continue
-            rows.append((workload, pool, median / baseline_median, median))
+            by_peer[pool].append(ns / citor_ns)
 
-    if not rows:
-        return _build_empty_figure("citor benchmark overview", "no baseline matches")
+    if not by_peer:
+        return _build_overview_empty()
 
-    workload_index = {wl: i for i, wl in enumerate(workloads)}
+    win_rate = {p: sum(1 for r in v if r > 1.0) / len(v) for p, v in by_peer.items()}
+    peers = sorted(by_peer, key=lambda p: -win_rate[p])
+    all_ratios = [r for v in by_peer.values() for r in v]
+    lo = max(0.4, min(all_ratios) * 0.95)
+    hi = min(150.0, max(all_ratios) * 1.10)
 
-    n_rows = len(workloads)
-    fig_height = max(5.0, 0.55 * n_rows + 3.2)
-    fig = _new_svg_figure(figsize=(11.0, fig_height))
-    # Cap top/bottom margins so the header at y=0.945 and caption at y=0.045
-    # always have a clear band above and below the data area, even when the
-    # figure is tall (large workload count). Without the cap a 50+ inch figure
-    # leaves header and caption inside the data region.
-    top_frac = min(0.92, 1.0 - (1.4 / fig_height))
-    bottom_frac = max(0.06, 1.0 / fig_height)
-    gs = fig.add_gridspec(
-        nrows=1,
-        ncols=1,
-        left=0.27,
-        right=0.97,
-        top=top_frac,
-        bottom=bottom_frac,
-    )
+    fig = _new_svg_figure(figsize=(11.0, 5.8))
+    gs = fig.add_gridspec(nrows=1, ncols=1, left=0.07, right=0.66, top=0.80, bottom=0.16)
     ax = fig.add_subplot(gs[0, 0])
 
-    _style_axes_overview(ax, workloads)
-    ax.invert_yaxis()
+    ax.set_xscale("log")
+    ax.set_xlim(lo, hi)
+    ax.axvspan(lo, 1.0, color=style.BAND_LOSS, alpha=0.07, zorder=0)
+    ax.axvspan(1.0, hi, color=style.BAND_WIN, alpha=0.06, zorder=0)
+    ax.axvline(1.0, color=_BASELINE_LINE_COLOR, linewidth=1.3, linestyle="--", alpha=0.6, zorder=1)
 
-    for workload, pool, ratio, _ns in rows:
-        y = workload_index[workload]
-        color = style.pool_color(pool)
-        ax.plot(
-            ratio,
-            y,
-            marker="o",
-            markersize=8.0,
-            markerfacecolor=color,
-            markeredgecolor="white",
-            markeredgewidth=1.0,
-            alpha=0.92,
+    for peer in peers:
+        ratios = sorted(by_peer[peer], reverse=True)
+        n = len(ratios)
+        xs = [lo, *ratios, hi]
+        ys = [1.0, *[i / n for i in range(n)], 0.0]
+        ax.step(
+            xs,
+            ys,
+            where="post",
+            color=style.pool_color(peer),
+            linewidth=1.6,
+            alpha=0.9,
             zorder=3,
         )
+        ax.plot(
+            1.0,
+            win_rate[peer],
+            marker="o",
+            markersize=5.5,
+            markerfacecolor=style.pool_color(peer),
+            markeredgecolor="white",
+            markeredgewidth=0.9,
+            zorder=4,
+        )
 
-    ax.axvline(
-        1.0,
-        color=_BASELINE_LINE_COLOR,
-        linewidth=1.3,
-        linestyle="--",
-        alpha=0.6,
-        zorder=1,
+    ax.set_ylim(-0.02, 1.02)
+    ax.yaxis.set_major_locator(FixedLocator([0.0, 0.25, 0.5, 0.75, 1.0]))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{int(v * 100)}%"))
+    ax.xaxis.set_minor_locator(NullLocator())
+    ax.xaxis.set_major_locator(
+        FixedLocator(style.pick_log_ticks([0.5, 0.7, 1.0, 2.0, 5.0, 10.0, 25.0, 100.0], lo, hi))
     )
-    ax.text(
-        1.0,
-        -0.5,
-        "  parity (ratio = 1.0)",
-        color=_BASELINE_LINE_COLOR,
-        fontsize=8.5,
-        fontstyle="italic",
-        ha="left",
-        va="bottom",
-        zorder=5,
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v:g}x"))
+    ax.set_xlabel(
+        "speedup of citor over peer (median ratio)",
+        fontsize=11.0,
+        color=style.TEXT,
+        labelpad=8,
     )
+    ax.set_ylabel(
+        "fraction of cells at this speedup or better",
+        fontsize=11.0,
+        color=style.TEXT,
+        labelpad=8,
+    )
+    _style_minimal_axes(ax, draw_grid=True)
+
+    handles = [
+        Line2D(
+            [0],
+            [0],
+            color=style.pool_color(p),
+            linewidth=2.2,
+            label=f"{p}    win {int(round(win_rate[p] * 100))}%   (n={len(by_peer[p])})",
+        )
+        for p in peers
+    ]
+    legend = fig.legend(
+        handles=handles,
+        loc="center left",
+        bbox_to_anchor=(0.67, 0.50),
+        frameon=False,
+        fontsize=9.0,
+        handlelength=2.2,
+        labelspacing=0.45,
+    )
+    for txt in legend.get_texts():
+        txt.set_color(style.TEXT)
 
     _draw_header(fig, "citor benchmark overview")
-    _draw_subtitle(fig, context)
+    _draw_subtitle(
+        fig,
+        context,
+        suffix=f"{sum(len(v) for v in by_peer.values())} (workload, peer) cells",
+    )
     _draw_header_rule(fig)
     _draw_caption(fig, context)
 
     return fig
+
+
+def _build_overview_empty() -> Figure:
+    return _build_empty_figure("citor benchmark overview", "no peer overlap")
 
 
 def build_family_geomean_figure(
@@ -406,9 +446,25 @@ def build_family_geomean_figure(
     gs = fig.add_gridspec(nrows=1, ncols=1, left=0.30, right=0.95, top=0.80, bottom=0.20)
     ax = fig.add_subplot(gs[0, 0])
     colors = [style.pool_color(pool) for pool in labels]
-    ax.barh(labels, speeds, color=colors, edgecolor="white", linewidth=0.8)
+    ax.barh(labels, speeds, color=colors)
     ax.axvline(1.0, color=_BASELINE_LINE_COLOR, linewidth=1.2, linestyle="--", alpha=0.6)
     ax.set_xscale("log")
+    ax.xaxis.set_minor_locator(NullLocator())
+    ax.xaxis.set_major_locator(
+        FixedLocator([1.0, 1.5, 2.0, 3.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0])
+    )
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v:g}x"))
+    ax.text(
+        1.0,
+        len(labels) - 0.4,
+        "  parity (1x)",
+        color=_BASELINE_LINE_COLOR,
+        fontsize=8.5,
+        fontstyle="italic",
+        ha="left",
+        va="bottom",
+        zorder=5,
+    )
     ax.set_xlabel(
         f"geomean speedup of citor over competitor ({family} workloads)",
         fontsize=11.0,
@@ -453,8 +509,8 @@ def build_family_scatter_figure(
     if not points:
         return _build_empty_figure(f"{family}: per-workload scatter", "no overlapping workloads")
 
-    fig = _new_svg_figure(figsize=(7.5, 6.5))
-    gs = fig.add_gridspec(nrows=1, ncols=1, left=0.13, right=0.97, top=0.82, bottom=0.13)
+    fig = _new_svg_figure(figsize=(9.5, 6.5))
+    gs = fig.add_gridspec(nrows=1, ncols=1, left=0.10, right=0.72, top=0.82, bottom=0.13)
     ax = fig.add_subplot(gs[0, 0])
 
     competitors = sorted({p[1] for p in points})
@@ -500,13 +556,14 @@ def build_family_scatter_figure(
     ax.set_ylabel("citor median ns/op", fontsize=11.0, color=style.TEXT, labelpad=8)
     _style_minimal_axes(ax, draw_grid=True)
 
-    legend = ax.legend(
-        loc="upper left",
-        fontsize=8.5,
+    legend = fig.legend(
+        loc="center left",
+        bbox_to_anchor=(0.74, 0.50),
+        fontsize=9.0,
         frameon=False,
         handlelength=1.6,
         handletextpad=0.5,
-        labelspacing=0.4,
+        labelspacing=0.45,
     )
     for txt in legend.get_texts():
         txt.set_color(style.TEXT)
@@ -516,6 +573,206 @@ def build_family_scatter_figure(
     _draw_header_rule(fig)
     _draw_caption(fig, context)
     return fig
+
+
+def build_family_heatmap_figure(  # noqa: PLR0912, PLR0915
+    samples: pd.DataFrame,
+    context: Context,
+    *,
+    citor_pool: str = "citor::ThreadPool",
+) -> Figure:
+    """Per-(family, peer) geomean speedup heatmap across the whole suite.
+
+    Rows are primitive families (only those with at least one peer overlap),
+    columns are canonical peer vendors. Cell colour is `log10(geomean
+    speedup)` on a diverging palette centred at parity (1.0x); cell text is
+    the speedup value. Empty cells (no overlap between this family and this
+    peer) are hatched. Marginal strips along the top and right show the
+    per-peer and per-family geomeans across the whole row / column.
+
+    Complements the per-peer survival curves in `build_overview_figure`:
+    survival curves answer "across the suite, how often / how much does citor
+    win", and this chart answers "for this family, which peer is hardest".
+    """
+    medians_by_workload = _medians_by_workload(samples)
+    cells: dict[tuple[str, str], list[float]] = collections.defaultdict(list)
+    for workload, by_pool in medians_by_workload.items():
+        canonical = _canonical_best_medians(by_pool)
+        citor_ns = canonical.get(citor_pool)
+        if citor_ns is None or citor_ns <= 0:
+            continue
+        family = derive_family(workload)
+        for pool, ns in canonical.items():
+            if not _is_peer(pool, citor_pool):
+                continue
+            cells[(family, pool)].append(ns / citor_ns)
+
+    if not cells:
+        return _build_empty_figure("citor benchmark family scorecard", "no peer overlap")
+
+    families = sorted({fam for fam, _ in cells})
+    peers = sorted({peer for _, peer in cells})
+
+    geo: dict[tuple[str, str], float] = {}
+    for key, ratios in cells.items():
+        gm = _geomean(ratios)
+        if math.isfinite(gm) and gm > 0:
+            geo[key] = gm
+
+    fam_geo: dict[str, float] = {
+        fam: _geomean([geo[(fam, p)] for p in peers if (fam, p) in geo]) for fam in families
+    }
+    fam_geo = {fam: gm for fam, gm in fam_geo.items() if math.isfinite(gm) and gm > 0}
+    peer_geo: dict[str, float] = {
+        peer: _geomean([geo[(f, peer)] for f in families if (f, peer) in geo]) for peer in peers
+    }
+    peer_geo = {peer: gm for peer, gm in peer_geo.items() if math.isfinite(gm) and gm > 0}
+
+    families = sorted(fam_geo, key=lambda f: -fam_geo[f])
+    peers = sorted(peer_geo, key=lambda p: peer_geo[p])
+    if not families or not peers:
+        return _build_empty_figure("citor benchmark family scorecard", "no peer overlap")
+
+    matrix = np.full((len(families), len(peers)), np.nan)
+    for i, fam in enumerate(families):
+        for j, peer in enumerate(peers):
+            v = geo.get((fam, peer))
+            if v is not None:
+                matrix[i, j] = v
+
+    fig_width = max(9.0, 0.8 * len(peers) + 4.0)
+    fig_height = max(5.5, 0.42 * len(families) + 2.6)
+    fig = _new_svg_figure(figsize=(fig_width, fig_height))
+    gs = fig.add_gridspec(
+        nrows=2,
+        ncols=2,
+        width_ratios=[len(peers), 1],
+        height_ratios=[1, len(families)],
+        left=0.18,
+        right=0.91,
+        top=0.83,
+        bottom=0.16,
+        wspace=0.04,
+        hspace=0.04,
+    )
+    ax_top = fig.add_subplot(gs[0, 0])
+    ax_main = fig.add_subplot(gs[1, 0], sharex=ax_top)
+    ax_right = fig.add_subplot(gs[1, 1], sharey=ax_main)
+
+    cmap = LinearSegmentedColormap.from_list(
+        "citor_div",
+        [style.BAND_LOSS, "#FFFFFF", style.BAND_WIN],
+        N=256,
+    )
+    flat = [v for v in matrix.flatten() if math.isfinite(v) and v > 0]
+    log_max = max(1.5, math.log10(max(flat))) if flat else 1.5
+    log_min = min(-0.4, math.log10(min(flat))) if flat else -0.4
+    norm = TwoSlopeNorm(vmin=log_min, vcenter=0.0, vmax=log_max)
+
+    log_matrix = np.where(np.isfinite(matrix) & (matrix > 0), np.log10(matrix), np.nan)
+    ax_main.imshow(log_matrix, cmap=cmap, norm=norm, aspect="auto", interpolation="nearest")
+
+    for (i, j), cell in np.ndenumerate(matrix):
+        cell_f = float(cell)
+        if not math.isfinite(cell_f) or cell_f <= 0:
+            ax_main.add_patch(
+                Rectangle(
+                    (j - 0.5, i - 0.5),
+                    1,
+                    1,
+                    hatch="///",
+                    facecolor=style.GRID,
+                    edgecolor="white",
+                    linewidth=0.4,
+                    alpha=0.45,
+                )
+            )
+            continue
+        # White text only when the cell is dark enough for contrast; near
+        # parity the cell is white-ish so use TEXT colour.
+        light_cell = abs(math.log10(cell_f)) < 0.35
+        ax_main.text(
+            j,
+            i,
+            _fmt_speedup(cell_f),
+            ha="center",
+            va="center",
+            fontsize=8.5,
+            color=style.TEXT if light_cell else "#0A0E14",
+            zorder=4,
+        )
+
+    ax_main.set_xticks(range(len(peers)))
+    ax_main.set_xticklabels(peers, rotation=30, ha="right", fontsize=9.5, color=style.TEXT)
+    ax_main.set_yticks(range(len(families)))
+    ax_main.set_yticklabels(families, fontsize=10.0, color=style.TEXT)
+    ax_main.tick_params(axis="both", colors=style.MUTED, length=0)
+    for spine in ax_main.spines.values():
+        spine.set_color(style.GRID)
+
+    top_row = np.array([math.log10(peer_geo[p]) for p in peers]).reshape(1, -1)
+    ax_top.imshow(top_row, cmap=cmap, norm=norm, aspect="auto", interpolation="nearest")
+    for j, peer in enumerate(peers):
+        ax_top.text(
+            j,
+            0,
+            _fmt_speedup(peer_geo[peer]),
+            ha="center",
+            va="center",
+            fontsize=8.0,
+            color=style.TEXT,
+            zorder=4,
+        )
+    ax_top.set_yticks([0])
+    ax_top.set_yticklabels(
+        [
+            "all",
+        ],
+        fontsize=9.0,
+        color=style.MUTED,
+    )
+    ax_top.tick_params(axis="x", labelbottom=False, length=0)
+    ax_top.tick_params(axis="y", length=0)
+    for spine in ax_top.spines.values():
+        spine.set_color(style.GRID)
+
+    right_col = np.array([math.log10(fam_geo[f]) for f in families]).reshape(-1, 1)
+    ax_right.imshow(right_col, cmap=cmap, norm=norm, aspect="auto", interpolation="nearest")
+    for i, fam in enumerate(families):
+        ax_right.text(
+            0,
+            i,
+            _fmt_speedup(fam_geo[fam]),
+            ha="center",
+            va="center",
+            fontsize=8.5,
+            color=style.TEXT,
+            zorder=4,
+        )
+    ax_right.set_xticks([0])
+    ax_right.set_xticklabels(["all"], fontsize=9.0, color=style.MUTED)
+    ax_right.tick_params(axis="y", labelleft=False, length=0)
+    ax_right.tick_params(axis="x", length=0)
+    for spine in ax_right.spines.values():
+        spine.set_color(style.GRID)
+
+    _draw_header(fig, "citor family scorecard")
+    _draw_subtitle(
+        fig,
+        context,
+        suffix="geomean citor speedup vs canonical peer (log scale)",
+    )
+    _draw_header_rule(fig)
+    _draw_caption(fig, context)
+    return fig
+
+
+def _fmt_speedup(v: float) -> str:
+    if v >= 10.0:
+        return f"{v:.0f}x"
+    if v >= 2.0:
+        return f"{v:.1f}x"
+    return f"{v:.2f}x"
 
 
 def build_losses_figure(
@@ -563,10 +820,14 @@ def build_losses_figure(
 
     fig_height = max(3.0, 0.42 * len(labels) + 2.4)
     fig = _new_svg_figure(figsize=(10.0, fig_height))
-    gs = fig.add_gridspec(nrows=1, ncols=1, left=0.42, right=0.97, top=0.82, bottom=0.16)
+    gs = fig.add_gridspec(nrows=1, ncols=1, left=0.46, right=0.97, top=0.82, bottom=0.16)
     ax = fig.add_subplot(gs[0, 0])
-    ax.barh(labels, ratios, color=style.BAND_LOSS, edgecolor="white", linewidth=0.7)
-    ax.axvline(1.0, color=_BASELINE_LINE_COLOR, linewidth=1.2, linestyle="--", alpha=0.6)
+    ax.barh(labels, ratios, color=style.BAND_LOSS)
+    ax.set_xscale("log")
+    ax.set_xlim(left=1.0, right=max(ratios) * 1.05)
+    ax.xaxis.set_minor_locator(NullLocator())
+    ax.xaxis.set_major_locator(FixedLocator([1.0, 1.1, 1.25, 1.5, 2.0, 3.0, 5.0, 10.0, 25.0]))
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v:g}x"))
     ax.set_xlabel(
         "citor median / best competitor median",
         fontsize=11.0,
@@ -624,24 +885,6 @@ def _style_axes(ax: Any, pools: list[str], ns_values: np.ndarray) -> None:
 
     _style_minimal_axes(ax, draw_grid=True)
     ax.set_xlabel("time (log)", fontsize=11.0, color=style.TEXT, labelpad=8)
-
-
-def _style_axes_overview(ax: Any, workloads: list[str]) -> None:
-    ax.set_xscale("log")
-    ax.set_yticks(list(range(len(workloads))))
-    ax.set_yticklabels(workloads, fontsize=9.5, color=style.TEXT)
-    ax.set_ylim(-0.6, len(workloads) - 0.4)
-
-    ax.xaxis.set_minor_locator(NullLocator())
-    ax.xaxis.set_major_locator(FixedLocator([0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 25.0, 100.0]))
-    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v:g}x"))
-    ax.set_xlabel(
-        "median runtime ratio vs citor::ThreadPool baseline",
-        fontsize=11.0,
-        color=style.TEXT,
-        labelpad=8,
-    )
-    _style_minimal_axes(ax, draw_grid=True)
 
 
 def _style_minimal_axes(ax: Any, *, draw_grid: bool = True) -> None:
@@ -831,12 +1074,12 @@ def _format_ratio(r: float) -> str:
     if not np.isfinite(r):
         return "n/a"
     if r < 0.95:
-        return f"  {r:.2f}x faster"
+        return f"{r:.2f}x faster"
     if r < 1.05:
-        return "  baseline"
+        return "baseline"
     if r < 10.0:
-        return f"  {r:.1f}x slower"
-    return f"  {r:.0f}x slower"
+        return f"{r:.1f}x slower"
+    return f"{r:.0f}x slower"
 
 
 def _build_empty_figure(title: str, reason: str) -> Figure:
@@ -863,6 +1106,7 @@ def _build_empty_figure(title: str, reason: str) -> Figure:
 __all__ = [
     "WorkloadFigureInputs",
     "build_family_geomean_figure",
+    "build_family_heatmap_figure",
     "build_family_scatter_figure",
     "build_losses_figure",
     "build_overview_figure",
