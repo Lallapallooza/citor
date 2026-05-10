@@ -62,16 +62,16 @@ namespace citor {
 
 class PoolGroup;
 
-// Origin tag for a `ThreadPool` instance.
-//
-// `Standalone` is the default for user-created pools. `Arena` is set by
-// `PoolGroup` for the per-CCD pools it owns; the `Arena` tag activates the
-// cross-arena deadlock guard in every primitive's dispatch fast path.
+/// Origin tag for a `ThreadPool` instance.
+///
+/// `Standalone` is the default for user-created pools. `Arena` is set by
+/// `PoolGroup` for the per-CCD pools it owns; the `Arena` tag activates the
+/// cross-arena deadlock guard in every primitive's dispatch fast path.
 enum class PoolKind : std::uint8_t {
-  // User-owned pool with no `PoolGroup` participation.
+  /// User-owned pool with no `PoolGroup` participation.
   Standalone,
-  // Owned by a `PoolGroup` and pinned to one CCD; participates in the
-  // cross-arena guard.
+  /// Owned by a `PoolGroup` and pinned to one CCD; participates in the
+  /// cross-arena guard.
   Arena
 };
 
@@ -89,29 +89,29 @@ enum class PoolKind : std::uint8_t {
 // NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
 class ThreadPool {
 public:
-  // Construct a pool with |participants| total participants (producer +
-  // background). Probes topology, truncates |participants| to at most the
-  // number of physical cores in the process affinity mask, then spawns
-  // `participants - 1` background pthreads pinned per |workerAffinity|.
-  //
-  // |workerAffinity| controls how each worker's CPU mask is configured:
-  //   * `Affinity::PerCpu` -- one CPU per worker. Strict; the kernel cannot
-  //     migrate the worker to any other CPU. Best for HPC / real-time use
-  //     where determinism matters more than the kernel's ability to
-  //     opportunistically rebalance.
-  //   * `Affinity::PerCluster` -- each worker is pinned to its CCD's full
-  //     logical-CPU set; the kernel may migrate within a CCD but not
-  //     across clusters. Preserves CCD-locality of caches while letting
-  //     the kernel route wakes via `select_idle_sibling` and rebalance
-  //     under intra-CCD load. Recommended default for memory-bound
-  //     primitives on multi-CCD parts.
-  //   * `Affinity::None` -- no per-worker pinning; workers inherit the
-  //     producer's process affinity mask. The kernel scheduler is free to
-  //     migrate at will.
-  //
-  // Throws `std::invalid_argument` when |participants| is 0; throws
-  // `std::system_error` when pthread attribute init, stack-size set, or
-  // thread create fails.
+  /// Construct a pool with |participants| total participants (producer +
+  /// background). Probes topology, truncates |participants| to at most the
+  /// number of physical cores in the process affinity mask, then spawns
+  /// `participants - 1` background pthreads pinned per |workerAffinity|.
+  ///
+  /// |workerAffinity| controls how each worker's CPU mask is configured:
+  ///   * `Affinity::PerCpu` -- one CPU per worker. Strict; the kernel cannot
+  ///     migrate the worker to any other CPU. Best for HPC / real-time use
+  ///     where determinism matters more than the kernel's ability to
+  ///     opportunistically rebalance.
+  ///   * `Affinity::PerCluster` -- each worker is pinned to its CCD's full
+  ///     logical-CPU set; the kernel may migrate within a CCD but not
+  ///     across clusters. Preserves CCD-locality of caches while letting
+  ///     the kernel route wakes via `select_idle_sibling` and rebalance
+  ///     under intra-CCD load. Recommended default for memory-bound
+  ///     primitives on multi-CCD parts.
+  ///   * `Affinity::None` -- no per-worker pinning; workers inherit the
+  ///     producer's process affinity mask. The kernel scheduler is free to
+  ///     migrate at will.
+  ///
+  /// Throws `std::invalid_argument` when |participants| is 0; throws
+  /// `std::system_error` when pthread attribute init, stack-size set, or
+  /// thread create fails.
   explicit ThreadPool(std::size_t participants,
                       Affinity workerAffinity = Affinity::PerCpu)
       : m_workerAffinity(workerAffinity), m_topology(detail::detectTopology()),
@@ -125,15 +125,15 @@ public:
   }
 
 private:
-  // Tag selecting the per-CCD arena constructor used by `PoolGroup`.
+  /// Tag selecting the per-CCD arena constructor used by `PoolGroup`.
   struct ArenaTag {};
 
-  // Construct an `Arena` pool pinned to a specific subset of CPU ids. Used
-  // exclusively by `PoolGroup` to spawn one pool per CCD. |cpuPins| overrides
-  // the topology-derived physical-core selection so workers stay inside one
-  // CCD; |arenaIndex| is recorded on every worker's `ThreadContext` so the
-  // cross-arena guard can fall through to inline-on-caller without consulting
-  // the `PoolGroup`.
+  /// Construct an `Arena` pool pinned to a specific subset of CPU ids. Used
+  /// exclusively by `PoolGroup` to spawn one pool per CCD. |cpuPins| overrides
+  /// the topology-derived physical-core selection so workers stay inside one
+  /// CCD; |arenaIndex| is recorded on every worker's `ThreadContext` so the
+  /// cross-arena guard can fall through to inline-on-caller without consulting
+  /// the `PoolGroup`.
   ThreadPool(ArenaTag /*tag*/, std::size_t participants,
              const std::vector<std::uint32_t> &cpuPins,
              std::uint32_t arenaIndex)
@@ -150,18 +150,26 @@ private:
 
   friend class PoolGroup;
 
-  // TLS auto-pin state per producer thread. Captured by `autoPinProducerOnce`
-  // on the first `parallelFor` from a thread for a given pool, restored by
-  // `autoPinRestoreIfOurs` from the pool's destructor when the destroying
-  // thread is the same producer. The `pool` field is a stable identity tag
-  // (compared, not dereferenced).
+  /// TLS auto-pin state per producer thread. Captured by `autoPinProducerOnce`
+  /// on the first `parallelFor` from a thread for a given pool, restored by
+  /// `autoPinRestoreIfOurs` from the pool's destructor when the destroying
+  /// thread is the same producer. The `pool` field is a stable identity tag
+  /// (compared, not dereferenced).
   struct AutoPinState {
 #ifdef __linux__
+    /// Producer's CPU affinity mask before auto-pin pinned it to slot 0's
+    /// reserved CPU. Restored by the pool's destructor.
     cpu_set_t saved{};
 #endif
+    /// Stable identity tag for the pool that captured `saved`. Compared
+    /// for equality only; never dereferenced.
     const void *pool = nullptr;
+    /// True between the auto-pin save and the matching restore.
     bool restorePending = false;
   };
+  /// Returns the calling thread's `AutoPinState` slot. Each producer
+  /// thread has one; the pool tag in the slot disambiguates which pool
+  /// owns the pin.
   static AutoPinState &autoPinTls() noexcept {
     static thread_local AutoPinState s_state;
     return s_state;
@@ -172,15 +180,21 @@ private:
   // producer (in which case the TLS path's `state.pool == this` check would
   // fail and the producer would stay pinned past pool lifetime).
 #ifdef __linux__
+  /// True while this pool owns an active producer pin. The destructor
+  /// reads this with acquire semantics to decide whether to restore.
   std::atomic<bool> m_autoPinActive{false};
+  /// `pthread_self()` of the producer that was auto-pinned by this pool.
   pthread_t m_autoPinProducer{};
+  /// Producer's pre-pin affinity mask, mirrored from
+  /// `AutoPinState::saved` so the destructor can restore it from any
+  /// thread.
   cpu_set_t m_autoPinSaved{};
 #endif
 
-  // First-call binder: detect whether the producer is already pinned
-  // (single-CPU mask) and leave it alone if so; otherwise save the current
-  // mask and pin to slot 0's reserved CPU. Idempotent per (thread, pool) via
-  // the TLS pool tag.
+  /// First-call binder: detect whether the producer is already pinned
+  /// (single-CPU mask) and leave it alone if so; otherwise save the current
+  /// mask and pin to slot 0's reserved CPU. Idempotent per (thread, pool) via
+  /// the TLS pool tag.
   [[gnu::cold]] void autoPinProducerOnce() const noexcept {
 #ifdef __linux__
     const std::uint32_t cpuId = producerCpu();
@@ -232,29 +246,33 @@ private:
 #endif
   }
 
-  // Per-thread shared `JobDescriptor` storage used by `parallelFor` and
-  // `dispatchReduceJobTyped`. Hoisted out of the template so distinct
-  // lambda types do not each create their own TLS descriptor (256 B
-  // each, aligned to 128 B). With many unique lambdas the
-  // per-template-instantiation cost showed up as TLS bloat across
-  // long-lived threads. The desc is type-erased (its `body` is a
-  // `FunctionRef`), so sharing across instantiations is safe.
+  /// Per-thread shared `JobDescriptor` storage used by `parallelFor` and
+  /// `dispatchReduceJobTyped`. Hoisted out of the template so distinct
+  /// lambda types do not each create their own TLS descriptor (256 B
+  /// each, aligned to 128 B). With many unique lambdas the
+  /// per-template-instantiation cost showed up as TLS bloat across
+  /// long-lived threads. The desc is type-erased (its `body` is a
+  /// `FunctionRef`), so sharing across instantiations is safe.
   [[gnu::always_inline]] static detail::JobDescriptor &
   sharedParallelForDesc() noexcept {
     thread_local detail::JobDescriptor desc;
     return desc;
   }
 
+  /// Per-thread shared `JobDescriptor` for reduce dispatches. Same TLS
+  /// sharing rationale as `sharedParallelForDesc`; kept on a separate
+  /// instance so reduce and `parallelFor` do not stomp each other when a
+  /// chained call sequence reuses the cached `desc` between dispatches.
   [[gnu::always_inline]] static detail::JobDescriptor &
   sharedReduceDesc() noexcept {
     thread_local detail::JobDescriptor desc;
     return desc;
   }
 
-  // Hot-path TLS gate: a quick `state.pool == this` check, fall through to
-  // the cold pinner only on a pool transition. Used by every chunk==0
-  // primitive so the syscall fires once per (thread, pool) regardless of
-  // which primitive made the first call.
+  /// Hot-path TLS gate: a quick `state.pool == this` check, fall through to
+  /// the cold pinner only on a pool transition. Used by every chunk==0
+  /// primitive so the syscall fires once per (thread, pool) regardless of
+  /// which primitive made the first call.
   [[gnu::always_inline]] void
   ensureProducerPinnedForChunkZero() const noexcept {
     auto &state = autoPinTls();
@@ -263,12 +281,12 @@ private:
     }
   }
 
-  // Pool-destruction restore: undoes the auto-pin recorded by
-  // `autoPinProducerOnce`. Uses the pool-side mirror (`m_autoPinProducer`,
-  // `m_autoPinSaved`) so the restore lands on the producer thread regardless
-  // of which thread invokes the destructor. The TLS record is cleared as
-  // well when the destroyer happens to be the producer, so a subsequent
-  // pool ctor on the same thread sees a clean state.
+  /// Pool-destruction restore: undoes the auto-pin recorded by
+  /// `autoPinProducerOnce`. Uses the pool-side mirror (`m_autoPinProducer`,
+  /// `m_autoPinSaved`) so the restore lands on the producer thread regardless
+  /// of which thread invokes the destructor. The TLS record is cleared as
+  /// well when the destroyer happens to be the producer, so a subsequent
+  /// pool ctor on the same thread sees a clean state.
   [[gnu::cold, gnu::noinline]] void autoPinRestoreIfOurs() const noexcept {
 #ifdef __linux__
     if (m_autoPinActive.load(std::memory_order_acquire)) {
@@ -283,6 +301,10 @@ private:
 #endif
   }
 
+  /// Reorders `|cpuPins|` so the producer's reserved CPU sits at index 0.
+  /// Standalone pools default to CCD-local placement; the producer pin
+  /// follows `topo.preferredCcd` so workers and producer first-touch on
+  /// the same NUMA node. Returns the reordered pin list.
   static std::vector<std::uint32_t>
   reserveProducerCpuFirst(const std::vector<std::uint32_t> &cpuPins,
                           PoolKind kind, const detail::Topology &topo) {
@@ -327,8 +349,8 @@ private:
     return pins;
   }
 
-  // Shared body for both constructors: spawn |participants| workers pinned to
-  // |cpuPins|.
+  /// Shared body for both constructors: spawn |participants| workers pinned to
+  /// |cpuPins|.
   void initWorkers(std::size_t participants,
                    const std::vector<std::uint32_t> &cpuPins) {
     const std::vector<std::uint32_t> participantPins =
@@ -657,13 +679,13 @@ private:
 #endif
   }
 
-  // Pre-resolve the parallelScan-specific topology fields. Inputs are all
-  // pool-immutable post-ctor: the per-slot CCD vector, each worker's
-  // `cpuId`, the coherence probe's matrix CPU list, the probe's per-CPU
-  // cluster ids, and the probe's max cross-over-intra ratio. Output is
-  // stored on the pool so the scan path can replace its per-call topology
-  // resolution (slot -> cluster mapping, contiguity check, asymmetric-bias
-  // derivation) with O(1) field reads.
+  /// Pre-resolve the parallelScan-specific topology fields. Inputs are all
+  /// pool-immutable post-ctor: the per-slot CCD vector, each worker's
+  /// `cpuId`, the coherence probe's matrix CPU list, the probe's per-CPU
+  /// cluster ids, and the probe's max cross-over-intra ratio. Output is
+  /// stored on the pool so the scan path can replace its per-call topology
+  /// resolution (slot -> cluster mapping, contiguity check, asymmetric-bias
+  /// derivation) with O(1) field reads.
   void initScanScratch(std::size_t participants) noexcept {
     m_scanClusterIdOfSlot.assign(participants, 0U);
     m_scanClusterFirstSlot.clear();
@@ -803,6 +825,12 @@ public:
   public:
     ProducerAffinityGuard() noexcept = default;
 
+    /// Saves the caller's affinity mask and pins the caller to `|cpuId|`
+    /// (or, when SMT siblings are exposed, to the same-CCD subset of the
+    /// caller's mask excluding `|workerCpus|`). The destructor restores
+    /// the saved mask. `|workerCpus|` and `|workerCpuCount|` describe the
+    /// pool's worker pin list so the producer never displaces a hot
+    /// worker.
     ProducerAffinityGuard(std::uint32_t cpuId, const detail::Topology &topo,
                           const std::uint32_t *workerCpus,
                           std::size_t workerCpuCount) noexcept {
@@ -896,16 +924,20 @@ public:
 
   private:
 #ifdef __linux__
+    /// Caller's affinity mask captured at construction; restored by the
+    /// destructor when `m_restore` is true.
     cpu_set_t m_saved{};
+    /// True when the constructor successfully applied a new pin and the
+    /// destructor must restore `m_saved`.
     bool m_restore = false;
 #endif
   };
 
-  // Per-thread depth counter for `LowLatencyGuard`. Lets `DispatchLease`
-  // distinguish "this thread owns an active LL guard" from "some other
-  // thread does". Only the owning thread can safely skip the dispatch
-  // mutex, since the LL contract is single-producer per pool. Other
-  // threads still take the mutex and serialize against the LL holder.
+  /// Per-thread depth counter for `LowLatencyGuard`. Lets `DispatchLease`
+  /// distinguish "this thread owns an active LL guard" from "some other
+  /// thread does". Only the owning thread can safely skip the dispatch
+  /// mutex, since the LL contract is single-producer per pool. Other
+  /// threads still take the mutex and serialize against the LL holder.
   static std::uint32_t &lowLatencyOwnerDepthTls() noexcept {
     static thread_local std::uint32_t s_depth = 0;
     return s_depth;
@@ -921,6 +953,10 @@ public:
   public:
     LowLatencyGuard() noexcept = default;
 
+    /// Engages low-latency mode on `|pool|`. Bumps the pool's hot-spin
+    /// epoch, wakes parked workers, and waits for every worker to
+    /// acknowledge the new epoch. The destructor restores the normal
+    /// spin-then-park policy.
     explicit LowLatencyGuard(ThreadPool &pool) noexcept : m_pool(&pool) {
       ++lowLatencyOwnerDepthTls();
       auto &control = m_pool->m_control;
@@ -976,6 +1012,8 @@ public:
     LowLatencyGuard &operator=(LowLatencyGuard &&) = delete;
 
   private:
+    /// Pool the guard engaged hot-spin mode on. Null when the guard was
+    /// default-constructed.
     ThreadPool *m_pool = nullptr;
   };
 
@@ -997,39 +1035,39 @@ public:
   ThreadPool(ThreadPool &&) = delete;
   ThreadPool &operator=(ThreadPool &&) = delete;
 
-  // Effective number of participants (producer + background workers); always
-  // at least 1.
+  /// Effective number of participants (producer + background workers); always
+  /// at least 1.
   [[nodiscard]] std::size_t participants() const noexcept {
     return m_control.participants;
   }
 
-  // CPU reserved for the caller's slot-0 producer participation.
-  // Returns `UINT32_MAX` when affinity pinning is unavailable. Stable for the
-  // pool's lifetime; target used by `bindProducerSlot`.
+  /// CPU reserved for the caller's slot-0 producer participation.
+  /// Returns `UINT32_MAX` when affinity pinning is unavailable. Stable for the
+  /// pool's lifetime; target used by `bindProducerSlot`.
   [[nodiscard]] std::uint32_t producerCpu() const noexcept {
     return m_workers ? m_workers->cpuId : UINT32_MAX;
   }
 
-  // Bind the calling thread to the pool's slot-0 CPU until the returned guard
-  // is destroyed. The dispatch hot path never changes caller affinity, but
-  // benchmarks and long-lived producer threads can opt into the same placement
-  // contract the background workers use.
+  /// Bind the calling thread to the pool's slot-0 CPU until the returned guard
+  /// is destroyed. The dispatch hot path never changes caller affinity, but
+  /// benchmarks and long-lived producer threads can opt into the same placement
+  /// contract the background workers use.
   [[nodiscard]] ProducerAffinityGuard bindProducerSlot() const noexcept {
     return {producerCpu(), m_topology, m_workerCpus.data(),
             m_workerCpus.size()};
   }
 
-  // Read the pool's diagnostic counters as a non-atomic snapshot.
-  //
-  // Each field loads with `std::memory_order_relaxed`; the snapshot is
-  // approximate and not consistent across fields beyond per-counter
-  // monotonicity. Counters are cumulative for the pool's lifetime.
-  //
-  // Pool-level fields (`dispatches`, `inlineFallbacks`, `cancellationStops`)
-  // are zero unless `CITOR_ENABLE_POOL_COUNTERS` is defined; when off, the
-  // dispatch hot path pays no extra atomics. Worker-aggregated fields
-  // (`futexParks`, `futexWakes`, `stealAttempts`, `stealSuccesses`) are always
-  // populated.
+  /// Read the pool's diagnostic counters as a non-atomic snapshot.
+  ///
+  /// Each field loads with `std::memory_order_relaxed`; the snapshot is
+  /// approximate and not consistent across fields beyond per-counter
+  /// monotonicity. Counters are cumulative for the pool's lifetime.
+  ///
+  /// Pool-level fields (`dispatches`, `inlineFallbacks`, `cancellationStops`)
+  /// are zero unless `CITOR_ENABLE_POOL_COUNTERS` is defined; when off, the
+  /// dispatch hot path pays no extra atomics. Worker-aggregated fields
+  /// (`futexParks`, `futexWakes`, `stealAttempts`, `stealSuccesses`) are always
+  /// populated.
   [[nodiscard]] detail::PoolCountersSnapshot snapshotCounters() const noexcept {
     detail::PoolCountersSnapshot s;
 #ifdef CITOR_ENABLE_POOL_COUNTERS
@@ -1053,10 +1091,10 @@ public:
     return s;
   }
 
-  // Keep workers hot for a scoped latency-sensitive producer loop. Use around
-  // a burst of synchronous primitive calls when the caller prefers CPU burn
-  // over the futex wake round trip. The returned guard must outlive the
-  // dispatch burst.
+  /// Keep workers hot for a scoped latency-sensitive producer loop. Use around
+  /// a burst of synchronous primitive calls when the caller prefers CPU burn
+  /// over the futex wake round trip. The returned guard must outlive the
+  /// dispatch burst.
   [[nodiscard]] LowLatencyGuard lowLatencyScope() noexcept {
     const auto &ctx = tlsContext();
     if (ctx.insidePoolWorker && ctx.pool == this) {
@@ -1065,44 +1103,44 @@ public:
     return LowLatencyGuard(*this);
   }
 
-  // Number of CCD (or shared-L3) groups detected by the topology probe;
-  // always at least 1 on a host with one physical core.
+  /// Number of CCD (or shared-L3) groups detected by the topology probe;
+  /// always at least 1 on a host with one physical core.
   [[nodiscard]] std::uint32_t ccdCount() const noexcept {
     return m_topology.ccdCount;
   }
 
-  // Origin tag of this pool: `Standalone` (user-owned) or `Arena`
-  // (`PoolGroup`-owned).
-  //
-  // Read at the entry of every primitive's dispatch path: when the calling
-  // thread is a worker on a different `Arena` pool, the dispatch falls
-  // through to inline-on-caller execution to avoid the cross-arena deadlock
-  // that would result from a worker blocking on another arena's queue.
+  /// Origin tag of this pool: `Standalone` (user-owned) or `Arena`
+  /// (`PoolGroup`-owned).
+  ///
+  /// Read at the entry of every primitive's dispatch path: when the calling
+  /// thread is a worker on a different `Arena` pool, the dispatch falls
+  /// through to inline-on-caller execution to avoid the cross-arena deadlock
+  /// that would result from a worker blocking on another arena's queue.
   [[nodiscard]] PoolKind kind() const noexcept { return m_kind; }
 
-  // Index of this pool inside its owning `PoolGroup`. Returns `0` for
-  // `Standalone` pools and for the first arena. Used as the participant token
-  // carried in `ThreadContext::arenaIndex` so the cross-arena guard can
-  // compare without holding a back-pointer to the `PoolGroup`.
+  /// Index of this pool inside its owning `PoolGroup`. Returns `0` for
+  /// `Standalone` pools and for the first arena. Used as the participant token
+  /// carried in `ThreadContext::arenaIndex` so the cross-arena guard can
+  /// compare without holding a back-pointer to the `PoolGroup`.
   [[nodiscard]] std::uint32_t arenaIndex() const noexcept {
     return m_arenaIndex;
   }
 
-  // Slot index of the calling thread within any pool. Returns 0 when the
-  // calling thread is not currently inside a pool worker body.
+  /// Slot index of the calling thread within any pool. Returns 0 when the
+  /// calling thread is not currently inside a pool worker body.
   [[nodiscard]] static std::size_t workerIndex() noexcept {
     return tlsContext().slot;
   }
 
-  // True when the calling thread is currently inside a pool worker body.
+  /// True when the calling thread is currently inside a pool worker body.
   [[nodiscard]] static bool insidePoolWorker() noexcept {
     return tlsContext().insidePoolWorker;
   }
 
-  // Calling thread's arena participant token. Used by `PoolGroup::localArena()`
-  // to pick the arena the calling thread is currently a worker of. Returns
-  // `static_cast<std::uint32_t>(-1)` when the thread is not a worker on any
-  // `Arena` pool.
+  /// Calling thread's arena participant token. Used by
+  /// `PoolGroup::localArena()` to pick the arena the calling thread is
+  /// currently a worker of. Returns `static_cast<std::uint32_t>(-1)` when the
+  /// thread is not a worker on any `Arena` pool.
   [[nodiscard]] static std::uint32_t currentArenaIndexHint() noexcept {
     const auto &ctx = tlsContext();
     if (!ctx.insidePoolWorker || ctx.kind != PoolKind::Arena) {
@@ -1111,24 +1149,24 @@ public:
     return ctx.arenaIndex;
   }
 
-  // Run |fn| over `[first, last)` in parallel using the policy from |HintsT|.
-  //
-  // The body is invoked once per block as `fn(blockFirst, blockAfterLast)`.
-  // Synchronous: returns only after every block has completed (or after the
-  // first thrown exception is propagated).
-  //
-  // - `Balance::StaticUniform` runs the worker-strided block partition (no
-  //   atomics on the hot path); `Balance::DynamicChunked` races on the
-  //   relaxed `nextBlock` counter; the other two tiers fall back to dynamic.
-  // - `chunk == 0` derives a default from `(last - first) / participants`.
-  // - `n * estimatedItemNs * 1e-3 < minTaskUs * participants` runs the body
-  //   inline on the producer's thread; no worker is woken.
-  // The descriptor keeps the previous callable address between dispatches;
-  // it is overwritten before reuse and never dereferenced after the
-  // synchronous call returns. `tok` stays by value so owned tokens can move
-  // into the descriptor without a shared_ptr retain.
-  // NOLINTBEGIN(performance-unnecessary-value-param,
-  // clang-analyzer-core.StackAddressEscape)
+  /// Run |fn| over `[first, last)` in parallel using the policy from |HintsT|.
+  ///
+  /// The body is invoked once per block as `fn(blockFirst, blockAfterLast)`.
+  /// Synchronous: returns only after every block has completed (or after the
+  /// first thrown exception is propagated).
+  ///
+  /// - `Balance::StaticUniform` runs the worker-strided block partition (no
+  ///   atomics on the hot path); `Balance::DynamicChunked` races on the
+  ///   relaxed `nextBlock` counter; the other two tiers fall back to dynamic.
+  /// - `chunk == 0` derives a default from `(last - first) / participants`.
+  /// - `n * estimatedItemNs * 1e-3 < minTaskUs * participants` runs the body
+  ///   inline on the producer's thread; no worker is woken.
+  /// The descriptor keeps the previous callable address between dispatches;
+  /// it is overwritten before reuse and never dereferenced after the
+  /// synchronous call returns. `tok` stays by value so owned tokens can move
+  /// into the descriptor without a shared_ptr retain.
+  /// NOLINTBEGIN(performance-unnecessary-value-param,
+  /// clang-analyzer-core.StackAddressEscape)
   template <class HintsT, class F>
   [[gnu::hot, gnu::flatten]] void
   parallelFor(std::size_t first, std::size_t last, F &&fn,
@@ -1417,10 +1455,10 @@ public:
   // NOLINTEND(performance-unnecessary-value-param,
   // clang-analyzer-core.StackAddressEscape)
 
-  // Runtime-hint sibling of `parallelFor<HintsT>` for benchmark / CLI
-  // consumers. Mirrors the member-template surface but accepts a runtime
-  // |hints| value; the dispatch decision is made from a runtime field rather
-  // than a compile-time constant.
+  /// Runtime-hint sibling of `parallelFor<HintsT>` for benchmark / CLI
+  /// consumers. Mirrors the member-template surface but accepts a runtime
+  /// |hints| value; the dispatch decision is made from a runtime field rather
+  /// than a compile-time constant.
   template <class F>
   void parallelForRuntime(std::size_t first, std::size_t last, F &&fn,
                           const Hints &hints,
@@ -1483,36 +1521,36 @@ public:
     dispatchOne(desc);
   }
 
-  // Deterministic reduction over `[first, last)` using the policy from
-  // |HintsT|.
-  //
-  // Each block produces a partial value via |map|, partials are stored in a
-  // stack-resident vector indexed by stable chunk id, and the producer
-  // combines them with |combine| via a pairwise reduction tree in chunk-id
-  // order (NOT completion order). Under `Determinism::KahanCompensated` the
-  // per-chunk accumulation and tree combine wrap the user partial in a
-  // `KahanPair` so FP cancellation is compensated through every interior node.
-  //
-  // Determinism contract:
-  // - Chunk size is a function of `(n, HintsT)` only, NOT of participant
-  //   count. The chunk count is stable across `j`, so the tree shape is
-  //   `n`-determined.
-  // - Workers write only to their own `partials[chunkId]` slots; the
-  //   producer's join-loop establishes happens-before via the acquire-load on
-  //   `doneEpoch` so reading partials post-join is race-free.
-  // - Combining in chunk-id pairwise tree order makes parallel FP reduction
-  //   bit-reproducible (Demmel-Nguyen TOMS 2014).
-  //
-  // Empty range returns |init| unchanged. Cancellation throws
-  // `cancelled_value_exception<T>` whose `partial_value` is the deterministic
-  // combine of all chunks that completed before the stop; if zero completed,
-  // `partial_value` is |init| unchanged (we never combine against a
-  // default-constructed `T{}` since `combine` is not assumed to satisfy
-  // `combine(x, T{}) == x`).
-  //
-  // Requirements on `T`: default-constructible, copyable or movable, and
-  // trivially copyable in the Kahan path (per-chunk value is converted to
-  // `double` before the tree combine).
+  /// Deterministic reduction over `[first, last)` using the policy from
+  /// |HintsT|.
+  ///
+  /// Each block produces a partial value via |map|, partials are stored in a
+  /// stack-resident vector indexed by stable chunk id, and the producer
+  /// combines them with |combine| via a pairwise reduction tree in chunk-id
+  /// order (NOT completion order). Under `Determinism::KahanCompensated` the
+  /// per-chunk accumulation and tree combine wrap the user partial in a
+  /// `KahanPair` so FP cancellation is compensated through every interior node.
+  ///
+  /// Determinism contract:
+  /// - Chunk size is a function of `(n, HintsT)` only, NOT of participant
+  ///   count. The chunk count is stable across `j`, so the tree shape is
+  ///   `n`-determined.
+  /// - Workers write only to their own `partials[chunkId]` slots; the
+  ///   producer's join-loop establishes happens-before via the acquire-load on
+  ///   `doneEpoch` so reading partials post-join is race-free.
+  /// - Combining in chunk-id pairwise tree order makes parallel FP reduction
+  ///   bit-reproducible (Demmel-Nguyen TOMS 2014).
+  ///
+  /// Empty range returns |init| unchanged. Cancellation throws
+  /// `cancelled_value_exception<T>` whose `partial_value` is the deterministic
+  /// combine of all chunks that completed before the stop; if zero completed,
+  /// `partial_value` is |init| unchanged (we never combine against a
+  /// default-constructed `T{}` since `combine` is not assumed to satisfy
+  /// `combine(x, T{}) == x`).
+  ///
+  /// Requirements on `T`: default-constructible, copyable or movable, and
+  /// trivially copyable in the Kahan path (per-chunk value is converted to
+  /// `double` before the tree combine).
   template <class HintsT, class T, class Map, class Combine>
   [[nodiscard]] T parallelReduce(std::size_t first, std::size_t last, T init,
                                  Map &&map, Combine &&combine,
@@ -1563,9 +1601,9 @@ public:
         std::forward<Combine>(combine), std::move(tok), participants);
   }
 
-  // Runtime-hint sibling of `parallelReduce<HintsT>` for benchmark / CLI
-  // consumers. The runtime branch on `hints.determinism` selects between the
-  // compensated and uncompensated reduction shapes via one tag-switch.
+  /// Runtime-hint sibling of `parallelReduce<HintsT>` for benchmark / CLI
+  /// consumers. The runtime branch on `hints.determinism` selects between the
+  /// compensated and uncompensated reduction shapes via one tag-switch.
   template <class T, class Map, class Combine>
   [[nodiscard]] T
   parallelReduceRuntime(std::size_t first, std::size_t last, T init, Map &&map,
@@ -1602,34 +1640,34 @@ public:
         std::forward<Combine>(combine), hints, std::move(tok), participants);
   }
 
-  // Run |phaseFn| for |nPhases| phases using the persistent-worker plex
-  // protocol.
-  //
-  // The producer participates as slot 0 and drives the phase epoch;
-  // background workers spin-wait in user space between phases (no futex
-  // round-trip per phase). Each phase invokes
-  // `phaseFn(phaseIdx, slot, lo, hi)` once per participant, where
-  // `(lo, hi)` is the slot's contiguous range over `[0, n)`.
-  //
-  // Optional pre-phase hook: when supplied, `prePhaseFn(phaseIdx)` runs
-  // serially on the producer BEFORE publishing the next phase, with
-  // happens-before to every worker's per-phase body. Use it to read the
-  // previous phase's per-slot results (synchronized by the prior join) and
-  // update shared state the upcoming phase reads.
-  //
-  // Determinism: phase epochs are produced in `[0, nPhases)` order and each
-  // `phaseFn(p, slot, ...)` call is invoked exactly once per `(p, slot)` pair.
-  // The producer's slot-0 work for phase `p` runs after publishing
-  // `currentPhase = p + 1` and before joining on every other slot's
-  // `done >= p + 1`.
-  //
-  // Cancellation: a stopped |tok| flips the plex's cancellation flag at the
-  // next phase boundary. Worker bodies observe the flag between phases and
-  // return cleanly; the call still rendezvous with every worker before
-  // returning.
-  //
-  // Exception handling: the first thrown `phaseFn` exception is captured and
-  // rethrown by the producer after join. Subsequent throws drop.
+  /// Run |phaseFn| for |nPhases| phases using the persistent-worker plex
+  /// protocol.
+  ///
+  /// The producer participates as slot 0 and drives the phase epoch;
+  /// background workers spin-wait in user space between phases (no futex
+  /// round-trip per phase). Each phase invokes
+  /// `phaseFn(phaseIdx, slot, lo, hi)` once per participant, where
+  /// `(lo, hi)` is the slot's contiguous range over `[0, n)`.
+  ///
+  /// Optional pre-phase hook: when supplied, `prePhaseFn(phaseIdx)` runs
+  /// serially on the producer BEFORE publishing the next phase, with
+  /// happens-before to every worker's per-phase body. Use it to read the
+  /// previous phase's per-slot results (synchronized by the prior join) and
+  /// update shared state the upcoming phase reads.
+  ///
+  /// Determinism: phase epochs are produced in `[0, nPhases)` order and each
+  /// `phaseFn(p, slot, ...)` call is invoked exactly once per `(p, slot)` pair.
+  /// The producer's slot-0 work for phase `p` runs after publishing
+  /// `currentPhase = p + 1` and before joining on every other slot's
+  /// `done >= p + 1`.
+  ///
+  /// Cancellation: a stopped |tok| flips the plex's cancellation flag at the
+  /// next phase boundary. Worker bodies observe the flag between phases and
+  /// return cleanly; the call still rendezvous with every worker before
+  /// returning.
+  ///
+  /// Exception handling: the first thrown `phaseFn` exception is captured and
+  /// rethrown by the producer after join. Subsequent throws drop.
   template <class HintsT, class Phase, class PrePhase>
   void runPlex(std::size_t nPhases, std::size_t n, Phase &&phaseFn,
                PrePhase &&prePhaseFn,
@@ -1650,9 +1688,9 @@ public:
                     participants);
   }
 
-  // Plex form without a pre-phase hook. Equivalent to the four-argument
-  // overload with a no-op pre-phase callable. Use when the plex needs no
-  // inter-phase serial bookkeeping.
+  /// Plex form without a pre-phase hook. Equivalent to the four-argument
+  /// overload with a no-op pre-phase callable. Use when the plex needs no
+  /// inter-phase serial bookkeeping.
   template <class HintsT, class Phase>
   void runPlex(std::size_t nPhases, std::size_t n, Phase &&phaseFn,
                CancellationToken tok = CancellationToken{}) {
@@ -1661,7 +1699,7 @@ public:
                     std::move(tok));
   }
 
-  // Runtime-hint sibling of `runPlex<HintsT>` for benchmark / CLI consumers.
+  /// Runtime-hint sibling of `runPlex<HintsT>` for benchmark / CLI consumers.
   template <class Phase, class PrePhase>
   void runPlexRuntime(std::size_t nPhases, std::size_t n, Phase &&phaseFn,
                       PrePhase &&prePhaseFn, const Hints & /*hints*/,
@@ -1682,7 +1720,7 @@ public:
                     participants);
   }
 
-  // Runtime-hint runPlex without a pre-phase hook.
+  /// Runtime-hint runPlex without a pre-phase hook.
   template <class Phase>
   void runPlexRuntime(std::size_t nPhases, std::size_t n, Phase &&phaseFn,
                       const Hints &hints,
@@ -1692,32 +1730,32 @@ public:
                    std::move(tok));
   }
 
-  // Run |fns|... in parallel as a recursive fork-join, joining once every
-  // task retires.
-  //
-  // Each task callable is wrapped into a stack-resident `detail::Task`
-  // descriptor and pushed onto a participating worker's Chase-Lev
-  // work-stealing deque. Workers pop from their own deque first; on empty
-  // they steal from another worker's deque, biased toward same-CCD victims
-  // when `HintsT::stealPolicy == StealPolicy::ClusterLocal`. The producer
-  // participates as slot 0 and joins on the outstanding-task counter reaching
-  // zero.
-  //
-  // Recursive children: tasks may call back into `forkJoin` from inside their
-  // bodies. The nested call detects it is running on one of this pool's
-  // workers, allocates its own outstanding-task counter, and pushes children
-  // onto the calling worker's own deque. The nested join condition is its
-  // own counter reaching zero.
-  //
-  // Cancellation: workers observe |tok| at task boundaries. A stopped token
-  // causes participating workers to short-circuit unstarted bodies
-  // (decrementing the counter without running the body) so the join still
-  // rendezvous.
-  //
-  // Exception handling: the first thrown task body's exception is captured
-  // and rethrown from the producer after every outstanding task has retired.
-  // Subsequent throws drop. The cancellation flag is set as part of the
-  // first-exception capture path so the join finishes promptly.
+  /// Run |fns|... in parallel as a recursive fork-join, joining once every
+  /// task retires.
+  ///
+  /// Each task callable is wrapped into a stack-resident `detail::Task`
+  /// descriptor and pushed onto a participating worker's Chase-Lev
+  /// work-stealing deque. Workers pop from their own deque first; on empty
+  /// they steal from another worker's deque, biased toward same-CCD victims
+  /// when `HintsT::stealPolicy == StealPolicy::ClusterLocal`. The producer
+  /// participates as slot 0 and joins on the outstanding-task counter reaching
+  /// zero.
+  ///
+  /// Recursive children: tasks may call back into `forkJoin` from inside their
+  /// bodies. The nested call detects it is running on one of this pool's
+  /// workers, allocates its own outstanding-task counter, and pushes children
+  /// onto the calling worker's own deque. The nested join condition is its
+  /// own counter reaching zero.
+  ///
+  /// Cancellation: workers observe |tok| at task boundaries. A stopped token
+  /// causes participating workers to short-circuit unstarted bodies
+  /// (decrementing the counter without running the body) so the join still
+  /// rendezvous.
+  ///
+  /// Exception handling: the first thrown task body's exception is captured
+  /// and rethrown from the producer after every outstanding task has retired.
+  /// Subsequent throws drop. The cancellation flag is set as part of the
+  /// first-exception capture path so the join finishes promptly.
   template <class HintsT, class... TaskFns>
   // The `tok` parameter is moved into `runForkJoinOuter` / `runForkJoinNested`
   // on the non-empty task path; the no-task branch returns immediately. Tidy
@@ -1729,6 +1767,9 @@ public:
                                             std::forward<TaskFns>(fns)...);
   }
 
+  /// Internal implementation shared by `forkJoin` and the no-token
+  /// overload. `HasToken` is a compile-time tag that elides token reads
+  /// when the caller did not pass a token.
   template <class HintsT, bool HasToken, class... TaskFns>
   void forkJoinImpl(CancellationToken tok, TaskFns &&...fns) {
     constexpr std::size_t kNTasks = sizeof...(TaskFns);
@@ -1789,9 +1830,9 @@ public:
     }
   }
 
-  // No-token convenience overload for `forkJoin`. Forwards to the four-arg
-  // overload with a default-constructed `CancellationToken` so call sites
-  // that do not need cancellation pay no syntactic cost.
+  /// No-token convenience overload for `forkJoin`. Forwards to the four-arg
+  /// overload with a default-constructed `CancellationToken` so call sites
+  /// that do not need cancellation pay no syntactic cost.
   template <class HintsT, class... TaskFns>
   void forkJoin(TaskFns &&...fns) {
     // No token passed: route through the compile-time `HasToken=false` impl so
@@ -1803,9 +1844,9 @@ public:
                                              std::forward<TaskFns>(fns)...);
   }
 
-  // Runtime-N fork-join: spawn |n| tasks indexed `[0, n)` and join.
-  // Generalizes the variadic `forkJoin<HintsT>(fns...)` to a count known only
-  // at runtime.
+  /// Runtime-N fork-join: spawn |n| tasks indexed `[0, n)` and join.
+  /// Generalizes the variadic `forkJoin<HintsT>(fns...)` to a count known only
+  /// at runtime.
   template <class HintsT, class BodyFn>
   void forkJoinAll(std::size_t n, BodyFn body) {
     if (n == 0U) {
@@ -1916,20 +1957,20 @@ public:
                                    std::forward<TaskFns>(fns)...);
   }
 
-  // Run |fn| over `[0, q)` query indices in parallel using the policy from
-  // |HintsT|.
-  //
-  // The body is invoked once per chunk as `fn(qFirst, qLast)`; the body must
-  // process every query index in `[qFirst, qLast)` in any order, writing into
-  // a per-query output slot keyed on the query index. Synchronous.
-  //
-  // Reuses the `parallelFor` engine; this is the named entry point for "many
-  // independent queries" workloads. Sites with skewed per-query cost should
-  // override `HintsT::balance` to `Balance::DynamicChunked` to amortize
-  // traversal-depth skew across workers.
-  //
-  // Output stability: per-query results are bit-identical regardless of
-  // dispatch order so long as the body keys its writes on the query index.
+  /// Run |fn| over `[0, q)` query indices in parallel using the policy from
+  /// |HintsT|.
+  ///
+  /// The body is invoked once per chunk as `fn(qFirst, qLast)`; the body must
+  /// process every query index in `[qFirst, qLast)` in any order, writing into
+  /// a per-query output slot keyed on the query index. Synchronous.
+  ///
+  /// Reuses the `parallelFor` engine; this is the named entry point for "many
+  /// independent queries" workloads. Sites with skewed per-query cost should
+  /// override `HintsT::balance` to `Balance::DynamicChunked` to amortize
+  /// traversal-depth skew across workers.
+  ///
+  /// Output stability: per-query results are bit-identical regardless of
+  /// dispatch order so long as the body keys its writes on the query index.
   template <class HintsT, class QueryFn>
   void bulkForQueries(std::size_t q, QueryFn &&fn,
                       CancellationToken tok = CancellationToken{}) {
@@ -1937,8 +1978,8 @@ public:
                         std::move(tok));
   }
 
-  // Runtime-hint sibling of `bulkForQueries<HintsT>` for benchmark / CLI
-  // consumers. Forwards through `parallelForRuntime`.
+  /// Runtime-hint sibling of `bulkForQueries<HintsT>` for benchmark / CLI
+  /// consumers. Forwards through `parallelForRuntime`.
   template <class QueryFn>
   void bulkForQueriesRuntime(std::size_t q, QueryFn &&fn, const Hints &hints,
                              CancellationToken tok = CancellationToken{}) {
@@ -2034,63 +2075,63 @@ public:
                                   std::move(tok));
   }
 
-  // Run an ordered sequence of stages with the declared barrier between
-  // consecutive stages.
-  //
-  // Each stage is a `Stage` value carrying a callable plus a compile-time
-  // `BarrierKind`. The producer participates as slot 0 across every stage;
-  // background workers run their slice of each stage in parallel. The
-  // post-stage barrier controls how the next stage begins:
-  //
-  // - `None`: each worker proceeds without waiting on others.
-  // - `Global` / `DeterministicReduce`: every worker waits until every slot
-  //   has finished the prior stage before any worker begins the next.
-  // - `ProducerSerial`: only slot 0 runs the next stage's body; other workers
-  //   spin on slot 0's completion before proceeding.
-  //
-  // Determinism: stages run in submission order. In the default same-chunk
-  // mode, each `(stage, slot)` pair is invoked exactly once per call (or
-  // zero times for non-producer slots after a `ProducerSerial` barrier).
-  // Per-slot ranges are stable functions of `(n, slot, participants)`.
-  // Dynamic-chain hints can opt all-global stage packs into per-stage chunk
-  // claiming.
-  //
-  // Cancellation: the implicit cancellation token bound through the CPO
-  // surface is observed at stage boundaries. A stopped token causes every
-  // slot to skip the remaining stages cleanly so the producer's join still
-  // rendezvous.
-  //
-  // Exception handling: the first thrown stage body's exception is captured,
-  // the chain's cancellation flag is set, and the producer rethrows once
-  // every slot has retired. Slots that observe the cancellation flag stamp
-  // their `done` epoch to the final stage so other slots' barrier waits
-  // complete.
-  //
-  // Empty stage pack is a no-op; empty range (`n == 0`) still runs each
-  // stage with `slotLo == slotHi`.
+  /// Run an ordered sequence of stages with the declared barrier between
+  /// consecutive stages.
+  ///
+  /// Each stage is a `Stage` value carrying a callable plus a compile-time
+  /// `BarrierKind`. The producer participates as slot 0 across every stage;
+  /// background workers run their slice of each stage in parallel. The
+  /// post-stage barrier controls how the next stage begins:
+  ///
+  /// - `None`: each worker proceeds without waiting on others.
+  /// - `Global` / `DeterministicReduce`: every worker waits until every slot
+  ///   has finished the prior stage before any worker begins the next.
+  /// - `ProducerSerial`: only slot 0 runs the next stage's body; other workers
+  ///   spin on slot 0's completion before proceeding.
+  ///
+  /// Determinism: stages run in submission order. In the default same-chunk
+  /// mode, each `(stage, slot)` pair is invoked exactly once per call (or
+  /// zero times for non-producer slots after a `ProducerSerial` barrier).
+  /// Per-slot ranges are stable functions of `(n, slot, participants)`.
+  /// Dynamic-chain hints can opt all-global stage packs into per-stage chunk
+  /// claiming.
+  ///
+  /// Cancellation: the implicit cancellation token bound through the CPO
+  /// surface is observed at stage boundaries. A stopped token causes every
+  /// slot to skip the remaining stages cleanly so the producer's join still
+  /// rendezvous.
+  ///
+  /// Exception handling: the first thrown stage body's exception is captured,
+  /// the chain's cancellation flag is set, and the producer rethrows once
+  /// every slot has retired. Slots that observe the cancellation flag stamp
+  /// their `done` epoch to the final stage so other slots' barrier waits
+  /// complete.
+  ///
+  /// Empty stage pack is a no-op; empty range (`n == 0`) still runs each
+  /// stage with `slotLo == slotHi`.
   template <class ChainHintsT, class... Stages>
   void parallelChain(std::size_t n, Stages &&...stages) {
     parallelChainWithToken<ChainHintsT>(n, CancellationToken{},
                                         std::forward<Stages>(stages)...);
   }
 
-  // `parallelChain` overload that accepts an explicit cancellation token.
-  // Named differently from the no-token form because variadic packs absorb
-  // the leading token argument when the two overloads share a name.
+  /// `parallelChain` overload that accepts an explicit cancellation token.
+  /// Named differently from the no-token form because variadic packs absorb
+  /// the leading token argument when the two overloads share a name.
   template <class ChainHintsT, class... Stages>
   void parallelChainWithToken(std::size_t n, const CancellationToken &tok,
                               Stages &&...stages) {
     parallelChainImpl<ChainHintsT>(n, tok, std::forward<Stages>(stages)...);
   }
 
-  // Runtime-hint sibling of `parallelChain<ChainHintsT>` for benchmark / CLI
-  // consumers. The runtime branch on stage barriers is compile-time because
-  // each stage's `BarrierKind` is encoded in its type. |hints.priority| is
-  // honored on the dispatch lease; other hint fields (balance, chunk,
-  // pipelineSameChunk, cancellationChecks) currently fall back to the
-  // engine defaults; the per-stage runner uses `ChainHintsT` as a type
-  // marker for `if constexpr` selection, so threading them runtime would
-  // require structural changes to the per-stage dispatcher.
+  /// Runtime-hint sibling of `parallelChain<ChainHintsT>` for benchmark / CLI
+  /// consumers. The runtime branch on stage barriers is compile-time because
+  /// each stage's `BarrierKind` is encoded in its type. |hints.priority| is
+  /// honored on the dispatch lease; other hint fields (balance, chunk,
+  /// pipelineSameChunk, cancellationChecks) currently fall back to the
+  /// engine defaults; the per-stage runner uses `ChainHintsT` as a type
+  /// marker for `if constexpr` selection, so threading them runtime would
+  /// require structural changes to the per-stage dispatcher.
   template <class... Stages>
   void parallelChainRuntime(std::size_t n, const ChainHints &hints,
                             const CancellationToken &tok, Stages &&...stages) {
@@ -2120,65 +2161,65 @@ public:
         n, tok, std::forward<Stages>(stages)...);
   }
 
-  // Blelloch two-pass parallel prefix scan over `[0, n)` using the policy
-  // from |HintsT|.
-  //
-  // Two-pass dispatch shape:
-  //   1. Pass 1: each slot computes its chunk's partial sum by invoking
-  //      `body(slot, slotLo, slotHi, identity, nullptr)`. The body returns
-  //      the chunk's partial; the worker stamps `partials[slot]` and stamps
-  //      its done epoch to `1` (release).
-  //   2. Sequential reduce: the producer waits until every chunk's
-  //      `done >= 1`, then computes
-  //      `prefix[c] = combine(prefix[c-1], partials[c-1])` in chunk-id order
-  //      with `prefix[0] = identity`. It overwrites `partials[c]` with
-  //      `prefix[c]` and publishes `prefixesPublished = 1` (release).
-  //   3. Pass 2: each slot acquire-loads `prefixesPublished`, then invokes
-  //      `body(slot, slotLo, slotHi, partials[slot], nullptr)`; the body
-  //      writes the per-element scan into a buffer it captured itself and
-  //      returns the same partial sum (ignored). Each slot stamps `done = 2`.
-  //   4. The producer joins on every slot's `done >= 2` and returns the
-  //      inclusive accumulator at the right edge:
-  //      `combine(prefix[participants - 1], partial[participants - 1])`.
-  //
-  // Body contract for distinguishing passes: `out` is `nullptr` in BOTH
-  // passes; the body must distinguish them itself. Recommended pattern:
-  //
-  //   std::atomic<int> callIdx{0};
-  //   auto body = [&](...) {
-  //     const int idx = callIdx.fetch_add(1, std::memory_order_acq_rel);
-  //     if (idx < pool.participants()) { /* Pass 1 */ }
-  //     else                            { /* Pass 2 */ }
-  //   };
-  //
-  // The `std::atomic<int>` captured by reference is the only race-free way
-  // to thread a pass index through the body, since multiple workers run
-  // each pass concurrently. A plain `int` counter captured by reference is
-  // a data race; use the atomic shape above. See `parallel_scan_test.cpp`
-  // for a working example.
-  //
-  // Alternative, brittle: branch on `initial != identity`. Slot 0's Pass 2
-  // receives `initial = identity` (its exclusive prefix IS identity), so
-  // this form loses the distinction for slot 0; prefer the atomic counter.
-  //
-  // Determinism: chunk identity is a stable function of
-  // `(n, slot, participants)`; the producer's sequential reduce visits
-  // chunks in `[0, participants)` order so output is bit-stable across worker
-  // counts only when |prefix| is associative AND the body's per-element fold
-  // is left-to-right within a chunk.
-  //
-  // Empty range returns |identity| without dispatching. Single participant
-  // walks inline: the body is invoked once with `initial = identity` and the
-  // call returns the body's return value combined with |identity| through
-  // |prefix|.
-  //
-  // Cancellation: stop-requests at pass boundaries cause every slot to stamp
-  // `done = 2` and exit cleanly; the producer's join still rendezvous. The
-  // return value reflects whatever completed chunks computed.
-  //
-  // Exception handling: the first thrown body exception is captured and
-  // rethrown by the producer after every slot has retired. Subsequent throws
-  // drop.
+  /// Blelloch two-pass parallel prefix scan over `[0, n)` using the policy
+  /// from |HintsT|.
+  ///
+  /// Two-pass dispatch shape:
+  ///   1. Pass 1: each slot computes its chunk's partial sum by invoking
+  ///      `body(slot, slotLo, slotHi, identity, nullptr)`. The body returns
+  ///      the chunk's partial; the worker stamps `partials[slot]` and stamps
+  ///      its done epoch to `1` (release).
+  ///   2. Sequential reduce: the producer waits until every chunk's
+  ///      `done >= 1`, then computes
+  ///      `prefix[c] = combine(prefix[c-1], partials[c-1])` in chunk-id order
+  ///      with `prefix[0] = identity`. It overwrites `partials[c]` with
+  ///      `prefix[c]` and publishes `prefixesPublished = 1` (release).
+  ///   3. Pass 2: each slot acquire-loads `prefixesPublished`, then invokes
+  ///      `body(slot, slotLo, slotHi, partials[slot], nullptr)`; the body
+  ///      writes the per-element scan into a buffer it captured itself and
+  ///      returns the same partial sum (ignored). Each slot stamps `done = 2`.
+  ///   4. The producer joins on every slot's `done >= 2` and returns the
+  ///      inclusive accumulator at the right edge:
+  ///      `combine(prefix[participants - 1], partial[participants - 1])`.
+  ///
+  /// Body contract for distinguishing passes: `out` is `nullptr` in BOTH
+  /// passes; the body must distinguish them itself. Recommended pattern:
+  ///
+  ///   std::atomic<int> callIdx{0};
+  ///   auto body = [&](...) {
+  ///     const int idx = callIdx.fetch_add(1, std::memory_order_acq_rel);
+  ///     if (idx < pool.participants()) { /* Pass 1 */ }
+  ///     else                            { /* Pass 2 */ }
+  ///   };
+  ///
+  /// The `std::atomic<int>` captured by reference is the only race-free way
+  /// to thread a pass index through the body, since multiple workers run
+  /// each pass concurrently. A plain `int` counter captured by reference is
+  /// a data race; use the atomic shape above. See `parallel_scan_test.cpp`
+  /// for a working example.
+  ///
+  /// Alternative, brittle: branch on `initial != identity`. Slot 0's Pass 2
+  /// receives `initial = identity` (its exclusive prefix IS identity), so
+  /// this form loses the distinction for slot 0; prefer the atomic counter.
+  ///
+  /// Determinism: chunk identity is a stable function of
+  /// `(n, slot, participants)`; the producer's sequential reduce visits
+  /// chunks in `[0, participants)` order so output is bit-stable across worker
+  /// counts only when |prefix| is associative AND the body's per-element fold
+  /// is left-to-right within a chunk.
+  ///
+  /// Empty range returns |identity| without dispatching. Single participant
+  /// walks inline: the body is invoked once with `initial = identity` and the
+  /// call returns the body's return value combined with |identity| through
+  /// |prefix|.
+  ///
+  /// Cancellation: stop-requests at pass boundaries cause every slot to stamp
+  /// `done = 2` and exit cleanly; the producer's join still rendezvous. The
+  /// return value reflects whatever completed chunks computed.
+  ///
+  /// Exception handling: the first thrown body exception is captured and
+  /// rethrown by the producer after every slot has retired. Subsequent throws
+  /// drop.
   template <class HintsT, class T, class BodyFn, class PrefixFn>
   [[nodiscard]] T parallelScan(std::size_t n, T identity, BodyFn &&body,
                                PrefixFn &&prefix,
@@ -2247,20 +2288,20 @@ public:
         std::forward<PrefixFn>(prefix), std::move(tok));
   }
 
-  // Buffer-to-buffer inclusive prefix scan. Engine owns the inner loop
-  // (no user body), so it can use the most aggressive memory-traffic
-  // shape -- decoupled-lookback single-pass with `PREFETCHW` ahead of
-  // the writes, per-cluster lookback chains on multi-CCD parts -- to
-  // hit the hardware bandwidth floor.
-  //
-  // `in` and `out` are caller-owned spans of equal length; aliasing
-  // (in.data() == out.data()) is safe because the engine reads `in[i]`
-  // before writing `out[i]` for every `i`. `identity` is the monoid
-  // identity (e.g. 0 for plus). `prefix` is the associative combiner
-  // (must be associative; need not be commutative).
-  //
-  // Returns the inclusive total at the right edge:
-  // `prefix(prefix(... prefix(identity, in[0]) ...), in[n-1])`.
+  /// Buffer-to-buffer inclusive prefix scan. Engine owns the inner loop
+  /// (no user body), so it can use the most aggressive memory-traffic
+  /// shape -- decoupled-lookback single-pass with `PREFETCHW` ahead of
+  /// the writes, per-cluster lookback chains on multi-CCD parts -- to
+  /// hit the hardware bandwidth floor.
+  ///
+  /// `in` and `out` are caller-owned spans of equal length; aliasing
+  /// (in.data() == out.data()) is safe because the engine reads `in[i]`
+  /// before writing `out[i]` for every `i`. `identity` is the monoid
+  /// identity (e.g. 0 for plus). `prefix` is the associative combiner
+  /// (must be associative; need not be commutative).
+  ///
+  /// Returns the inclusive total at the right edge:
+  /// `prefix(prefix(... prefix(identity, in[0]) ...), in[n-1])`.
   template <class HintsT, class T, class PrefixFn>
   [[nodiscard]] T inclusiveScan(std::span<const T> in, std::span<T> out,
                                 T identity, PrefixFn &&prefix,
@@ -2291,22 +2332,22 @@ public:
                                                std::move(tok));
   }
 
-  // Submit |fn| for fire-and-forget execution; returns without joining.
-  //
-  // The pool tracks every in-flight detached task via a counter. The
-  // destructor blocks until the counter drops to zero, so a body that
-  // outruns its caller is guaranteed to finish before the pool is destroyed.
-  // The body runs on a dedicated `std::thread` spawned per call; the pool's
-  // persistent worker fleet is reserved for the synchronous primitives.
-  //
-  // Cancellation: a pre-cancelled |tok| short-circuits the body before any
-  // user code runs. The body observes the token cooperatively; the pool does
-  // not preempt.
-  //
-  // Exception handling: an exception escaping |fn| is captured into a
-  // per-pool slot via `std::current_exception` and surfaced by
-  // `lastDetachedException`. The slot latches on the first throw; subsequent
-  // throws drop. A detached throw never propagates into the destructor.
+  /// Submit |fn| for fire-and-forget execution; returns without joining.
+  ///
+  /// The pool tracks every in-flight detached task via a counter. The
+  /// destructor blocks until the counter drops to zero, so a body that
+  /// outruns its caller is guaranteed to finish before the pool is destroyed.
+  /// The body runs on a dedicated `std::thread` spawned per call; the pool's
+  /// persistent worker fleet is reserved for the synchronous primitives.
+  ///
+  /// Cancellation: a pre-cancelled |tok| short-circuits the body before any
+  /// user code runs. The body observes the token cooperatively; the pool does
+  /// not preempt.
+  ///
+  /// Exception handling: an exception escaping |fn| is captured into a
+  /// per-pool slot via `std::current_exception` and surfaced by
+  /// `lastDetachedException`. The slot latches on the first throw; subsequent
+  /// throws drop. A detached throw never propagates into the destructor.
   template <class HintsT, class TaskFn>
   void submitDetached(TaskFn fn, CancellationToken tok = CancellationToken{}) {
     // Token already stopped at submit time: the trampoline would observe
@@ -2357,9 +2398,9 @@ public:
     }
   }
 
-  // Snapshot of the most recently captured exception thrown by a detached
-  // task. The slot latches on the first detached throw; subsequent throws do
-  // not overwrite. Returns `nullptr` if no detached task has thrown.
+  /// Snapshot of the most recently captured exception thrown by a detached
+  /// task. The slot latches on the first detached throw; subsequent throws do
+  /// not overwrite. Returns `nullptr` if no detached task has thrown.
   [[nodiscard]] std::exception_ptr lastDetachedException() const noexcept {
     const std::scoped_lock<std::mutex> lock(m_detachedMutex);
     return m_detachedException;
@@ -2386,55 +2427,55 @@ public:
   }
 
 private:
-  // Per-thread context tracking pool participation; consulted by
-  // `workerIndex` and friends.
+  /// Per-thread context tracking pool participation; consulted by
+  /// `workerIndex` and friends.
   struct ThreadContext {
-    // Slot index of the calling thread (0 outside any pool).
+    /// Slot index of the calling thread (0 outside any pool).
     std::size_t slot = 0;
 
-    // Whether the calling thread is currently inside a pool worker body.
+    /// Whether the calling thread is currently inside a pool worker body.
     bool insidePoolWorker = false;
 
-    // Pool the calling thread is currently a worker of, or `nullptr` outside
-    // any pool. Used by `forkJoin` to detect a recursive call from inside the
-    // pool's own worker drain loop and take the in-place nested-recursion
-    // path instead of dispatching a fresh generation.
+    /// Pool the calling thread is currently a worker of, or `nullptr` outside
+    /// any pool. Used by `forkJoin` to detect a recursive call from inside the
+    /// pool's own worker drain loop and take the in-place nested-recursion
+    /// path instead of dispatching a fresh generation.
     ThreadPool *pool = nullptr;
 
-    // Origin tag of the pool this thread is participating in. Mirrors
-    // `ThreadPool::kind()`; set only while `insidePoolWorker` is true.
+    /// Origin tag of the pool this thread is participating in. Mirrors
+    /// `ThreadPool::kind()`; set only while `insidePoolWorker` is true.
     PoolKind kind = PoolKind::Standalone;
 
-    // Arena index of the owning `PoolGroup` arena; meaningful only when
-    // `kind == PoolKind::Arena`. The cross-arena guard reads this token to
-    // fall through to inline-on-caller execution when a worker tries to call
-    // into a different arena's queue.
+    /// Arena index of the owning `PoolGroup` arena; meaningful only when
+    /// `kind == PoolKind::Arena`. The cross-arena guard reads this token to
+    /// fall through to inline-on-caller execution when a worker tries to call
+    /// into a different arena's queue.
     std::uint32_t arenaIndex = 0;
   };
 
-  // Access (and lazily zero-initialize) the calling thread's pool context.
+  /// Access (and lazily zero-initialize) the calling thread's pool context.
   static ThreadContext &tlsContext() noexcept {
     thread_local ThreadContext ctx;
     return ctx;
   }
 
-  // Detect a synchronous dispatch that would deadlock and force the
-  // inline-on-caller path. Returns `true` in three scenarios:
-  //
-  // 1. Cross-arena call. The caller is a worker on a different `Arena` pool.
-  //    Submitting here would block the caller's own arena worker on a queue
-  //    it does not service.
-  // 2. Same-arena reentrancy. The caller is already a worker on this `Arena`
-  //    pool. A primitive without a nested same-pool path would block on its
-  //    own join condition.
-  // 3. Same-pool reentrancy on a `Standalone` pool. The producer or a worker
-  //    already inside a synchronous primitive of THIS pool would re-enter
-  //    `dispatchOneStatic` and try to re-acquire the non-recursive
-  //    `m_dispatchMutex`, deadlocking against the outer dispatch.
-  //
-  // Primitives with a same-pool nested path (`forkJoin`, compile-time
-  // `parallelFor`) detect that case at their entry point and bypass this
-  // guard.
+  /// Detect a synchronous dispatch that would deadlock and force the
+  /// inline-on-caller path. Returns `true` in three scenarios:
+  ///
+  /// 1. Cross-arena call. The caller is a worker on a different `Arena` pool.
+  ///    Submitting here would block the caller's own arena worker on a queue
+  ///    it does not service.
+  /// 2. Same-arena reentrancy. The caller is already a worker on this `Arena`
+  ///    pool. A primitive without a nested same-pool path would block on its
+  ///    own join condition.
+  /// 3. Same-pool reentrancy on a `Standalone` pool. The producer or a worker
+  ///    already inside a synchronous primitive of THIS pool would re-enter
+  ///    `dispatchOneStatic` and try to re-acquire the non-recursive
+  ///    `m_dispatchMutex`, deadlocking against the outer dispatch.
+  ///
+  /// Primitives with a same-pool nested path (`forkJoin`, compile-time
+  /// `parallelFor`) detect that case at their entry point and bypass this
+  /// guard.
   [[nodiscard]] bool
   shouldFallThroughCrossArena(const ThreadContext &ctx) const noexcept {
     if (!ctx.insidePoolWorker) {
@@ -2454,32 +2495,38 @@ private:
     return true;
   }
 
+  /// Convenience overload that reads the calling thread's `ThreadContext`
+  /// from TLS.
   [[nodiscard]] bool shouldFallThroughCrossArena() const noexcept {
     return shouldFallThroughCrossArena(tlsContext());
   }
 
-  // Argument bundle handed to `workerEntry`; lives in `m_workerSpawnArgs` for
-  // the pool's lifetime.
+  /// Argument bundle handed to `workerEntry`; lives in `m_workerSpawnArgs` for
+  /// the pool's lifetime.
   struct WorkerSpawnArg {
-    // Pool owning this worker; non-owning pointer.
+    /// Pool owning this worker; non-owning pointer.
     ThreadPool *pool = nullptr;
-    // Slot index assigned to this worker (`>= 1`; producer is slot 0).
+    /// Slot index assigned to this worker (`>= 1`; producer is slot 0).
     std::size_t workerIndex = 0;
   };
 
-  // Heap-allocated owner for a single fire-and-forget detached task. The pool
-  // spawns one `std::thread` per task that takes ownership of the closure
-  // and the cancellation token; the owner is destroyed after the body
-  // returns (or short-circuits on a pre-cancelled token).
+  /// Heap-allocated owner for a single fire-and-forget detached task. The pool
+  /// spawns one `std::thread` per task that takes ownership of the closure
+  /// and the cancellation token; the owner is destroyed after the body
+  /// returns (or short-circuits on a pre-cancelled token).
   struct DetachedTask {
+    /// Closure run by the spawned thread. Empty when the body has been
+    /// moved away or never assigned.
     std::function<void()> body;
+    /// Cancellation token consulted before the body runs and again at
+    /// any cooperation points the body chooses to insert.
     CancellationToken token;
   };
 
-  // Trampoline executed on the spawned detached-task thread. Observes
-  // cancellation, runs the body, captures any thrown exception into the
-  // pool's slot, and decrements the in-flight counter under the destructor's
-  // wait condition.
+  /// Trampoline executed on the spawned detached-task thread. Observes
+  /// cancellation, runs the body, captures any thrown exception into the
+  /// pool's slot, and decrements the in-flight counter under the destructor's
+  /// wait condition.
   static void runDetached(ThreadPool *self, DetachedTask *raw) noexcept {
     std::unique_ptr<DetachedTask> owner(raw);
     if (!owner->token.stop_requested()) {
@@ -2512,9 +2559,9 @@ private:
     owner.reset();
   }
 
-  // Block until every in-flight detached task has decremented the counter.
-  // Idempotent; called from the destructor before the synchronous-worker
-  // shutdown path runs so detached bodies never race the pool's teardown.
+  /// Block until every in-flight detached task has decremented the counter.
+  /// Idempotent; called from the destructor before the synchronous-worker
+  /// shutdown path runs so detached bodies never race the pool's teardown.
   void waitForDetachedDrain() noexcept {
     std::unique_lock<std::mutex> lock(m_detachedMutex);
     m_detachedDone.wait(lock, [this]() noexcept {
@@ -2522,8 +2569,8 @@ private:
     });
   }
 
-  // pthread entry trampoline that pins the worker, registers TLS, and runs
-  // the main loop.
+  /// pthread entry trampoline that pins the worker, registers TLS, and runs
+  /// the main loop.
   static void *workerEntry(void *raw) noexcept {
     auto *arg = static_cast<WorkerSpawnArg *>(raw);
     auto &self = *(arg->pool->m_workers.get() + arg->workerIndex);
@@ -2547,8 +2594,8 @@ private:
   }
 
 #ifndef __linux__
-  // `std::thread` entry used by the non-Linux fallback path; mirrors
-  // `workerEntry`.
+  /// `std::thread` entry used by the non-Linux fallback path; mirrors
+  /// `workerEntry`.
   static void workerEntryStdThread(ThreadPool *self,
                                    std::size_t workerIndex) noexcept {
     auto &state = *(self->m_workers.get() + workerIndex);
@@ -2568,14 +2615,14 @@ private:
   }
 #endif
 
-  // Inline fallback: run the body over `[first, last)` directly on the
-  // producer thread. Used when the pool has only one participant or when the
-  // inline-fallback gate (`shouldRunInline`) fires. A pre-cancelled |tok|
-  // short-circuits the body. Producer TLS context is left untouched so
-  // nested-call detection still reports the outer worker's slot.
-  //
-  // Single-call flavor: invokes `fn(first, last)` once. Used when the user
-  // did not request an explicit chunk size.
+  /// Inline fallback: run the body over `[first, last)` directly on the
+  /// producer thread. Used when the pool has only one participant or when the
+  /// inline-fallback gate (`shouldRunInline`) fires. A pre-cancelled |tok|
+  /// short-circuits the body. Producer TLS context is left untouched so
+  /// nested-call detection still reports the outer worker's slot.
+  ///
+  /// Single-call flavor: invokes `fn(first, last)` once. Used when the user
+  /// did not request an explicit chunk size.
   template <class F>
   void runInline(std::size_t first, std::size_t last, F &&fn,
                  const CancellationToken &tok) {
@@ -2587,12 +2634,12 @@ private:
     fn(first, last);
   }
 
-  // Chunked inline fallback: invokes `fn(lo, hi)` for each chunk-sized span
-  // in `[first, last)`. Used by call sites that propagate a non-zero
-  // `HintsT::chunk` so the inline path observes the same chunk boundaries
-  // the parallel path would have produced. Token is polled between chunks
-  // when `cancelChecks` is true so a long range can still be cancelled
-  // mid-flight.
+  /// Chunked inline fallback: invokes `fn(lo, hi)` for each chunk-sized span
+  /// in `[first, last)`. Used by call sites that propagate a non-zero
+  /// `HintsT::chunk` so the inline path observes the same chunk boundaries
+  /// the parallel path would have produced. Token is polled between chunks
+  /// when `cancelChecks` is true so a long range can still be cancelled
+  /// mid-flight.
   template <class F>
   void runInlineChunked(std::size_t first, std::size_t last, std::size_t chunk,
                         bool cancelChecks, F &&fn,
@@ -2616,17 +2663,18 @@ private:
     }
   }
 
-  // Compute and store the block shape (`chunk`, `blockCount`) on |desc|. The
-  // hint's `chunk` overrides when non-zero; otherwise defaults to
-  // `ceil(n / participants)` so each worker handles one contiguous block.
-
-  // Overflow-safe ceiling division: returns `ceil(a / b)` without computing
-  // `a + b - 1`. Used wherever the chunk-shape math could otherwise wrap
-  // when |a| is near `SIZE_MAX`. |b| must be non-zero.
+  /// Overflow-safe ceiling division: returns `ceil(a / b)` without computing
+  /// `a + b - 1`. Used wherever the chunk-shape math could otherwise wrap
+  /// when |a| is near `SIZE_MAX`. |b| must be non-zero.
   static constexpr std::size_t ceilDiv(std::size_t a, std::size_t b) noexcept {
     return (a / b) + ((a % b) != 0U ? 1U : 0U);
   }
 
+  /// Computes and stores the block shape (`chunk`, `blockCount`) on
+  /// `|desc|`. The hint's `chunk` overrides when non-zero; otherwise
+  /// defaults to `ceil(n / participants)` so each worker handles one
+  /// contiguous block. `|oversubscribe|` selects 2x oversubscription
+  /// (DynamicChunked) versus 1x (StaticUniform).
   [[gnu::always_inline]] static void
   fillBlockShape(detail::JobDescriptor &desc, std::size_t n,
                  std::size_t participants, std::size_t hintChunk,
@@ -2659,19 +2707,22 @@ private:
     }
   }
 
-  // Maximum number of chunks the default reduce-chunk derivation produces.
-  // Must remain independent of the participant count so cross-`nJobs`
-  // bit-identity holds. Sized roughly twice the largest `participants` value
-  // the pool can hold so each worker gets at least two chunks for partition
-  // stability.
+  /// Maximum number of chunks the default reduce-chunk derivation produces.
+  /// Must remain independent of the participant count so cross-`nJobs`
+  /// bit-identity holds. Sized roughly twice the largest `participants` value
+  /// the pool can hold so each worker gets at least two chunks for partition
+  /// stability.
   static constexpr std::size_t kReduceMaxChunks = 64;
+  /// Reserved stack-scratch budget for the reduce partials buffer. The
+  /// reducer falls back to heap allocation when `kReduceMaxChunks *
+  /// sizeof(T)` exceeds this byte budget.
   static constexpr std::size_t kReduceStackScratchBytes = 32U * 1024U;
 
-  // Derive a deterministic chunk size for `parallelReduce` calls. Purely a
-  // function of |n| and the optional hint chunk override and is independent of
-  // participant count. This invariant makes the chunk-id pairwise tree shape
-  // stable across worker counts (Demmel-Nguyen TOMS 2014). Never zero when
-  // `n > 0`.
+  /// Derive a deterministic chunk size for `parallelReduce` calls. Purely a
+  /// function of |n| and the optional hint chunk override and is independent of
+  /// participant count. This invariant makes the chunk-id pairwise tree shape
+  /// stable across worker counts (Demmel-Nguyen TOMS 2014). Never zero when
+  /// `n > 0`.
   static std::size_t reduceChunkSize(std::size_t n,
                                      std::size_t hintChunk) noexcept {
     if (hintChunk != 0) {
@@ -2683,16 +2734,16 @@ private:
     return ceilDiv(n, kReduceMaxChunks);
   }
 
-  // Inline-fallback reducer used when the pool gate routes the call to the
-  // producer. Walks the range using the same chunk schedule as the parallel
-  // path (chunk size is `f(n, HintsT)` only) so FixedBlockOrder /
-  // KahanCompensated reductions remain bit-identical to the worker-fanned-out
-  // path.
-  // Inline-fallback reducer used when the pool's participant count is one
-  // (cold path; the parallel engine takes the multi-participant path). |chunk|
-  // and |determinism| may come from a compile-time `HintsT` (typed entry) or
-  // a runtime `Hints` instance (untyped entry); the body is the same loop +
-  // pairwise-tree combine in either case.
+  /// Inline-fallback reducer used when the pool gate routes the call to the
+  /// producer. Walks the range using the same chunk schedule as the parallel
+  /// path (chunk size is `f(n, HintsT)` only) so FixedBlockOrder /
+  /// KahanCompensated reductions remain bit-identical to the worker-fanned-out
+  /// path.
+  /// Inline-fallback reducer used when the pool's participant count is one
+  /// (cold path; the parallel engine takes the multi-participant path). |chunk|
+  /// and |determinism| may come from a compile-time `HintsT` (typed entry) or
+  /// a runtime `Hints` instance (untyped entry); the body is the same loop +
+  /// pairwise-tree combine in either case.
   template <class T, class Map, class Combine>
   T runReduceInlineImpl(std::size_t first, std::size_t last, T init, Map &&map,
                         Combine &&combine, std::size_t chunkHint,
@@ -2734,6 +2785,8 @@ private:
     return combine(std::move(init), std::move(treeResult));
   }
 
+  /// Compile-time-hinted wrapper over `runReduceInlineImpl` that pulls
+  /// `chunk` and `determinism` from `HintsT`.
   template <class HintsT, class T, class Map, class Combine>
   T runReduceInline(std::size_t first, std::size_t last, T init, Map &&map,
                     Combine &&combine, const CancellationToken &tok) {
@@ -2743,6 +2796,9 @@ private:
                                HintsT::determinism, tok);
   }
 
+  /// Runtime-hint wrapper over `runReduceInlineImpl` that forwards the
+  /// runtime `|hints|` chunk and determinism instead of a compile-time
+  /// `HintsT`.
   template <class T, class Map, class Combine>
   T runReduceInlineRuntime(std::size_t first, std::size_t last, T init,
                            Map &&map, Combine &&combine, const Hints &hints,
@@ -2752,12 +2808,12 @@ private:
         std::forward<Combine>(combine), hints.chunk, hints.determinism, tok);
   }
 
-  // Parallel reducer engine for a compile-time `HintsT`. Allocates a
-  // `std::vector<PartialSlot>` (per-element cache-line padded to avoid
-  // false-sharing across adjacent chunk slots) sized to `nChunks`, dispatches
-  // a `void(lo, hi)` worker body that computes the partial via |map| and
-  // stores into `partials[blockId]`, then combines via the chunk-id pairwise
-  // tree. The Kahan path wraps `T` in `KahanPair`.
+  /// Parallel reducer engine for a compile-time `HintsT`. Allocates a
+  /// `std::vector<PartialSlot>` (per-element cache-line padded to avoid
+  /// false-sharing across adjacent chunk slots) sized to `nChunks`, dispatches
+  /// a `void(lo, hi)` worker body that computes the partial via |map| and
+  /// stores into `partials[blockId]`, then combines via the chunk-id pairwise
+  /// tree. The Kahan path wraps `T` in `KahanPair`.
   template <class HintsT, class T, class Map, class Combine>
   T runReduceParallel(std::size_t first, std::size_t last, T init, Map &&map,
                       Combine &&combine, CancellationToken tok,
@@ -3003,8 +3059,8 @@ private:
     }
   }
 
-  // Runtime-hint parallel reducer; selects the determinism path via a runtime
-  // branch.
+  /// Runtime-hint parallel reducer; selects the determinism path via a runtime
+  /// branch.
   template <class T, class Map, class Combine>
   T runReduceParallelRuntime(std::size_t first, std::size_t last, T init,
                              Map &&map, Combine &&combine, const Hints &hints,
@@ -3096,11 +3152,11 @@ private:
     return combined;
   }
 
-  // Single-thread fallback: run every phase of the plex on the producer
-  // thread. Triggered when the pool has at most one participant. Slot 0 owns
-  // the entire range `[0, n)`. `prePhaseFn(phaseIdx)` is invoked before each
-  // phase; cancellation is observed before each phase and the call returns
-  // cleanly when the token is stopped.
+  /// Single-thread fallback: run every phase of the plex on the producer
+  /// thread. Triggered when the pool has at most one participant. Slot 0 owns
+  /// the entire range `[0, n)`. `prePhaseFn(phaseIdx)` is invoked before each
+  /// phase; cancellation is observed before each phase and the call returns
+  /// cleanly when the token is stopped.
   template <class Phase, class PrePhase>
   void runPlexInline(std::size_t nPhases, std::size_t n, Phase &&phaseFn,
                      PrePhase &&prePhaseFn, const CancellationToken &tok) {
@@ -3113,25 +3169,25 @@ private:
     }
   }
 
-  // Persistent-worker plex driver: publish one dispatch and drive `nPhases`
-  // phases.
-  //
-  // Allocates a stack-resident `PlexState` with per-worker `done[]` slots on
-  // dedicated lines. The wrapper body, invoked with `(slot, slot+1)`, runs
-  // the per-slot phase loop: spin until `currentPhase >= localPhase`, run
-  // `phaseFn`, signal `done[slot]`. The dispatch publishes a single job with
-  // `blockCount = participants` and `chunk = 1` so every worker receives
-  // exactly one body invocation; `runStaticPartition` matches block id to
-  // slot id. The producer participates as slot 0; its body drives the phase
-  // epoch (publish next phase, run slot 0's `phaseFn`, then spin-wait on
-  // every other slot's `done`). The descriptor's join after dispatch returns
-  // establishes happens-before for every worker's writes; any captured
-  // exception is rethrown by `dispatchOne`.
-  //
-  // Wait for every non-producer slot to reach |pStamp| on its `done`
-  // counter. Used by `runPlexParallel` to close a phase: the producer joins
-  // on every other slot's `done >= pStamp` before publishing the next phase
-  // (or before returning on a cancellation path).
+  /// Persistent-worker plex driver: publish one dispatch and drive `nPhases`
+  /// phases.
+  ///
+  /// Allocates a stack-resident `PlexState` with per-worker `done[]` slots on
+  /// dedicated lines. The wrapper body, invoked with `(slot, slot+1)`, runs
+  /// the per-slot phase loop: spin until `currentPhase >= localPhase`, run
+  /// `phaseFn`, signal `done[slot]`. The dispatch publishes a single job with
+  /// `blockCount = participants` and `chunk = 1` so every worker receives
+  /// exactly one body invocation; `runStaticPartition` matches block id to
+  /// slot id. The producer participates as slot 0; its body drives the phase
+  /// epoch (publish next phase, run slot 0's `phaseFn`, then spin-wait on
+  /// every other slot's `done`). The descriptor's join after dispatch returns
+  /// establishes happens-before for every worker's writes; any captured
+  /// exception is rethrown by `dispatchOne`.
+  ///
+  /// Wait for every non-producer slot to reach |pStamp| on its `done`
+  /// counter. Used by `runPlexParallel` to close a phase: the producer joins
+  /// on every other slot's `done >= pStamp` before publishing the next phase
+  /// (or before returning on a cancellation path).
   [[gnu::always_inline]] static void
   waitPlexSlotsReachStamp(detail::PlexState &state,
                           std::uint64_t pStamp) noexcept {
@@ -3147,10 +3203,10 @@ private:
     }
   }
 
-  // Pre-phase hook: the producer invokes `prePhaseFn(p - 1)` before each
-  // release-store on `currentPhase`. The hook synchronises with workers'
-  // acquire-spin via the same release-store, so any state the hook writes is
-  // visible to every worker that observes the new phase.
+  /// Pre-phase hook: the producer invokes `prePhaseFn(p - 1)` before each
+  /// release-store on `currentPhase`. The hook synchronises with workers'
+  /// acquire-spin via the same release-store, so any state the hook writes is
+  /// visible to every worker that observes the new phase.
   template <class Phase, class PrePhase>
   void runPlexParallel(std::size_t nPhases, std::size_t n, Phase &&phaseFn,
                        PrePhase &&prePhaseFn, CancellationToken tok,
@@ -3340,13 +3396,13 @@ private:
     rethrowIfCaptured(state);
   }
 
-  // First-exception capture shared by every primitive (plex, chain, scan,
-  // forkJoin, dispatch). Stored on the protocol's state so the descriptor's
-  // own slot remains untouched (workers may also throw from the wrapper body
-  // itself, which the dispatch engine captures separately). The first thread
-  // to win the CAS owns the exception pointer; subsequent throws delete their
-  // own copy. |State| must expose a `firstException` atomic of
-  // `exception_ptr*`.
+  /// First-exception capture shared by every primitive (plex, chain, scan,
+  /// forkJoin, dispatch). Stored on the protocol's state so the descriptor's
+  /// own slot remains untouched (workers may also throw from the wrapper body
+  /// itself, which the dispatch engine captures separately). The first thread
+  /// to win the CAS owns the exception pointer; subsequent throws delete their
+  /// own copy. |State| must expose a `firstException` atomic of
+  /// `exception_ptr*`.
   template <class State>
   [[gnu::always_inline]] static void
   captureFirstException(State &state) noexcept {
@@ -3363,28 +3419,28 @@ private:
     }
   }
 
-  // `BarrierKind::Global` rendezvous: each slot scans every peer's `done`
-  // epoch until all have reached |target|. Used by every slot (producer and
-  // non-producers alike) for `BarrierKind::Global` and
-  // `BarrierKind::DeterministicReduce`. Each slot stamps its own `done` to
-  // |target| then scans every peer's `done` line until all have reached
-  // |target|.
-  //
-  // Coherence model: each slot's `done` line is on its own cache line (no
-  // false sharing). After a slot's release-store the line transitions
-  // Modified on the writing core; readers fetch it via Modified -> Shared
-  // transitions. Because every slot scans in parallel, the wall-clock cost
-  // of the rendezvous is bounded by `(slowest_writer_finish_time) + (one
-  // cross-core coherence pull per peer)`, not by a producer's serial
-  // scan-then-publish chain.
-  //
-  // Cancellation handshake: a slot bailing on cancellation stamps
-  // `done = nStages` instead of |target|. Because `nStages > target` for
-  // every active stage, the wait condition `done >= target` is satisfied
-  // unconditionally, so waiters exit cleanly without an explicit
-  // `chainCancelled` poll inside the spin loop. The slot's own `done` line
-  // is skipped via the `s != self` guard so the loop does not pay an extra
-  // L1-load for self-traffic.
+  /// `BarrierKind::Global` rendezvous: each slot scans every peer's `done`
+  /// epoch until all have reached |target|. Used by every slot (producer and
+  /// non-producers alike) for `BarrierKind::Global` and
+  /// `BarrierKind::DeterministicReduce`. Each slot stamps its own `done` to
+  /// |target| then scans every peer's `done` line until all have reached
+  /// |target|.
+  ///
+  /// Coherence model: each slot's `done` line is on its own cache line (no
+  /// false sharing). After a slot's release-store the line transitions
+  /// Modified on the writing core; readers fetch it via Modified -> Shared
+  /// transitions. Because every slot scans in parallel, the wall-clock cost
+  /// of the rendezvous is bounded by `(slowest_writer_finish_time) + (one
+  /// cross-core coherence pull per peer)`, not by a producer's serial
+  /// scan-then-publish chain.
+  ///
+  /// Cancellation handshake: a slot bailing on cancellation stamps
+  /// `done = nStages` instead of |target|. Because `nStages > target` for
+  /// every active stage, the wait condition `done >= target` is satisfied
+  /// unconditionally, so waiters exit cleanly without an explicit
+  /// `chainCancelled` poll inside the spin loop. The slot's own `done` line
+  /// is skipped via the `s != self` guard so the loop does not pay an extra
+  /// L1-load for self-traffic.
   static void waitAllSlotsDone(detail::ChainState &state, std::uint32_t self,
                                std::uint64_t target) noexcept {
     const std::uint64_t absoluteTarget = state.epochBase + target;
@@ -3406,12 +3462,12 @@ private:
     }
   }
 
-  // Wait for slot 0's `done` epoch to reach |target| before returning. Used
-  // for `BarrierKind::ProducerSerial`: workers other than slot 0 spin on the
-  // producer's release-store before either skipping the next stage's body or
-  // proceeding. Cancellation handshake mirrors `waitAllSlotsDone`: a
-  // cancelled producer stamps `done[0] = nStages` so the wait condition is
-  // satisfied without an explicit `chainCancelled` poll inside the spin loop.
+  /// Wait for slot 0's `done` epoch to reach |target| before returning. Used
+  /// for `BarrierKind::ProducerSerial`: workers other than slot 0 spin on the
+  /// producer's release-store before either skipping the next stage's body or
+  /// proceeding. Cancellation handshake mirrors `waitAllSlotsDone`: a
+  /// cancelled producer stamps `done[0] = nStages` so the wait condition is
+  /// satisfied without an explicit `chainCancelled` poll inside the spin loop.
   static void waitProducerSerialBarrier(detail::ChainState &state,
                                         std::uint64_t target) noexcept {
     const std::uint64_t absoluteTarget = state.epochBase + target;
@@ -3421,28 +3477,28 @@ private:
     }
   }
 
-  // Recursive helper: run stage |I| (and every later stage) for one slot.
-  // Uses a compile-time `if constexpr` ladder over `BarrierKind` so each
-  // stage's barrier becomes a branchless inlined call. The recursion
-  // terminates when `I == sizeof...(Stages)`.
-  //
-  // Pre-stage entry (driven by stage `I-1`'s barrier):
-  // - `None`: no wait. Each slot pipelines forward independently.
-  // - `Global` / `DeterministicReduce`: every slot scans every peer's
-  //   `done >= I` independently; no participant acts as a serial gate.
-  //   Coherence traffic per stage is bounded by the slowest writer's
-  //   release-store plus one cross-core pull per peer per slot, executed
-  //   in parallel across slots.
-  // - `ProducerSerial`: non-producers wait on slot 0's `done >= I`;
-  //   producer skips the wait.
-  //
-  // Stage execution:
-  // - `ProducerSerial`: only slot 0 invokes the body; other slots stamp
-  //   their `done` and skip.
-  // - Otherwise: every slot invokes the body for its `(slotLo, slotHi)`.
-  //
-  // Cancellation: between every stage the slot checks `chainCancelled`;
-  // when set, the slot stamps `done` to the final stage epoch and returns.
+  /// Recursive helper: run stage |I| (and every later stage) for one slot.
+  /// Uses a compile-time `if constexpr` ladder over `BarrierKind` so each
+  /// stage's barrier becomes a branchless inlined call. The recursion
+  /// terminates when `I == sizeof...(Stages)`.
+  ///
+  /// Pre-stage entry (driven by stage `I-1`'s barrier):
+  /// - `None`: no wait. Each slot pipelines forward independently.
+  /// - `Global` / `DeterministicReduce`: every slot scans every peer's
+  ///   `done >= I` independently; no participant acts as a serial gate.
+  ///   Coherence traffic per stage is bounded by the slowest writer's
+  ///   release-store plus one cross-core pull per peer per slot, executed
+  ///   in parallel across slots.
+  /// - `ProducerSerial`: non-producers wait on slot 0's `done >= I`;
+  ///   producer skips the wait.
+  ///
+  /// Stage execution:
+  /// - `ProducerSerial`: only slot 0 invokes the body; other slots stamp
+  ///   their `done` and skip.
+  /// - Otherwise: every slot invokes the body for its `(slotLo, slotHi)`.
+  ///
+  /// Cancellation: between every stage the slot checks `chainCancelled`;
+  /// when set, the slot stamps `done` to the final stage epoch and returns.
   template <std::size_t I, class StagesTuple>
   void runChainStageForSlot(std::uint32_t slot, std::size_t slotLo,
                             std::size_t slotHi, detail::ChainState &state,
@@ -3559,12 +3615,16 @@ private:
     }
   }
 
+  /// True when `StageT`'s barrier permits the chain to use the
+  /// dynamic-rebalance scheduler (`Global` or `DeterministicReduce`).
   template <class StageT>
   static consteval bool chainStageAllowsDynamicRebalance() noexcept {
     return StageT::barrier == BarrierKind::Global ||
            StageT::barrier == BarrierKind::DeterministicReduce;
   }
 
+  /// Index-pack helper for `allChainStagesAllowDynamicRebalance`. Folds
+  /// `chainStageAllowsDynamicRebalance` across every stage in the tuple.
   template <class StagesTuple, std::size_t... Is>
   static consteval bool allChainStagesAllowDynamicRebalanceImpl(
       std::index_sequence<Is...> /*unused*/) noexcept {
@@ -3572,12 +3632,18 @@ private:
                        std::tuple_element_t<Is, StagesTuple>>());
   }
 
+  /// True when every stage in the chain permits dynamic rebalance. Used
+  /// at the top of the chain dispatch to pick the scheduler.
   template <class StagesTuple>
   static consteval bool allChainStagesAllowDynamicRebalance() noexcept {
     return allChainStagesAllowDynamicRebalanceImpl<StagesTuple>(
         std::make_index_sequence<std::tuple_size_v<StagesTuple>>{});
   }
 
+  /// Returns the per-stage block size for the dynamic chain scheduler.
+  /// Honours `|hintChunk|` when non-zero; otherwise picks
+  /// `ceil(n / (participants * 2))` so the scheduler has 2x
+  /// oversubscription per slot for steal-driven rebalance.
   static constexpr std::size_t
   chainDynamicChunkSize(std::size_t n, std::size_t participants,
                         std::size_t hintChunk) noexcept {
@@ -3587,6 +3653,9 @@ private:
     return ceilDiv(n, participants * 2U);
   }
 
+  /// Slot's main loop for the dynamic chain scheduler. Per stage, waits
+  /// for the previous stage's barrier, then drains a per-stage atomic
+  /// counter for blocks until the chain completes or is cancelled.
   template <std::size_t I, class StagesTuple>
   void runDynamicChainStageForSlot(std::uint32_t slot,
                                    detail::ChainState &state,
@@ -3635,17 +3704,19 @@ private:
     }
   }
 
-  // Single-thread fallback: run every stage on the producer thread.
-  // Triggered when the pool has at most one participant or the stage pack is
-  // empty. Each stage runs with `slot = 0`, `lo = 0`, `hi = n`. Cancellation
-  // aborts the loop cleanly between stages. Stage exceptions propagate to
-  // the caller unchanged because the inline path has no shared state.
+  /// Single-thread fallback: run every stage on the producer thread.
+  /// Triggered when the pool has at most one participant or the stage pack is
+  /// empty. Each stage runs with `slot = 0`, `lo = 0`, `hi = n`. Cancellation
+  /// aborts the loop cleanly between stages. Stage exceptions propagate to
+  /// the caller unchanged because the inline path has no shared state.
   template <class StagesTuple>
   void runChainInline(std::size_t n, const CancellationToken &tok,
                       StagesTuple &stages) {
     runChainInlineRec<0>(n, tok, stages);
   }
 
+  /// Recursive worker for `runChainInline`. Walks every stage in order
+  /// on the producer thread, observing cancellation between stages.
   template <std::size_t I, class StagesTuple>
   void runChainInlineRec(std::size_t n, const CancellationToken &tok,
                          StagesTuple &stages) {
@@ -3658,14 +3729,14 @@ private:
     }
   }
 
-  // Variadic chain dispatcher: publish one job, run every stage, rethrow on
-  // first throw. An empty stage pack returns immediately. With
-  // `participants <= 1` every stage runs inline on the producer. Otherwise
-  // a stack-resident `ChainState` is allocated, a wrapper body invokes
-  // `runChainStageForSlot<0>` for the slot's id, the call dispatches a
-  // static-uniform job with `chunk == 1` and `blockCount == participants`,
-  // and the chain's first captured exception (if any) is rethrown after the
-  // join.
+  /// Variadic chain dispatcher: publish one job, run every stage, rethrow on
+  /// first throw. An empty stage pack returns immediately. With
+  /// `participants <= 1` every stage runs inline on the producer. Otherwise
+  /// a stack-resident `ChainState` is allocated, a wrapper body invokes
+  /// `runChainStageForSlot<0>` for the slot's id, the call dispatches a
+  /// static-uniform job with `chunk == 1` and `blockCount == participants`,
+  /// and the chain's first captured exception (if any) is rethrown after the
+  /// join.
   template <class ChainHintsT, class... Stages>
   void parallelChainImpl(std::size_t n, const CancellationToken &tok,
                          Stages &&...stages) {
@@ -3673,6 +3744,10 @@ private:
         n, /*runtimeHints=*/nullptr, tok, std::forward<Stages>(stages)...);
   }
 
+  /// Internal entry shared by the compile-time-hinted and runtime-hinted
+  /// `parallelChain` overloads. `|runtimeHints|` is non-null when the
+  /// runtime overload is in use; the compile-time overload passes
+  /// `nullptr` and the implementation reads `ChainHintsT` instead.
   template <class ChainHintsT, class... Stages>
   void parallelChainImplWithRuntimeHints(std::size_t n,
                                          const ChainHints *runtimeHints,
@@ -3821,9 +3896,9 @@ private:
     }
   }
 
-  // Rethrow any exception captured into |state|'s `firstException` slot.
-  // The slot is reset to `nullptr` after the rethrow so the caller's stack
-  // frame can unwind without leaking the heap-allocated exception_ptr.
+  /// Rethrow any exception captured into |state|'s `firstException` slot.
+  /// The slot is reset to `nullptr` after the rethrow so the caller's stack
+  /// frame can unwind without leaking the heap-allocated exception_ptr.
   template <class State>
   [[gnu::always_inline]] static void rethrowIfCaptured(State &state) {
     auto *eptr = state.firstException.load(std::memory_order_acquire);
@@ -3835,22 +3910,22 @@ private:
     }
   }
 
-  // Parallel Blelloch scan engine: publish one job, run two passes, return
-  // the inclusive total. The pool-owned `done` slot block is reused (each
-  // dispatch reserves a disjoint epoch interval), and a per-chunk `partials`
-  // vector with cache-line padding keeps adjacent chunks' writes off the
-  // same line. The wrapper body invoked with `(slot, slot+1)` runs the
-  // per-slot two-pass protocol: slot 0 (the producer) drives the sequential
-  // reduce between passes; non-zero slots acquire-spin on
-  // `prefixesPublished` between Pass 1 and Pass 2. The dispatch publishes a
-  // static-uniform job with `blockCount = participants` and `chunk = 1` so
-  // every slot receives exactly one body invocation. Slot 0's body runs
-  // Pass 1, performs the sequential reduce, publishes prefixes, runs
-  // Pass 2, then joins on every other slot's `done >= 2`. Any captured
-  // exception is rethrown after dispatch returns.
-  //
-  // The per-chunk slot type is cache-line aligned so adjacent partials live
-  // on separate lines (false-sharing avoidance over byte-tight packing).
+  /// Parallel Blelloch scan engine: publish one job, run two passes, return
+  /// the inclusive total. The pool-owned `done` slot block is reused (each
+  /// dispatch reserves a disjoint epoch interval), and a per-chunk `partials`
+  /// vector with cache-line padding keeps adjacent chunks' writes off the
+  /// same line. The wrapper body invoked with `(slot, slot+1)` runs the
+  /// per-slot two-pass protocol: slot 0 (the producer) drives the sequential
+  /// reduce between passes; non-zero slots acquire-spin on
+  /// `prefixesPublished` between Pass 1 and Pass 2. The dispatch publishes a
+  /// static-uniform job with `blockCount = participants` and `chunk = 1` so
+  /// every slot receives exactly one body invocation. Slot 0's body runs
+  /// Pass 1, performs the sequential reduce, publishes prefixes, runs
+  /// Pass 2, then joins on every other slot's `done >= 2`. Any captured
+  /// exception is rethrown after dispatch returns.
+  ///
+  /// The per-chunk slot type is cache-line aligned so adjacent partials live
+  /// on separate lines (false-sharing avoidance over byte-tight packing).
   template <class HintsT, class T, class BodyFn, class PrefixFn>
   T runScanParallel(std::size_t n, T identity, BodyFn &&body, PrefixFn &&prefix,
                     CancellationToken tok, std::size_t participants) {
@@ -4245,40 +4320,40 @@ private:
     return inclusiveTotal;
   }
 
-  // Decoupled-lookback inclusive prefix-sum engine. Single-pass: each
-  // tile reads its slice of `in` once and writes its slice of `out`
-  // once, so the bandwidth floor is 2n bytes (read input + write
-  // output) instead of two-pass Blelloch's 3n.
-  //
-  // Per-tile state machine (Merrill-Garland 2016): every tile cycles
-  // through `Initialized -> AggregateAvailable -> PrefixAvailable`.
-  // Tile T's worker computes its local total, publishes it as
-  // `aggregate`, walks predecessors backward summing aggregates until
-  // it finds a predecessor in `PrefixAvailable`, computes its own
-  // prefix, publishes `prefix`, then runs the inclusive scan into
-  // `out[T_lo..T_hi]` with `prefix` as the seed.
-  //
-  // Cross-CCD adaptation: each tile is owned by a single worker (slot)
-  // and per-tile state lines live with the owner; the lookback chain
-  // sweeps backward across tiles, so workers on cluster N reading a
-  // predecessor tile owned by cluster M pay the cross-cluster
-  // coherence cost. With tiles sized to the runtime-probed L2/2 the
-  // chain typically terminates within a couple of hops because
-  // immediate predecessors finish their aggregate before the
-  // successor's body returns.
-  //
-  // Output prefetch: each tile issues `PREFETCHW` over its own
-  // `out[T_lo..T_hi]` slice immediately after publishing its
-  // aggregate, so the cross-cluster RFO traffic for the writes runs
-  // concurrently with the lookback walk and the local scan, hiding
-  // the inter-die fabric round-trip behind per-tile compute.
-  //
-  // Tile size: `tileBytes = max(64 KiB, l2KibPerCore * 1024 / 2)` --
-  // half the runtime-probed L2 leaves room for both the input read
-  // and the output write of a tile to be L2-resident. Falls back to
-  // 256 KiB when sysfs is absent.
-  //
-  // Returns the inclusive total at the right edge.
+  /// Decoupled-lookback inclusive prefix-sum engine. Single-pass: each
+  /// tile reads its slice of `in` once and writes its slice of `out`
+  /// once, so the bandwidth floor is 2n bytes (read input + write
+  /// output) instead of two-pass Blelloch's 3n.
+  ///
+  /// Per-tile state machine (Merrill-Garland 2016): every tile cycles
+  /// through `Initialized -> AggregateAvailable -> PrefixAvailable`.
+  /// Tile T's worker computes its local total, publishes it as
+  /// `aggregate`, walks predecessors backward summing aggregates until
+  /// it finds a predecessor in `PrefixAvailable`, computes its own
+  /// prefix, publishes `prefix`, then runs the inclusive scan into
+  /// `out[T_lo..T_hi]` with `prefix` as the seed.
+  ///
+  /// Cross-CCD adaptation: each tile is owned by a single worker (slot)
+  /// and per-tile state lines live with the owner; the lookback chain
+  /// sweeps backward across tiles, so workers on cluster N reading a
+  /// predecessor tile owned by cluster M pay the cross-cluster
+  /// coherence cost. With tiles sized to the runtime-probed L2/2 the
+  /// chain typically terminates within a couple of hops because
+  /// immediate predecessors finish their aggregate before the
+  /// successor's body returns.
+  ///
+  /// Output prefetch: each tile issues `PREFETCHW` over its own
+  /// `out[T_lo..T_hi]` slice immediately after publishing its
+  /// aggregate, so the cross-cluster RFO traffic for the writes runs
+  /// concurrently with the lookback walk and the local scan, hiding
+  /// the inter-die fabric round-trip behind per-tile compute.
+  ///
+  /// Tile size: `tileBytes = max(64 KiB, l2KibPerCore * 1024 / 2)` --
+  /// half the runtime-probed L2 leaves room for both the input read
+  /// and the output write of a tile to be L2-resident. Falls back to
+  /// 256 KiB when sysfs is absent.
+  ///
+  /// Returns the inclusive total at the right edge.
   template <class HintsT, class T, class PrefixFn>
   T runInclusiveScanLookback(std::span<const T> in, std::span<T> out,
                              T identity, PrefixFn &&prefix,
@@ -4530,11 +4605,11 @@ private:
     return prefix(tiles[numTiles - 1U].prefix, tiles[numTiles - 1U].aggregate);
   }
 
-  // Resolve the steal-policy field of |HintsT|, defaulting to
-  // `StealPolicy::ClusterLocal` when the hint type does not declare one.
-  // The detection idiom keeps the `forkJoin` entry compatible with hint
-  // presets that omit the field. The fallback matches `HintsDefaults` so
-  // an absent field behaves identically to the default-constructed hint.
+  /// Resolve the steal-policy field of |HintsT|, defaulting to
+  /// `StealPolicy::ClusterLocal` when the hint type does not declare one.
+  /// The detection idiom keeps the `forkJoin` entry compatible with hint
+  /// presets that omit the field. The fallback matches `HintsDefaults` so
+  /// an absent field behaves identically to the default-constructed hint.
   template <class HintsT>
   static constexpr StealPolicy stealPolicyFromHints() noexcept {
     if constexpr (requires { HintsT::stealPolicy; }) {
@@ -4544,9 +4619,9 @@ private:
     }
   }
 
-  // Wrap each task closure in a `FunctionRef<void()>` and store it in a
-  // stack-resident `detail::Task` descriptor. Used by both `forkJoin` entry
-  // overloads.
+  /// Wrap each task closure in a `FunctionRef<void()>` and store it in a
+  /// stack-resident `detail::Task` descriptor. Used by both `forkJoin` entry
+  /// overloads.
   template <class ClosureTuple, std::size_t N, std::size_t... Is>
   static void fillTaskBodies(ClosureTuple &closures,
                              std::array<detail::Task, N> &tasks,
@@ -4554,13 +4629,13 @@ private:
     ((tasks[Is].body = FunctionRef<void()>(std::get<Is>(closures))), ...);
   }
 
-  // Run |nTasks| fork-join tasks from the producer thread, dispatching to
-  // background workers via the standard generation-publish protocol. Each
-  // task is pushed onto slot 0's deque, the descriptor is published so
-  // background workers wake and enter the drain loop, the producer runs its
-  // own drain loop as slot 0, and the call joins when every worker's
-  // `doneEpoch` reaches the new generation. The first captured exception
-  // (if any) is rethrown after the join.
+  /// Run |nTasks| fork-join tasks from the producer thread, dispatching to
+  /// background workers via the standard generation-publish protocol. Each
+  /// task is pushed onto slot 0's deque, the descriptor is published so
+  /// background workers wake and enter the drain loop, the producer runs its
+  /// own drain loop as slot 0, and the call joins when every worker's
+  /// `doneEpoch` reaches the new generation. The first captured exception
+  /// (if any) is rethrown after the join.
   template <bool HasToken = true>
   void runForkJoinOuter(detail::Task *tasks, std::size_t nTasks,
                         CancellationToken tok, StealPolicy stealPolicy) {
@@ -4652,20 +4727,20 @@ private:
     rethrowIfCaptured(state);
   }
 
-  // Recursive `forkJoin` fast path that calls the last child inline by
-  // static type. Pushes the first |deferredCount| `Task` descriptors onto
-  // the calling worker's deque (so peers can steal via the standard victim
-  // probe) and invokes |inlineLast| directly, bypassing the `FunctionRef`
-  // thunk and the per-task `runOneTask` wrapper. Cancellation gating,
-  // exception capture, and the `pendingTasks` rendezvous match
-  // `runOneTask`'s contract; only the indirect call disappears.
-  //
-  // Invariant: `pendingTasks` is initialized to |deferredCount| (the
-  // deque-pushed children only). The inline child runs on the producer
-  // thread and does not contribute to the join counter, since it always
-  // completes before drain begins. For `participants <= 1` the path falls
-  // back to the single-participant inline executor after rebuilding a full
-  // Task array.
+  /// Recursive `forkJoin` fast path that calls the last child inline by
+  /// static type. Pushes the first |deferredCount| `Task` descriptors onto
+  /// the calling worker's deque (so peers can steal via the standard victim
+  /// probe) and invokes |inlineLast| directly, bypassing the `FunctionRef`
+  /// thunk and the per-task `runOneTask` wrapper. Cancellation gating,
+  /// exception capture, and the `pendingTasks` rendezvous match
+  /// `runOneTask`'s contract; only the indirect call disappears.
+  ///
+  /// Invariant: `pendingTasks` is initialized to |deferredCount| (the
+  /// deque-pushed children only). The inline child runs on the producer
+  /// thread and does not contribute to the join counter, since it always
+  /// completes before drain begins. For `participants <= 1` the path falls
+  /// back to the single-participant inline executor after rebuilding a full
+  /// Task array.
   template <bool HasToken = true, class InlineFn>
   void runForkJoinTypedTailNested(
       detail::Task *deferred, std::size_t deferredCount, InlineFn &&inlineLast,
@@ -4745,14 +4820,14 @@ private:
     rethrowIfCaptured(state);
   }
 
-  // Run |nTasks| fork-join tasks recursively from inside a worker's drain
-  // loop. Called when `forkJoin` is invoked re-entrantly from a thread that
-  // is already a worker of this pool. Pushes the children onto the calling
-  // worker's own deque so they are visible to the standard victim-selection
-  // probe and runs the calling worker's drain loop with a fresh
-  // `detail::ForkJoinState` until the inner pending-task counter reaches
-  // zero. The outer state's drain loop is unaffected; the inner call
-  // borrows the worker for the duration of the recursive frame.
+  /// Run |nTasks| fork-join tasks recursively from inside a worker's drain
+  /// loop. Called when `forkJoin` is invoked re-entrantly from a thread that
+  /// is already a worker of this pool. Pushes the children onto the calling
+  /// worker's own deque so they are visible to the standard victim-selection
+  /// probe and runs the calling worker's drain loop with a fresh
+  /// `detail::ForkJoinState` until the inner pending-task counter reaches
+  /// zero. The outer state's drain loop is unaffected; the inner call
+  /// borrows the worker for the duration of the recursive frame.
   void runForkJoinNested(detail::Task *tasks, std::size_t nTasks,
                          CancellationToken tok, StealPolicy stealPolicy,
                          std::uint32_t callerSlot) {
@@ -4812,11 +4887,11 @@ private:
     rethrowIfCaptured(state);
   }
 
-  // Inline fallback: run every task serially on the calling thread. Used for
-  // the single-participant case (no fan-out is possible) and also as the
-  // slow-path tail of `runForkJoinDrain` when nothing is left to steal but
-  // tasks are still pending. Each body's exception is caught and recorded
-  // into the call's `firstException` slot.
+  /// Inline fallback: run every task serially on the calling thread. Used for
+  /// the single-participant case (no fan-out is possible) and also as the
+  /// slow-path tail of `runForkJoinDrain` when nothing is left to steal but
+  /// tasks are still pending. Each body's exception is caught and recorded
+  /// into the call's `firstException` slot.
   static void runForkJoinInline(detail::Task *tasks, std::size_t nTasks,
                                 detail::ForkJoinState &state) noexcept {
     for (std::size_t i = 0; i < nTasks; ++i) {
@@ -4825,13 +4900,13 @@ private:
     }
   }
 
-  // Worker-side drain loop used by the producer (slot 0) and every
-  // background participant. Repeatedly pop a task from the worker's own
-  // deque; if empty, steal from another worker; run the popped/stolen task;
-  // loop until |state|'s `pendingTasks` counter reaches zero. The
-  // cancellation flag short-circuits the body and decrements the counter
-  // without running the payload so the join finishes promptly under
-  // cancellation or after a captured exception.
+  /// Worker-side drain loop used by the producer (slot 0) and every
+  /// background participant. Repeatedly pop a task from the worker's own
+  /// deque; if empty, steal from another worker; run the popped/stolen task;
+  /// loop until |state|'s `pendingTasks` counter reaches zero. The
+  /// cancellation flag short-circuits the body and decrements the counter
+  /// without running the payload so the join finishes promptly under
+  /// cancellation or after a captured exception.
   template <bool HasToken = true>
   void runForkJoinDrain(std::uint32_t slot, detail::ForkJoinState &state,
                         std::int64_t *ownPending = nullptr) noexcept {
@@ -4935,12 +5010,12 @@ private:
     }
   }
 
-  // Pick a victim slot and call its deque's `steal` entry. Uses an xorshift
-  // RNG seeded from the caller's slot id; when |state| requests CCD-local
-  // affinity, the candidate set is restricted to same-CCD victims first,
-  // falling back to any victim if no same-CCD steal succeeded after a full
-  // rotation. Returns the stolen `Task` pointer or `nullptr` on
-  // contention / empty.
+  /// Pick a victim slot and call its deque's `steal` entry. Uses an xorshift
+  /// RNG seeded from the caller's slot id; when |state| requests CCD-local
+  /// affinity, the candidate set is restricted to same-CCD victims first,
+  /// falling back to any victim if no same-CCD steal succeeded after a full
+  /// rotation. Returns the stolen `Task` pointer or `nullptr` on
+  /// contention / empty.
   detail::Task *trySteal(std::uint32_t self, detail::ForkJoinState &state,
                          std::uint64_t &rng,
                          std::uint32_t &victimOut) noexcept {
@@ -5007,18 +5082,18 @@ private:
     return nullptr;
   }
 
-  // Execute one popped/stolen `detail::Task`. Runs the body in a try-block;
-  // on success decrements the call's `pendingTasks` counter via release so
-  // the producer's spin-loop establishes happens-before with whatever the
-  // body wrote. On exception, records the first throw into the call's
-  // `firstException` slot, sets the cancellation flag, and decrements
-  // unconditionally so the join finishes.
-  //
-  // Producer-local variant: skips `state.pendingTasks.fetch_sub` because
-  // the caller is tracking the decrement in a non-atomic stack-local
-  // counter. Used by the producer's own drain when the popped task belongs
-  // to the producer's own scope; peer-stolen tasks still use
-  // `runOneTaskImpl<HasToken>` to keep the cross-thread atomic.
+  /// Execute one popped/stolen `detail::Task`. Runs the body in a try-block;
+  /// on success decrements the call's `pendingTasks` counter via release so
+  /// the producer's spin-loop establishes happens-before with whatever the
+  /// body wrote. On exception, records the first throw into the call's
+  /// `firstException` slot, sets the cancellation flag, and decrements
+  /// unconditionally so the join finishes.
+  ///
+  /// Producer-local variant: skips `state.pendingTasks.fetch_sub` because
+  /// the caller is tracking the decrement in a non-atomic stack-local
+  /// counter. Used by the producer's own drain when the popped task belongs
+  /// to the producer's own scope; peer-stolen tasks still use
+  /// `runOneTaskImpl<HasToken>` to keep the cross-thread atomic.
   template <bool HasToken>
   [[gnu::always_inline]] static void
   runOneTaskOwn(detail::Task &task) noexcept {
@@ -5035,6 +5110,11 @@ private:
     }
   }
 
+  /// Cross-thread variant of the per-task runner. Decrements
+  /// `state.pendingTasks` after the body returns or after a cancellation
+  /// short-circuit so the producer's join condition can observe
+  /// completion. `HasToken` elides the token poll when the caller routed
+  /// through the no-token entry.
   template <bool HasToken>
   static void runOneTaskImpl(detail::Task &task,
                              std::uint32_t /*slot*/) noexcept {
@@ -5061,14 +5141,17 @@ private:
     state.pendingTasks.fetch_sub(1, std::memory_order_release);
   }
 
+  /// Default-token specialisation of `runOneTaskImpl<true>`. Used by the
+  /// peer-stolen task path that does not statically know whether the
+  /// caller passed a token.
   static void runOneTask(detail::Task &task, std::uint32_t slot) noexcept {
     runOneTaskImpl<true>(task, slot);
   }
 
-  // Seed an xorshift64 RNG from |slot|. The RNG drives `forkJoin`'s
-  // victim-selection probe order. Seeding from the slot id keeps each
-  // worker's first probe distinct so workers do not pile on the same
-  // victim.
+  /// Seed an xorshift64 RNG from |slot|. The RNG drives `forkJoin`'s
+  /// victim-selection probe order. Seeding from the slot id keeps each
+  /// worker's first probe distinct so workers do not pile on the same
+  /// victim.
   std::uint64_t xorshiftSeed(std::uint32_t slot) const noexcept {
     // Mix in `this` so two arenas with the same slot id produce different
     // RNG sequences. Without the `this` mix, slot 1 in arena A and slot 1
@@ -5084,8 +5167,8 @@ private:
     return s;
   }
 
-  // Advance an xorshift64 RNG. Marsaglia's xorshift64 sequence: one 64-bit
-  // register, three shifts, no branches.
+  /// Advance an xorshift64 RNG. Marsaglia's xorshift64 sequence: one 64-bit
+  /// register, three shifts, no branches.
   static std::uint64_t xorshiftNext(std::uint64_t &state) noexcept {
     std::uint64_t s = state;
     s ^= s << 13;
@@ -5095,24 +5178,24 @@ private:
     return s;
   }
 
-  // Reduce a 64-bit RNG draw to `[0, n)` via multiply-high (Lemire 2018).
-  // Replaces `xorshiftNext(rng) % n` in the steal hot path. For
-  // non-power-of-two |n| integer modulo compiles to `idiv` on x86, which
-  // has long latency; the multiply-high reduction is one 64x64->128
-  // multiply, three shifts, and no division. The bias is bounded by
-  // `1 / 2^32` per bucket, irrelevant for victim selection. |n| must be
-  // non-zero.
+  /// Reduce a 64-bit RNG draw to `[0, n)` via multiply-high (Lemire 2018).
+  /// Replaces `xorshiftNext(rng) % n` in the steal hot path. For
+  /// non-power-of-two |n| integer modulo compiles to `idiv` on x86, which
+  /// has long latency; the multiply-high reduction is one 64x64->128
+  /// multiply, three shifts, and no division. The bias is bounded by
+  /// `1 / 2^32` per bucket, irrelevant for victim selection. |n| must be
+  /// non-zero.
   static std::uint32_t fastRange32(std::uint64_t x, std::uint32_t n) noexcept {
     __extension__ using u128 = unsigned __int128;
     return static_cast<std::uint32_t>((static_cast<u128>(x >> 32) * n) >> 32);
   }
 
-  // Common job-publish/join helper used by the reduce paths. Builds a
-  // `JobDescriptor` with the supplied static chunk shape, dispatches via
-  // `dispatchOne`, and returns once every worker has stamped its
-  // `doneEpoch`. The caller reads the partials array after this returns;
-  // the join's acquire-load on `doneEpoch` establishes happens-before for
-  // the partial writes.
+  /// Common job-publish/join helper used by the reduce paths. Builds a
+  /// `JobDescriptor` with the supplied static chunk shape, dispatches via
+  /// `dispatchOne`, and returns once every worker has stamped its
+  /// `doneEpoch`. The caller reads the partials array after this returns;
+  /// the join's acquire-load on `doneEpoch` establishes happens-before for
+  /// the partial writes.
   void dispatchReduceJob(std::size_t first, std::size_t last,
                          FunctionRef<void(std::size_t, std::size_t)> body,
                          CancellationToken tok, std::size_t participants,
@@ -5132,6 +5215,11 @@ private:
     dispatchOneStatic<Balance::StaticUniform>(desc);
   }
 
+  /// Typed reduce dispatcher used by the parallel reducer engine. Reuses
+  /// the per-thread shared `JobDescriptor` cache and tracks
+  /// field-by-field whether the descriptor matches the previous
+  /// dispatch; on a match the worker entry's reuse path skips the
+  /// per-rank descriptor read.
   template <class HintsT, class Body>
   void dispatchReduceJobTyped(std::size_t first, std::size_t last, Body &body,
                               CancellationToken tok, std::size_t participants,
@@ -5200,29 +5288,29 @@ private:
         desc, body, !kCancellationActive && keyMatches);
   }
 
-  // Acquire the priority gate that serializes concurrent `dispatchOne`
-  // callers. Concurrent producers contending on the same pool pass through
-  // this gate before publishing the next generation. The gate is a small
-  // two-bucket priority lane:
-  //
-  // - `Priority::Latency` callers register their waiting count via
-  //   `m_latencyWaiting` and then acquire `m_dispatchMutex` directly. The
-  //   increment is observed by throughput / background callers, which back
-  //   off until it drops to zero before locking.
-  // - `Priority::Throughput` callers register via `m_throughputWaiting` and
-  //   acquire the mutex after spinning until the latency waiter count is
-  //   zero. This is the default and the hot path when only one producer
-  //   dispatches at a time.
-  // - `Priority::Background` callers wait for both `m_latencyWaiting` and
-  //   `m_throughputWaiting` to drop to zero before locking, AND
-  //   release-and-retry if either counter ticks up while they hold the lock
-  //   but have not yet started the dispatch body. Background is
-  //   best-effort and may starve under sustained higher-priority traffic;
-  //   the contract is "yield, do not preempt".
-  //
-  // The single-producer fast path bypasses the back-off entirely so the hot
-  // dispatch path pays one un-contended atomic increment, one atomic
-  // decrement, and one mutex lock/unlock pair.
+  /// Acquire the priority gate that serializes concurrent `dispatchOne`
+  /// callers. Concurrent producers contending on the same pool pass through
+  /// this gate before publishing the next generation. The gate is a small
+  /// two-bucket priority lane:
+  ///
+  /// - `Priority::Latency` callers register their waiting count via
+  ///   `m_latencyWaiting` and then acquire `m_dispatchMutex` directly. The
+  ///   increment is observed by throughput / background callers, which back
+  ///   off until it drops to zero before locking.
+  /// - `Priority::Throughput` callers register via `m_throughputWaiting` and
+  ///   acquire the mutex after spinning until the latency waiter count is
+  ///   zero. This is the default and the hot path when only one producer
+  ///   dispatches at a time.
+  /// - `Priority::Background` callers wait for both `m_latencyWaiting` and
+  ///   `m_throughputWaiting` to drop to zero before locking, AND
+  ///   release-and-retry if either counter ticks up while they hold the lock
+  ///   but have not yet started the dispatch body. Background is
+  ///   best-effort and may starve under sustained higher-priority traffic;
+  ///   the contract is "yield, do not preempt".
+  ///
+  /// The single-producer fast path bypasses the back-off entirely so the hot
+  /// dispatch path pays one un-contended atomic increment, one atomic
+  /// decrement, and one mutex lock/unlock pair.
   void acquireDispatchGate(Priority priority) noexcept {
     if (priority == Priority::Latency) {
       m_latencyWaiting.fetch_add(1, std::memory_order_acq_rel);
@@ -5287,32 +5375,32 @@ private:
     }
   }
 
-  // Release the priority gate previously acquired via
-  // `acquireDispatchGate`. Pair with the matching acquire in `dispatchOne`'s
-  // scope; idempotent only when called once per acquire (no double-release
-  // defense; the call site guarantees the pairing).
+  /// Release the priority gate previously acquired via
+  /// `acquireDispatchGate`. Pair with the matching acquire in `dispatchOne`'s
+  /// scope; idempotent only when called once per acquire (no double-release
+  /// defense; the call site guarantees the pairing).
   void releaseDispatchGate() noexcept { m_dispatchMutex.unlock(); }
 
-  // Common publish / participate / join helper shared by every primitive.
-  //
-  // 1. Acquire the priority gate so concurrent producers serialize through
-  //    a 2-bucket lane.
-  // 2. Compute the next generation by adding `kPhaseStep` to the current
-  //    value (preserving shutdown / cancel flag bits).
-  // 3. Stamp the generation onto |desc| and publish via release-store on
-  //    `activeJob`.
-  // 4. Release-store the new `generation`; this is the publish edge
-  //    workers acquire.
-  // 5. Bump `futexWord` (relaxed) and broadcast `FUTEX_WAKE_PRIVATE` to
-  //    every parked worker.
-  // 6. Producer participates as slot 0 by running its share of the job
-  //    inline.
-  // 7. Acquire-load each background worker's `doneEpoch` until all reach
-  //    the new generation.
-  // 8. Release-store `nullptr` into `activeJob` so the slot is empty for
-  //    the next dispatch.
-  // 9. Release the priority gate.
-  // 10. Rethrow the captured first-exception if any.
+  /// Common publish / participate / join helper shared by every primitive.
+  ///
+  /// 1. Acquire the priority gate so concurrent producers serialize through
+  ///    a 2-bucket lane.
+  /// 2. Compute the next generation by adding `kPhaseStep` to the current
+  ///    value (preserving shutdown / cancel flag bits).
+  /// 3. Stamp the generation onto |desc| and publish via release-store on
+  ///    `activeJob`.
+  /// 4. Release-store the new `generation`; this is the publish edge
+  ///    workers acquire.
+  /// 5. Bump `futexWord` (relaxed) and broadcast `FUTEX_WAKE_PRIVATE` to
+  ///    every parked worker.
+  /// 6. Producer participates as slot 0 by running its share of the job
+  ///    inline.
+  /// 7. Acquire-load each background worker's `doneEpoch` until all reach
+  ///    the new generation.
+  /// 8. Release-store `nullptr` into `activeJob` so the slot is empty for
+  ///    the next dispatch.
+  /// 9. Release the priority gate.
+  /// 10. Rethrow the captured first-exception if any.
   void dispatchOne(detail::JobDescriptor &desc) {
     if (desc.balance == Balance::StaticUniform) {
       dispatchOneStatic<Balance::StaticUniform>(desc);
@@ -5328,6 +5416,10 @@ private:
   // the prior values.
   class TlsContextScope {
   public:
+    /// Saves the current TLS pool context and installs the slot-0
+    /// producer view: `|pool|`, `|kind|`, `|arenaIndex|`, `|slot|`. The
+    /// destructor restores the saved context, so a throw out of the
+    /// producer body never leaks a stale pool tag onto the thread.
     TlsContextScope(ThreadContext &ctx, ThreadPool *pool, PoolKind kind,
                     std::uint32_t arenaIndex, std::size_t slot) noexcept
         : m_ctx(ctx), m_savedInside(ctx.insidePoolWorker) {
@@ -5359,11 +5451,17 @@ private:
     TlsContextScope &operator=(TlsContextScope &&) = delete;
 
   private:
+    /// Reference to the calling thread's `ThreadContext` slot.
     ThreadContext &m_ctx;
+    /// Slot id captured at construction; restored by the destructor.
     std::size_t m_savedSlot;
+    /// Saved value of `ctx.insidePoolWorker`.
     bool m_savedInside;
+    /// Saved value of `ctx.pool`.
     ThreadPool *m_savedPool;
+    /// Saved value of `ctx.kind`.
     PoolKind m_savedKind;
+    /// Saved value of `ctx.arenaIndex`.
     std::uint32_t m_savedArenaIndex;
   };
 
@@ -5377,6 +5475,9 @@ private:
   // redundant gate acquisition.
   class DispatchLease {
   public:
+    /// Acquires the dispatch gate on `|pool|` for `|priority|`. Skips the
+    /// acquire when the calling thread owns an active `LowLatencyGuard`
+    /// on this pool, since the LL contract is single-producer.
     DispatchLease(ThreadPool &pool, Priority priority) noexcept : m_pool(pool) {
       // Hot-spin scope fast path: while a `LowLatencyGuard` is alive AND the
       // current thread is the guard's owner, the contract is single-producer
@@ -5401,6 +5502,10 @@ private:
         m_pool.releaseDispatchGate();
       }
     }
+    /// True when the constructor took the LL fast path and the
+    /// destructor will not release the gate. Threaded into
+    /// `dispatchOneStaticLockedBody` so the inner body avoids re-probing
+    /// the same atomic.
     [[nodiscard]] bool gateSkipped() const noexcept { return m_skipped; }
     DispatchLease(const DispatchLease &) = delete;
     DispatchLease &operator=(const DispatchLease &) = delete;
@@ -5408,10 +5513,15 @@ private:
     DispatchLease &operator=(DispatchLease &&) = delete;
 
   private:
+    /// Pool the lease holds the gate on.
     ThreadPool &m_pool;
+    /// True when the constructor took the LL fast path and skipped the
+    /// gate acquire.
     bool m_skipped = false;
   };
 
+  /// Static-balance dispatch entry. Acquires a `DispatchLease` and
+  /// forwards into `dispatchOneStaticLockedBody`.
   template <Balance BalanceV>
   void dispatchOneStatic(detail::JobDescriptor &desc) {
     const DispatchLease lease(*this, desc.priority);
@@ -5421,16 +5531,16 @@ private:
     dispatchOneStaticLockedBody<BalanceV>(desc, lease.gateSkipped());
   }
 
-  // Typed entry into the static-balance dispatch path: the producer's
-  // slot-0 inline body call bypasses `desc.body`'s `FunctionRef`
-  // indirection by invoking `fn` directly. Workers still see the
-  // descriptor with `desc.body` set, so they go through
-  // `runStaticPartition` unchanged. Only the producer's slot-0 inline call
-  // benefits.
-  //
-  // Caller responsibility: `desc.body` must still be set to a `FunctionRef`
-  // wrapping `fn` so workers can drive their share. This entry assumes
-  // `BalanceV == StaticUniform`.
+  /// Typed entry into the static-balance dispatch path: the producer's
+  /// slot-0 inline body call bypasses `desc.body`'s `FunctionRef`
+  /// indirection by invoking `fn` directly. Workers still see the
+  /// descriptor with `desc.body` set, so they go through
+  /// `runStaticPartition` unchanged. Only the producer's slot-0 inline call
+  /// benefits.
+  ///
+  /// Caller responsibility: `desc.body` must still be set to a `FunctionRef`
+  /// wrapping `fn` so workers can drive their share. This entry assumes
+  /// `BalanceV == StaticUniform`.
   template <class HintsT, class FOp>
   [[gnu::always_inline]] void
   dispatchOneStaticTypedSlot0Hinted(detail::JobDescriptor &desc, FOp &fn,
@@ -5443,6 +5553,9 @@ private:
         desc, lease.gateSkipped(), &fn, reuseHint);
   }
 
+  /// Typed entry for the static-contiguous slot-0 path. Drops the
+  /// rank-claim CAS and the atomic-tail counter; each rank walks its
+  /// `contiguousRankBlockSpan`. Used by the parallel reducer engine.
   template <class HintsT, class FOp>
   [[gnu::always_inline]] void
   dispatchOneStaticContiguousTypedSlot0Hinted(detail::JobDescriptor &desc,
@@ -5452,6 +5565,9 @@ private:
         desc, lease.gateSkipped(), &fn, reuseHint);
   }
 
+  /// Untyped-priority counterpart of `dispatchOneStaticTypedSlot0Hinted`.
+  /// Pulls the priority from `|desc|` rather than a compile-time
+  /// `HintsT::priority`.
   template <class FOp>
   void dispatchOneStaticTypedSlot0(detail::JobDescriptor &desc, FOp &fn,
                                    bool reuseHint = false) {
@@ -5460,11 +5576,11 @@ private:
         desc, lease.gateSkipped(), &fn, reuseHint);
   }
 
-  // Typed entry into the dynamic-balance dispatch path: the producer's
-  // slot-0 inline body call bypasses `desc.body`'s `FunctionRef` indirection
-  // by invoking `fn` directly. Sibling of
-  // `dispatchOneStaticTypedSlot0Hinted` for `Balance::DynamicChunked`
-  // callers.
+  /// Typed entry into the dynamic-balance dispatch path: the producer's
+  /// slot-0 inline body call bypasses `desc.body`'s `FunctionRef` indirection
+  /// by invoking `fn` directly. Sibling of
+  /// `dispatchOneStaticTypedSlot0Hinted` for `Balance::DynamicChunked`
+  /// callers.
   template <class HintsT, class FOp>
   [[gnu::always_inline]] void
   dispatchOneDynamicTypedSlot0Hinted(detail::JobDescriptor &desc, FOp &fn,
@@ -5474,13 +5590,13 @@ private:
         desc, lease.gateSkipped(), &fn, reuseHint);
   }
 
-  // Same as `dispatchOneStatic` but assumes the caller already holds the
-  // dispatch gate. Call sites that mutate pool-owned scratch (e.g.,
-  // zero-resetting `m_chainDoneSlots` or pushing descriptors onto
-  // `m_workerDeques`) acquire a `DispatchLease` first, perform their
-  // mutation, then invoke this overload to publish/participate/join. The
-  // lease's destructor releases the gate after the call returns (or after
-  // an exception unwinds through it).
+  /// Same as `dispatchOneStatic` but assumes the caller already holds the
+  /// dispatch gate. Call sites that mutate pool-owned scratch (e.g.,
+  /// zero-resetting `m_chainDoneSlots` or pushing descriptors onto
+  /// `m_workerDeques`) acquire a `DispatchLease` first, perform their
+  /// mutation, then invoke this overload to publish/participate/join. The
+  /// lease's destructor releases the gate after the call returns (or after
+  /// an exception unwinds through it).
   template <Balance BalanceV>
   void dispatchOneStaticLocked(detail::JobDescriptor &desc) {
     // Locked entry points are reached after the caller already mutated
@@ -5491,6 +5607,12 @@ private:
     dispatchOneStaticLockedBody<BalanceV>(desc, lowLatencyActive);
   }
 
+  /// Inner body of the locked dispatch path. Publishes the new
+  /// generation, wakes parked workers, runs slot 0 inline, joins on
+  /// every worker's `doneEpoch`, and rethrows the captured first
+  /// exception (if any). `Slot0Body` and `Slot0Hints` carry typed slot-0
+  /// information when the caller passed a typed entry; `ContiguousRank`
+  /// selects the static-contiguous worker path.
   template <Balance BalanceV, class Slot0Body = std::nullptr_t,
             class Slot0Hints = void, bool ContiguousRank = false>
   [[gnu::always_inline]] void
@@ -5957,9 +6079,9 @@ private:
     }
   }
 
-  // Common shutdown sequence shared by `~ThreadPool` and the constructor's
-  // failure path. Idempotent; calling twice is a no-op because the shutdown
-  // bit is already set on the second pass.
+  /// Common shutdown sequence shared by `~ThreadPool` and the constructor's
+  /// failure path. Idempotent; calling twice is a no-op because the shutdown
+  /// bit is already set on the second pass.
   void shutdownAndJoin() noexcept {
     if (m_shutdownComplete) {
       return;
@@ -6030,11 +6152,11 @@ private:
     m_workerSpawnArgs.clear();
   }
 
-  // Custom deleter that destroys each `WorkerState` in place and frees the
-  // aligned heap block.
+  /// Custom deleter that destroys each `WorkerState` in place and frees the
+  /// aligned heap block.
   struct WorkerArrayDeleter {
-    // Number of `WorkerState` instances stored in the block; supplied by
-    // the constructor.
+    /// Number of `WorkerState` instances stored in the block; supplied by
+    /// the constructor.
     std::size_t count = 0;
 
     // Destroy and deallocate the worker block previously created via
@@ -6050,10 +6172,10 @@ private:
     }
   };
 
-  // Custom deleter that destroys each `ChainDoneSlot` in place and frees
-  // the aligned heap block.
+  /// Custom deleter that destroys each `ChainDoneSlot` in place and frees
+  /// the aligned heap block.
   struct ChainDoneSlotDeleter {
-    // Number of slots stored in the block; supplied by the constructor.
+    /// Number of slots stored in the block; supplied by the constructor.
     std::size_t count = 0;
 
     // Destroy and deallocate the slot block previously created via aligned
@@ -6069,9 +6191,11 @@ private:
     }
   };
 
-  // Deleter for the pool-owned `PlexDoneSlot` block; mirrors
-  // `ChainDoneSlotDeleter`.
+  /// Deleter for the pool-owned `PlexDoneSlot` block; mirrors
+  /// `ChainDoneSlotDeleter`.
   struct PlexDoneSlotDeleter {
+    /// Number of slots the deleter must destroy in reverse order before
+    /// freeing the cache-line-aligned backing allocation.
     std::size_t count = 0;
     void operator()(detail::PlexDoneSlot *ptr) const noexcept {
       if (ptr == nullptr) {
@@ -6084,237 +6208,250 @@ private:
     }
   };
 
-  // Worker-affinity policy chosen at construction. Drives the pool ctor's
-  // `pthread_attr_setaffinity_np` mask -- single-CPU mask for `PerCpu`,
-  // CCD's full CPU set for `PerCluster`, no pin for `None`. Declared here
-  // so its initializer-list position matches the ctor's leading-field
-  // initializer.
+  /// Worker-affinity policy chosen at construction. Drives the pool ctor's
+  /// `pthread_attr_setaffinity_np` mask -- single-CPU mask for `PerCpu`,
+  /// CCD's full CPU set for `PerCluster`, no pin for `None`. Declared here
+  /// so its initializer-list position matches the ctor's leading-field
+  /// initializer.
   Affinity m_workerAffinity = Affinity::PerCpu;
 
-  // Origin tag: distinguishes user-owned pools from `PoolGroup`-owned
-  // arenas.
+  /// Origin tag: distinguishes user-owned pools from `PoolGroup`-owned
+  /// arenas.
   PoolKind m_kind = PoolKind::Standalone;
 
-  // Zero-based arena index inside the owning `PoolGroup`; `0` for
-  // `Standalone` pools.
+  /// Zero-based arena index inside the owning `PoolGroup`; `0` for
+  /// `Standalone` pools.
   std::uint32_t m_arenaIndex = 0;
 
-  // Pool topology snapshot; immutable after construction.
+  /// Pool topology snapshot; immutable after construction.
   detail::Topology m_topology;
 
-  // Shared control block; cache-line aligned for false-sharing avoidance.
+  /// Shared control block; cache-line aligned for false-sharing avoidance.
   detail::PoolControl m_control{};
 
-  // Diagnostic counters incremented at the dispatch / inline-fallback /
-  // park / wake / dynamic counter / cancellation sites. Read via
-  // `snapshotCounters()`. Lives on its own cache line so the relaxed RMWs
-  // never bounce with `m_control`'s contended atomics.
+  /// Diagnostic counters incremented at the dispatch / inline-fallback /
+  /// park / wake / dynamic counter / cancellation sites. Read via
+  /// `snapshotCounters()`. Lives on its own cache line so the relaxed RMWs
+  /// never bounce with `m_control`'s contended atomics.
   detail::PoolCounters m_counters{};
 
-  // Owning pointer to the aligned worker-state block; the deleter destroys
-  // each element.
+  /// Owning pointer to the aligned worker-state block; the deleter destroys
+  /// each element.
   std::unique_ptr<detail::WorkerState, WorkerArrayDeleter> m_workers;
 
-  // Pool-owned per-worker `done` slot block reused by every `parallelChain`
-  // and `parallelScan` dispatch. Allocated once at construction time, sized
-  // `participants()`. Each call reserves a fresh interval in
-  // `m_chainEpochBase` and stamps absolute targets during the dispatch; the
-  // block is never zero-reset between calls because the per-call interval
-  // is disjoint from every prior call's stamps. Reusing the block keeps the
-  // hot dispatch path off `operator new` / `operator delete`.
+  /// Pool-owned per-worker `done` slot block reused by every `parallelChain`
+  /// and `parallelScan` dispatch. Allocated once at construction time, sized
+  /// `participants()`. Each call reserves a fresh interval in
+  /// `m_chainEpochBase` and stamps absolute targets during the dispatch; the
+  /// block is never zero-reset between calls because the per-call interval
+  /// is disjoint from every prior call's stamps. Reusing the block keeps the
+  /// hot dispatch path off `operator new` / `operator delete`.
   std::unique_ptr<detail::ChainDoneSlot, ChainDoneSlotDeleter> m_chainDoneSlots;
 
-  // Pool-owned per-worker `done` slot block reused by every `runPlex`
-  // dispatch. Allocated once at construction time, sized `participants()`.
-  // Each plex call reserves a fresh interval in `m_plexEpochBase` and
-  // stamps absolute targets; the block is never zero-reset between calls.
+  /// Pool-owned per-worker `done` slot block reused by every `runPlex`
+  /// dispatch. Allocated once at construction time, sized `participants()`.
+  /// Each plex call reserves a fresh interval in `m_plexEpochBase` and
+  /// stamps absolute targets; the block is never zero-reset between calls.
   std::unique_ptr<detail::PlexDoneSlot, PlexDoneSlotDeleter> m_plexDoneSlots;
 
-  // Monotonic epoch counter for plex done-slot stamps; advanced under the
-  // dispatch gate by `nPhases + 1` per call so successive calls reserve
-  // disjoint intervals.
+  /// Monotonic epoch counter for plex done-slot stamps; advanced under the
+  /// dispatch gate by `nPhases + 1` per call so successive calls reserve
+  /// disjoint intervals.
   std::uint64_t m_plexEpochBase = 0;
 
-  // Monotonically-advancing epoch counter for chain and scan done-slot
-  // stamps. Each `parallelChain` / `parallelScan` call captures the
-  // current value as its `state.epochBase` under the dispatch gate, then
-  // advances by `nStages + 1` (chain) or `3` (scan) so successive calls
-  // reserve disjoint intervals. Workers stamp `done = epochBase +
-  // relative_target` and peers wait on `done >= epochBase + target`;
-  // prior-dispatch stamps cannot satisfy a current wait because they are
-  // strictly less than the new base. Plain integral because every mutation
-  // happens under the dispatch gate that already serializes chain / scan
-  // dispatches.
+  /// Monotonically-advancing epoch counter for chain and scan done-slot
+  /// stamps. Each `parallelChain` / `parallelScan` call captures the
+  /// current value as its `state.epochBase` under the dispatch gate, then
+  /// advances by `nStages + 1` (chain) or `3` (scan) so successive calls
+  /// reserve disjoint intervals. Workers stamp `done = epochBase +
+  /// relative_target` and peers wait on `done >= epochBase + target`;
+  /// prior-dispatch stamps cannot satisfy a current wait because they are
+  /// strictly less than the new base. Plain integral because every mutation
+  /// happens under the dispatch gate that already serializes chain / scan
+  /// dispatches.
   std::uint64_t m_chainEpochBase = 0;
 
-  // TSC of the most recent dispatch's publish window, written by
-  // `dispatchOneStaticLockedBody` under `m_dispatchMutex` (single-writer).
-  // Used as a hot-cadence predicate to skip the `futex_wake` syscall when
-  // the previous dispatch was within a worker's spin-budget ago: in that
-  // window no worker can have parked, so the kernel transit would find
-  // zero waiters. Plain integral because every mutation happens under the
-  // dispatch gate. Read by the same writer path in immediate succession,
-  // so torn-read concerns do not apply.
+  /// TSC of the most recent dispatch's publish window, written by
+  /// `dispatchOneStaticLockedBody` under `m_dispatchMutex` (single-writer).
+  /// Used as a hot-cadence predicate to skip the `futex_wake` syscall when
+  /// the previous dispatch was within a worker's spin-budget ago: in that
+  /// window no worker can have parked, so the kernel transit would find
+  /// zero waiters. Plain integral because every mutation happens under the
+  /// dispatch gate. Read by the same writer path in immediate succession,
+  /// so torn-read concerns do not apply.
   std::uint64_t m_recentDispatchTsc = 0;
 
-  // Per-worker Chase-Lev work-stealing deques. One deque per participant;
-  // allocated at construction time so the `forkJoin` steal probe never
-  // pays an allocator round-trip on its hot path. Each deque is owner-only
-  // on its matching slot's worker thread (the producer for slot 0); any
-  // thread may invoke `detail::ChaseLevDeque::steal` on a victim deque.
+  /// Per-worker Chase-Lev work-stealing deques. One deque per participant;
+  /// allocated at construction time so the `forkJoin` steal probe never
+  /// pays an allocator round-trip on its hot path. Each deque is owner-only
+  /// on its matching slot's worker thread (the producer for slot 0); any
+  /// thread may invoke `detail::ChaseLevDeque::steal` on a victim deque.
   std::vector<std::unique_ptr<detail::ChaseLevDeque<detail::Task *>>>
       m_workerDeques;
 
-  // Per-slot CCD index, cached for fast lookup by `forkJoin`'s
-  // victim-selection probe. Sized `participants()`; populated at
-  // construction time from each worker's `ccdId`. The victim-selection RNG
-  // reads this array (not `WorkerState`) so the steal probe stays off the
-  // worker's hot identity line.
+  /// Per-slot CCD index, cached for fast lookup by `forkJoin`'s
+  /// victim-selection probe. Sized `participants()`; populated at
+  /// construction time from each worker's `ccdId`. The victim-selection RNG
+  /// reads this array (not `WorkerState`) so the steal probe stays off the
+  /// worker's hot identity line.
   std::vector<std::uint32_t> m_ccdOfSlot;
 
-  // One-time coherence ping-pong probe result, run at pool construction on
-  // multi-CCD topologies. Primitives that benefit from CCD-aware
-  // partitioning (currently `parallelScan`) read
-  // `m_coherenceProbe.crossOverIntraRatio` to derive their cross-CCD work
-  // share without any hardware-specific constants in the engine. Default
-  // value (`valid == false`, ratio == 1.0) on single-CCD pools and on
-  // arenas owned by a `PoolGroup`.
+  /// One-time coherence ping-pong probe result, run at pool construction on
+  /// multi-CCD topologies. Primitives that benefit from CCD-aware
+  /// partitioning (currently `parallelScan`) read
+  /// `m_coherenceProbe.crossOverIntraRatio` to derive their cross-CCD work
+  /// share without any hardware-specific constants in the engine. Default
+  /// value (`valid == false`, ratio == 1.0) on single-CCD pools and on
+  /// arenas owned by a `PoolGroup`.
   detail::CoherenceProbe m_coherenceProbe;
 
-  // Pre-resolved `parallelScan` topology, computed once at pool ctor (after
-  // the coherence probe lands) from invariant pool inputs (`m_ccdOfSlot`,
-  // `m_workers[i].cpuId`, `m_coherenceProbe.matrix.cpus`,
-  // `m_coherenceProbe.clusters.clusterIdOfCpuIndex`,
-  // `m_coherenceProbe.maxCrossOverIntraRatio`). The scan path reads these
-  // fields directly instead of recomputing the slot-to-cluster mapping +
-  // contiguity check + asymmetric-bias derivation on every call.
-  //
-  // `m_scanClusterIdOfSlot[s]` is the cluster id for slot `s` (per the
-  // probe's clustering or zero when the probe is invalid).
-  // `m_scanClusterFirstSlot[k]` and `m_scanClusterSlotCount[k]` are the
-  // contiguous slot range belonging to cluster `k`; only valid when
-  // `m_scanUseHierarchical` is true. `m_scanAsymmetricNum` is the
-  // producer-CCD volume fraction (out of 16) used by `slotRange`'s
-  // asymmetric path.
+  /// Pre-resolved `parallelScan` topology, computed once at pool ctor (after
+  /// the coherence probe lands) from invariant pool inputs (`m_ccdOfSlot`,
+  /// `m_workers[i].cpuId`, `m_coherenceProbe.matrix.cpus`,
+  /// `m_coherenceProbe.clusters.clusterIdOfCpuIndex`,
+  /// `m_coherenceProbe.maxCrossOverIntraRatio`). The scan path reads these
+  /// fields directly instead of recomputing the slot-to-cluster mapping +
+  /// contiguity check + asymmetric-bias derivation on every call.
+  ///
+  /// `m_scanClusterIdOfSlot[s]` is the cluster id for slot `s` (per the
+  /// probe's clustering or zero when the probe is invalid).
+  /// `m_scanClusterFirstSlot[k]` and `m_scanClusterSlotCount[k]` are the
+  /// contiguous slot range belonging to cluster `k`; only valid when
+  /// `m_scanUseHierarchical` is true. `m_scanAsymmetricNum` is the
+  /// producer-CCD volume fraction (out of 16) used by `slotRange`'s
+  /// asymmetric path.
   std::vector<std::uint32_t> m_scanClusterIdOfSlot;
+  /// First slot in each cluster's contiguous range. Only meaningful when
+  /// `m_scanUseHierarchical` is true.
   std::vector<std::uint32_t> m_scanClusterFirstSlot;
+  /// Slot count for each cluster's contiguous range. Companion to
+  /// `m_scanClusterFirstSlot`.
   std::vector<std::uint32_t> m_scanClusterSlotCount;
+  /// Number of distinct clusters discovered by the coherence probe; zero
+  /// when the hierarchical path is disabled.
   std::uint32_t m_scanNumClusters = 0;
+  /// True when the scan engine is allowed to take the hierarchical
+  /// per-cluster reduce path. Set when the probe found at least two
+  /// non-empty contiguous clusters and slot 0 lives in cluster 0.
   bool m_scanUseHierarchical = false;
+  /// Producer-CCD volume fraction (out of 16) used by `slotRange`'s
+  /// asymmetric partition. Defaults to half.
   std::uint32_t m_scanAsymmetricNum = 8;
+  /// CCD index that owns slot 0; `UINT32_MAX` until set.
   std::uint32_t m_scanProducerCcd = UINT32_MAX;
+  /// Number of slots whose `ccdOfSlot` equals `m_scanProducerCcd`.
   std::uint32_t m_scanSlotsOnProducerCcd = 0;
 
-  // Cached background-worker CPU ids for `bindProducerSlot`'s worker-CPU
-  // exclusion logic. Populated once at construction so the producer-side
-  // affinity guard never allocates.
+  /// Cached background-worker CPU ids for `bindProducerSlot`'s worker-CPU
+  /// exclusion logic. Populated once at construction so the producer-side
+  /// affinity guard never allocates.
   std::vector<std::uint32_t> m_workerCpus;
 
-  // Precomputed same-CCD victim list for each slot. Indexed by self-slot;
-  // each row contains every other slot whose `ccdOfSlot` matches. The
-  // fork-join steal probe iterates this list directly when CCD-local
-  // affinity is requested, skipping the per-step `% participants` modulo
-  // and the per-step CCD comparison.
+  /// Precomputed same-CCD victim list for each slot. Indexed by self-slot;
+  /// each row contains every other slot whose `ccdOfSlot` matches. The
+  /// fork-join steal probe iterates this list directly when CCD-local
+  /// affinity is requested, skipping the per-step `% participants` modulo
+  /// and the per-step CCD comparison.
   std::vector<std::vector<std::uint32_t>> m_sameCcdVictims;
 
-  // Precomputed cross-CCD victim list for each slot (used as the CCD-local
-  // fallback ring). Indexed by self-slot; each row contains every other
-  // slot whose `ccdOfSlot` differs from the self slot's CCD. Pairs with
-  // `m_sameCcdVictims` so a CCD-local steal probe scans same-CCD victims,
-  // then falls back to cross-CCD victims without re-probing the same-CCD
-  // set.
+  /// Precomputed cross-CCD victim list for each slot (used as the CCD-local
+  /// fallback ring). Indexed by self-slot; each row contains every other
+  /// slot whose `ccdOfSlot` differs from the self slot's CCD. Pairs with
+  /// `m_sameCcdVictims` so a CCD-local steal probe scans same-CCD victims,
+  /// then falls back to cross-CCD victims without re-probing the same-CCD
+  /// set.
   std::vector<std::vector<std::uint32_t>> m_crossCcdVictims;
 
-  // Precomputed all-victim list for each slot (used when CCD affinity is
-  // not requested). Indexed by self-slot; each row contains every other
-  // slot in monotonic order. The steal probe wraps around this row using
-  // a precomputed start index instead of `(start + step) % participants`.
+  /// Precomputed all-victim list for each slot (used when CCD affinity is
+  /// not requested). Indexed by self-slot; each row contains every other
+  /// slot in monotonic order. The steal probe wraps around this row using
+  /// a precomputed start index instead of `(start + step) % participants`.
   std::vector<std::vector<std::uint32_t>> m_allVictims;
 
 #ifdef __linux__
-  // Background pthreads (Linux). Sized `participants() - 1`.
+  /// Background pthreads (Linux). Sized `participants() - 1`.
   std::vector<pthread_t> m_workerThreads;
 #else
-  // Background `std::thread` instances (non-Linux fallback). Sized
-  // `participants() - 1`.
+  /// Background `std::thread` instances (non-Linux fallback). Sized
+  /// `participants() - 1`.
   std::vector<std::thread> m_fallbackThreads;
 #endif
 
-  // Persistent storage for the per-worker spawn arguments handed to the
-  // pthread entry function.
+  /// Persistent storage for the per-worker spawn arguments handed to the
+  /// pthread entry function.
   std::vector<WorkerSpawnArg> m_workerSpawnArgs;
 
-  // Count of workers that have completed startup (affinity bind + TLS +
-  // ready to enter `workerMainLoop`). The constructor waits on this so
-  // the first dispatch never races worker startup; without the barrier,
-  // first-dispatch latency includes the slowest worker's
-  // time-to-reach-loop.
+  /// Count of workers that have completed startup (affinity bind + TLS +
+  /// ready to enter `workerMainLoop`). The constructor waits on this so
+  /// the first dispatch never races worker startup; without the barrier,
+  /// first-dispatch latency includes the slowest worker's
+  /// time-to-reach-loop.
   alignas(kCacheLine) std::atomic<std::uint32_t> m_workersReady{0};
 
-  // Whether `shutdownAndJoin` has already run; protects against
-  // double-join in the dtor.
+  /// Whether `shutdownAndJoin` has already run; protects against
+  /// double-join in the dtor.
   bool m_shutdownComplete = false;
 
-  // In-flight detached-task counter incremented by `submitDetached` and
-  // decremented by the trampoline. The destructor blocks until this
-  // reaches zero.
+  /// In-flight detached-task counter incremented by `submitDetached` and
+  /// decremented by the trampoline. The destructor blocks until this
+  /// reaches zero.
   std::atomic<std::uint64_t> m_detachedInFlight{0};
 
-  // Mutex serializing the detached-throw slot, the dtor's wait predicate,
-  // and the spawn rollback path. Also used by `lastDetachedException` for
-  // race-free reads.
+  /// Mutex serializing the detached-throw slot, the dtor's wait predicate,
+  /// and the spawn rollback path. Also used by `lastDetachedException` for
+  /// race-free reads.
   mutable std::mutex m_detachedMutex;
 
-  // Condition variable signalled when an in-flight detached task
-  // decrements the counter. The destructor's wait predicate observes the
-  // counter going to zero.
+  /// Condition variable signalled when an in-flight detached task
+  /// decrements the counter. The destructor's wait predicate observes the
+  /// counter going to zero.
   std::condition_variable m_detachedDone;
 
-  // Latched on the first detached-task throw; subsequent throws drop.
-  // Read out via `lastDetachedException`; read takes `m_detachedMutex`
-  // for race freedom.
+  /// Latched on the first detached-task throw; subsequent throws drop.
+  /// Read out via `lastDetachedException`; read takes `m_detachedMutex`
+  /// for race freedom.
   std::exception_ptr m_detachedException;
 
-  // Mutex serializing concurrent `dispatchOne` callers through the
-  // priority gate. Held only for the duration of a single primitive's
-  // publish/participate/join cycle so concurrent producers from different
-  // threads do not interleave dispatches against the same worker pool.
-  // Single-producer call sites pay one un-contended `lock`/`unlock` pair
-  // on the dispatch hot path; the contention path is rare.
+  /// Mutex serializing concurrent `dispatchOne` callers through the
+  /// priority gate. Held only for the duration of a single primitive's
+  /// publish/participate/join cycle so concurrent producers from different
+  /// threads do not interleave dispatches against the same worker pool.
+  /// Single-producer call sites pay one un-contended `lock`/`unlock` pair
+  /// on the dispatch hot path; the contention path is rare.
   std::mutex m_dispatchMutex;
 
-  // Pointer to the descriptor whose fields the workers' TLS caches are
-  // currently primed with. Updated under `m_dispatchMutex` on every full
-  // (non-reuse) publish.
-  //
-  // The same-command reuse fast path must only fire when the workers'
-  // cached job parameters match the producer's TLS descriptor. The
-  // producer's `keyMatches` check (field-by-field equality against its
-  // own thread-local `desc`) does not see whether a different thread or a
-  // different pool intervened between two of this producer's calls. A
-  // second pointer compare against this pool-level "last full publish"
-  // pointer closes that window: reuse is only valid when the producer's
-  // descriptor IS the one the workers most recently cached. Mutated only
-  // under the dispatch gate, so a relaxed atomic load is sufficient on
-  // the producer's pre-lease read.
+  /// Pointer to the descriptor whose fields the workers' TLS caches are
+  /// currently primed with. Updated under `m_dispatchMutex` on every full
+  /// (non-reuse) publish.
+  ///
+  /// The same-command reuse fast path must only fire when the workers'
+  /// cached job parameters match the producer's TLS descriptor. The
+  /// producer's `keyMatches` check (field-by-field equality against its
+  /// own thread-local `desc`) does not see whether a different thread or a
+  /// different pool intervened between two of this producer's calls. A
+  /// second pointer compare against this pool-level "last full publish"
+  /// pointer closes that window: reuse is only valid when the producer's
+  /// descriptor IS the one the workers most recently cached. Mutated only
+  /// under the dispatch gate, so a relaxed atomic load is sufficient on
+  /// the producer's pre-lease read.
   std::atomic<const detail::JobDescriptor *> m_lastPublishedDesc{nullptr};
 
-  // Bitmask of worker slots whose mailbox the producer self-stamped on a
-  // prior !reuseSafe cold-collapse, drained by the next dispatch's publish
-  // path before reusing this stack frame's `JobDescriptor` storage.
+  /// Bitmask of worker slots whose mailbox the producer self-stamped on a
+  /// prior !reuseSafe cold-collapse, drained by the next dispatch's publish
+  /// path before reusing this stack frame's `JobDescriptor` storage.
   std::uint64_t m_coldStampedMask{0};
 
-  // Number of `Priority::Latency` callers currently waiting on the
-  // dispatch gate. Throughput and Background callers spin on this until
-  // it drops to zero before acquiring `m_dispatchMutex`, giving latency
-  // callers first access to the lock.
+  /// Number of `Priority::Latency` callers currently waiting on the
+  /// dispatch gate. Throughput and Background callers spin on this until
+  /// it drops to zero before acquiring `m_dispatchMutex`, giving latency
+  /// callers first access to the lock.
   std::atomic<std::uint32_t> m_latencyWaiting{0};
 
-  // Number of `Priority::Throughput` callers currently waiting on the
-  // dispatch gate. Background callers wait on both this and
-  // `m_latencyWaiting` to drain before locking, so any concurrent
-  // throughput producer reaches the workers first. Background may be
-  // reordered behind any number of higher-priority dispatches.
+  /// Number of `Priority::Throughput` callers currently waiting on the
+  /// dispatch gate. Background callers wait on both this and
+  /// `m_latencyWaiting` to drain before locking, so any concurrent
+  /// throughput producer reaches the workers first. Background may be
+  /// reordered behind any number of higher-priority dispatches.
   std::atomic<std::uint32_t> m_throughputWaiting{0};
 };
 

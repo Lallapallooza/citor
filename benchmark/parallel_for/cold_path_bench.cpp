@@ -5,13 +5,13 @@
 // the futex round-trip (or whatever the pool's park/wake mechanism is) rather
 // than the hot spin-poll path that `empty_fanout_bench.cpp` exercises.
 //
-// **Apples-to-apples caveat.** `bench_main.cpp` calls `kmp_set_blocktime(0)`
-// at startup so libomp parks immediately after each parallel region instead of
+// Apples-to-apples caveat: `bench_main.cpp` calls `kmp_set_blocktime(0)` at
+// startup so libomp parks immediately after each parallel region instead of
 // holding workers in a 200 ms hot-spin loop. Without that override the cell
 // measured policy mismatch (libomp burning 8 cores during the cool-off vs
 // every other pool actually parking).
 //
-// **Trivial-body caveat.** Several runtimes (oneTBB, libomp) collapse a cold
+// Trivial-body caveat: several runtimes (oneTBB, libomp) collapse a cold
 // trivial-body dispatch onto the producer thread instead of waking N workers,
 // because the work-stealing queue has no demand by the time the dispatch
 // arrives. Verified empirically: oneTBB runs all 8 iterations of an 8-iter

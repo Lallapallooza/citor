@@ -72,7 +72,9 @@ inline long futexWakePrivate(std::atomic<std::uint32_t> *addr, int n) noexcept {
 /// `std::condition_variable`. The fallback does not promise sub-microsecond
 /// wakeup latency; it exists so the headers compile and tests run.
 struct FutexFallbackState {
+  /// Serialises the wait/wake handshake on the shared condition variable.
   std::mutex mtx;
+  /// Condition variable used by both the wait and the wake side.
   std::condition_variable cv;
 };
 

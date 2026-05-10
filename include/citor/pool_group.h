@@ -44,42 +44,44 @@ namespace citor {
 // `PoolGroup` worker (the producer, a user-spawned `std::thread`, etc.).
 class PoolGroup {
 public:
-  // Returns the process-wide singleton, constructing it on first call.
-  // Construction is one-shot and thread-safe by virtue of the C++
-  // function-local-static rule: initialization runs under an implicit guard
-  // variable so concurrent first-callers do not race. After the first call,
-  // every invocation is a barrier-free pointer return. Workers spawned by
-  // `global()` live for the rest of the process; callers that need bounded
-  // worker lifetime should default-construct a `PoolGroup` instead.
+  /// Returns the process-wide singleton, constructing it on first call.
+  /// Construction is one-shot and thread-safe by virtue of the C++
+  /// function-local-static rule: initialization runs under an implicit guard
+  /// variable so concurrent first-callers do not race. After the first call,
+  /// every invocation is a barrier-free pointer return. Workers spawned by
+  /// `global()` live for the rest of the process; callers that need bounded
+  /// worker lifetime should default-construct a `PoolGroup` instead.
   static PoolGroup &global() noexcept {
     static PoolGroup instance;
     return instance;
   }
 
-  // Returns the arena pinned to the CPUs of a single CCD. |ccdIndex| must be
-  // `< ccdCount()`.
+  /// Returns the arena pinned to the CPUs of a single CCD. |ccdIndex| must be
+  /// `< ccdCount()`.
   [[nodiscard]] ThreadPool &arena(std::size_t ccdIndex) noexcept {
     return *m_arenas[ccdIndex];
   }
+  /// `const` overload of `arena(std::size_t)`. `|ccdIndex|` must be
+  /// `< ccdCount()`.
   [[nodiscard]] const ThreadPool &arena(std::size_t ccdIndex) const noexcept {
     return *m_arenas[ccdIndex];
   }
 
-  // Returns the number of CCD arenas owned by this group. Equal to the size
-  // of `detail::enumerateCcds()` at construction time. Always at least 1.
+  /// Returns the number of CCD arenas owned by this group. Equal to the size
+  /// of `detail::enumerateCcds()` at construction time. Always at least 1.
   [[nodiscard]] std::size_t ccdCount() const noexcept {
     return m_arenas.size();
   }
 
-  // Returns the arena owning the calling thread.
-  //
-  // Reads the `ThreadContext::arenaIndex` participant token. When the calling
-  // thread is not a `PoolGroup` worker (the producer thread or any
-  // user-spawned `std::thread`), returns `arena(0)` so callers always get a
-  // valid arena to dispatch work to. The cross-arena deadlock guard in each
-  // primitive protects the deeper case where an `Arena` worker accidentally
-  // hands a different arena's reference around; `localArena()` is the safe
-  // default.
+  /// Returns the arena owning the calling thread.
+  ///
+  /// Reads the `ThreadContext::arenaIndex` participant token. When the calling
+  /// thread is not a `PoolGroup` worker (the producer thread or any
+  /// user-spawned `std::thread`), returns `arena(0)` so callers always get a
+  /// valid arena to dispatch work to. The cross-arena deadlock guard in each
+  /// primitive protects the deeper case where an `Arena` worker accidentally
+  /// hands a different arena's reference around; `localArena()` is the safe
+  /// default.
   [[nodiscard]] ThreadPool &localArena() noexcept {
     const std::size_t hint = currentArenaHint();
     if (hint >= m_arenas.size()) {
@@ -88,14 +90,14 @@ public:
     return *m_arenas[hint];
   }
 
-  // Constructs one arena per CCD reported by the topology probe. Falls back
-  // to a single arena over the host's allowed CPU set when sysfs is
-  // unavailable; in that case the resulting `PoolGroup` has `ccdCount() == 1`
-  // and behaves like a single full-machine pool from the caller's point of
-  // view. Each arena spawns its workers eagerly; the destructor joins them
-  // when the `PoolGroup` goes out of scope. This is the entry point for
-  // callers that want bounded worker-fleet lifetime; see `global()` for the
-  // process-wide singleton.
+  /// Constructs one arena per CCD reported by the topology probe. Falls back
+  /// to a single arena over the host's allowed CPU set when sysfs is
+  /// unavailable; in that case the resulting `PoolGroup` has `ccdCount() == 1`
+  /// and behaves like a single full-machine pool from the caller's point of
+  /// view. Each arena spawns its workers eagerly; the destructor joins them
+  /// when the `PoolGroup` goes out of scope. This is the entry point for
+  /// callers that want bounded worker-fleet lifetime; see `global()` for the
+  /// process-wide singleton.
   PoolGroup() {
     const std::vector<std::vector<unsigned>> ccdCpus = detail::enumerateCcds();
     m_arenas.reserve(ccdCpus.size());
@@ -128,10 +130,10 @@ public:
   PoolGroup &operator=(PoolGroup &&) = delete;
 
 private:
-  // Reads the calling thread's arena participant token. Wraps
-  // `ThreadPool::currentArenaIndexHint`: when the calling thread is a worker
-  // on an `Arena` pool, returns `ThreadContext::arenaIndex`. Otherwise
-  // returns `kNoArenaHint` so `localArena()` can apply the safe default.
+  /// Reads the calling thread's arena participant token. Wraps
+  /// `ThreadPool::currentArenaIndexHint`: when the calling thread is a worker
+  /// on an `Arena` pool, returns `ThreadContext::arenaIndex`. Otherwise
+  /// returns `kNoArenaHint` so `localArena()` can apply the safe default.
   [[nodiscard]] static std::size_t currentArenaHint() noexcept {
     const std::uint32_t index = ThreadPool::currentArenaIndexHint();
     if (index == kNoArenaSentinel) {
@@ -140,15 +142,15 @@ private:
     return static_cast<std::size_t>(index);
   }
 
-  // Sentinel returned when the calling thread is not a `PoolGroup` worker.
+  /// Sentinel returned when the calling thread is not a `PoolGroup` worker.
   static constexpr std::size_t kNoArenaHint = static_cast<std::size_t>(-1);
 
-  // 32-bit sentinel matching `ThreadPool::currentArenaIndexHint`'s "no arena"
-  // return.
+  /// 32-bit sentinel matching `ThreadPool::currentArenaIndexHint`'s "no arena"
+  /// return.
   static constexpr std::uint32_t kNoArenaSentinel =
       static_cast<std::uint32_t>(-1);
 
-  // Owning storage for the per-CCD arenas.
+  /// Owning storage for the per-CCD arenas.
   std::vector<std::unique_ptr<ThreadPool>> m_arenas;
 };
 

@@ -53,11 +53,11 @@ public:
   static_assert(std::is_trivially_destructible_v<T>,
                 "ChaseLevDeque payload must be trivially-destructible");
 
-  // Initial capacity for a freshly-constructed deque; a power of two.
+  /// Initial capacity for a freshly-constructed deque; a power of two.
   static constexpr std::size_t kInitialCapacity = 64;
 
-  // Construct an empty deque sized to |initialCapacity|, rounded up to a
-  // power of two and clamped to at least `kInitialCapacity`.
+  /// Construct an empty deque sized to |initialCapacity|, rounded up to a
+  /// power of two and clamped to at least `kInitialCapacity`.
   explicit ChaseLevDeque(std::size_t initialCapacity = kInitialCapacity) {
     const std::size_t cap = std::max(
         roundUpPow2(initialCapacity > 0 ? initialCapacity : kInitialCapacity),
@@ -87,10 +87,10 @@ public:
     }
   }
 
-  // Owner-only: pre-grow the underlying ring buffer so the next |needed|
-  // pushes do not trigger an allocation. No-op when capacity is already
-  // sufficient. Bulk-push call sites (e.g. `forkJoinAll` with many roots)
-  // call this once to fold N growth allocations into at most one.
+  /// Owner-only: pre-grow the underlying ring buffer so the next |needed|
+  /// pushes do not trigger an allocation. No-op when capacity is already
+  /// sufficient. Bulk-push call sites (e.g. `forkJoinAll` with many roots)
+  /// call this once to fold N growth allocations into at most one.
   void reserveOwner(std::size_t needed) {
     Array *arr = m_array.load(std::memory_order_relaxed);
     if (needed + 1U <= arr->capacity) {
@@ -114,12 +114,12 @@ public:
         head, arr, std::memory_order_release, std::memory_order_relaxed));
   }
 
-  // Owner-only: push a value onto the bottom of the deque.
-  //
-  // Resizes the underlying ring buffer to twice its capacity when the buffer
-  // is full. The grow path allocates a fresh `Array`, copies live elements,
-  // and chains the old array onto a freelist so concurrent stealers'
-  // acquire-loaded array pointers remain valid for the rest of their attempt.
+  /// Owner-only: push a value onto the bottom of the deque.
+  ///
+  /// Resizes the underlying ring buffer to twice its capacity when the buffer
+  /// is full. The grow path allocates a fresh `Array`, copies live elements,
+  /// and chains the old array onto a freelist so concurrent stealers'
+  /// acquire-loaded array pointers remain valid for the rest of their attempt.
   void push(T value) {
     const std::int64_t b = m_bottom.load(std::memory_order_relaxed);
     const std::int64_t t = m_top.load(std::memory_order_acquire);
@@ -133,11 +133,11 @@ public:
     m_bottom.store(b + 1, std::memory_order_relaxed);
   }
 
-  // Owner-only: pop a value from the bottom of the deque.
-  //
-  // Returns `std::nullopt` when the deque is empty. The last-item race with a
-  // concurrent `steal` is settled via a seq_cst CAS on `top`: only one of
-  // the two participants succeeds.
+  /// Owner-only: pop a value from the bottom of the deque.
+  ///
+  /// Returns `std::nullopt` when the deque is empty. The last-item race with a
+  /// concurrent `steal` is settled via a seq_cst CAS on `top`: only one of
+  /// the two participants succeeds.
   std::optional<T> pop() noexcept {
     const Array *arr = m_array.load(std::memory_order_relaxed);
     const std::int64_t b = m_bottom.load(std::memory_order_relaxed) - 1;
@@ -164,13 +164,13 @@ public:
     return value;
   }
 
-  // Stealer: try to steal a value from the top of the deque.
-  //
-  // Returns `std::nullopt` on contention or empty. The caller retries (or
-  // moves to another victim) when steal returns empty without distinguishing
-  // the two cases; the canonical Chase-Lev formulation collapses them. The
-  // `top` CAS uses seq_cst on success, relaxed on failure, matching Le 2013
-  // figure 1.
+  /// Stealer: try to steal a value from the top of the deque.
+  ///
+  /// Returns `std::nullopt` on contention or empty. The caller retries (or
+  /// moves to another victim) when steal returns empty without distinguishing
+  /// the two cases; the canonical Chase-Lev formulation collapses them. The
+  /// `top` CAS uses seq_cst on success, relaxed on failure, matching Le 2013
+  /// figure 1.
   std::optional<T> steal() noexcept {
     std::int64_t t = m_top.load(std::memory_order_acquire);
     std::atomic_thread_fence(std::memory_order_seq_cst);
@@ -187,81 +187,81 @@ public:
     return value;
   }
 
-  // Stealer-friendly empty-probe used on the worker poll fast path.
-  //
-  // Reads `top` (acquire) and `bottom` (acquire) and returns true when `top
-  // >= bottom`. The relaxed orders the canonical Chase-Lev empty-check would
-  // use are insufficient here because the result is consumed before the
-  // steal CAS; the acquire-loads are paired with the release-store on the
-  // owner's `push` so the worker observes any payload published before the
-  // steal probe.
+  /// Stealer-friendly empty-probe used on the worker poll fast path.
+  ///
+  /// Reads `top` (acquire) and `bottom` (acquire) and returns true when `top
+  /// >= bottom`. The relaxed orders the canonical Chase-Lev empty-check would
+  /// use are insufficient here because the result is consumed before the
+  /// steal CAS; the acquire-loads are paired with the release-store on the
+  /// owner's `push` so the worker observes any payload published before the
+  /// steal probe.
   [[nodiscard]] bool empty() const noexcept {
     const std::int64_t t = m_top.load(std::memory_order_acquire);
     const std::int64_t b = m_bottom.load(std::memory_order_acquire);
     return t >= b;
   }
 
-  // Owner-side observation of the deque's logical size. Suitable for debug
-  // assertions; not for hot-path scheduling, since the value can be
-  // invalidated by an in-flight steal between the load and the consumer.
+  /// Owner-side observation of the deque's logical size. Suitable for debug
+  /// assertions; not for hot-path scheduling, since the value can be
+  /// invalidated by an in-flight steal between the load and the consumer.
   [[nodiscard]] std::size_t size() const noexcept {
     const std::int64_t t = m_top.load(std::memory_order_acquire);
     const std::int64_t b = m_bottom.load(std::memory_order_acquire);
     return (b > t) ? static_cast<std::size_t>(b - t) : std::size_t{0};
   }
 
-  // Owner-side query: current capacity of the underlying ring buffer; always
-  // a power of two.
+  /// Owner-side query: current capacity of the underlying ring buffer; always
+  /// a power of two.
   [[nodiscard]] std::size_t capacity() const noexcept {
     return m_array.load(std::memory_order_relaxed)->capacity;
   }
 
 private:
-  // Ring-buffer backing storage. Indexed modulo `capacity`. `next` chains
-  // retired buffers.
+  /// Ring-buffer backing storage. Indexed modulo `capacity`. `next` chains
+  /// retired buffers.
   struct Array {
-    // Ring-buffer capacity in elements; a power of two.
+    /// Ring-buffer capacity in elements; a power of two.
     std::size_t capacity = 0;
-    // Power-of-two mask, equal to `capacity - 1`.
+    /// Power-of-two mask, equal to `capacity - 1`.
     std::size_t mask = 0;
-    // Next retired buffer in the freelist; `nullptr` if not retired.
+    /// Next retired buffer in the freelist; `nullptr` if not retired.
     Array *next = nullptr;
-    // Trailing storage of `capacity` slots; flexible array layout via
-    // `operator new`. The declared length of 1 is a placeholder; the actual
-    // element count is `capacity` and is allocated by `allocateArray` via a
-    // single oversized `operator new` call.
-    // NOLINTNEXTLINE(modernize-avoid-c-arrays)
+    /// Trailing storage of `capacity` slots; flexible array layout via
+    /// `operator new`. The declared length of 1 is a placeholder; the actual
+    /// element count is `capacity` and is allocated by `allocateArray` via a
+    /// single oversized `operator new` call.
+    /// NOLINTNEXTLINE(modernize-avoid-c-arrays)
     std::atomic<T> slots[1];
 
-    // Store |v| at logical index |i| (mod capacity).
-    //
-    // Release ordering pairs with the matching acquire load on the steal path
-    // so a stealer that acquire-loads `bottom` and then loads this slot
-    // observes everything the owner wrote before the corresponding push,
-    // including the descriptor fields the stolen payload points at. The Le
-    // 2013 push protocol's release fence + relaxed `bottom` store would be
-    // sufficient on its own, but the explicit per-slot release lets
-    // ThreadSanitizer model the cross-thread happens-before edge directly
-    // without relying on the fence-relaxed-store equivalence.
+    /// Store |v| at logical index |i| (mod capacity).
+    ///
+    /// Release ordering pairs with the matching acquire load on the steal path
+    /// so a stealer that acquire-loads `bottom` and then loads this slot
+    /// observes everything the owner wrote before the corresponding push,
+    /// including the descriptor fields the stolen payload points at. The Le
+    /// 2013 push protocol's release fence + relaxed `bottom` store would be
+    /// sufficient on its own, but the explicit per-slot release lets
+    /// ThreadSanitizer model the cross-thread happens-before edge directly
+    /// without relying on the fence-relaxed-store equivalence.
     void store(std::int64_t i, T v) noexcept {
       slots[static_cast<std::size_t>(i) & mask].store(
           v, std::memory_order_release);
     }
 
-    // Load the value at logical index |i| (mod capacity).
-    //
-    // Acquire ordering pairs with the per-slot release store on push so a
-    // stealer (or the owner after the seq_cst fence in pop) observes the
-    // descriptor the slot points to. On x86-64 the acquire load is free; on
-    // weaker memory models it is the canonical pairing for the slot.
+    /// Load the value at logical index |i| (mod capacity).
+    ///
+    /// Acquire ordering pairs with the per-slot release store on push so a
+    /// stealer (or the owner after the seq_cst fence in pop) observes the
+    /// descriptor the slot points to. On x86-64 the acquire load is free; on
+    /// weaker memory models it is the canonical pairing for the slot.
     [[nodiscard]] T load(std::int64_t i) const noexcept {
       return slots[static_cast<std::size_t>(i) & mask].load(
           std::memory_order_acquire);
     }
   };
 
-  // Allocate a fresh `Array` with the requested power-of-two |cap|. Payload
-  // slots are default-initialized to `T{}`.
+  /// Allocate a fresh `Array` with the requested power-of-two |cap|. Payload
+  /// slots are default-initialized to `T{}`.
   static Array *allocateArray(std::size_t cap) {
     const std::size_t headerBytes = offsetof(Array, slots);
     const std::size_t totalBytes = headerBytes + (sizeof(std::atomic<T>) * cap);
@@ -276,7 +276,7 @@ private:
     return arr;
   }
 
-  // Free an array previously returned by `allocateArray`. Tolerates nullptr.
+  /// Free an array previously returned by `allocateArray`. Tolerates nullptr.
   static void deleteArray(Array *arr) noexcept {
     if (arr == nullptr) {
       return;
@@ -287,12 +287,12 @@ private:
     ::operator delete(static_cast<void *>(arr), std::align_val_t{kCacheLine});
   }
 
-  // Owner-side: double the ring buffer's capacity in place.
-  //
-  // Allocates a new `Array` with `2 * old.capacity` slots, copies every live
-  // element, retires the old array onto the freelist (so any in-flight
-  // stealer's acquire-loaded pointer remains valid for the rest of its
-  // attempt), and publishes the new array via release-store on `m_array`.
+  /// Owner-side: double the ring buffer's capacity in place.
+  ///
+  /// Allocates a new `Array` with `2 * old.capacity` slots, copies every live
+  /// element, retires the old array onto the freelist (so any in-flight
+  /// stealer's acquire-loaded pointer remains valid for the rest of its
+  /// attempt), and publishes the new array via release-store on `m_array`.
   Array *grow(Array *oldArr, std::int64_t b, std::int64_t t) {
     const std::size_t newCap = oldArr->capacity * 2;
     Array *newArr = allocateArray(newCap);
@@ -311,7 +311,7 @@ private:
     return newArr;
   }
 
-  // Round |v| up to the next power of two. Input must be at least 1.
+  /// Round |v| up to the next power of two. Input must be at least 1.
   static constexpr std::size_t roundUpPow2(std::size_t v) noexcept {
     if (v <= 1) {
       return 1;
@@ -328,17 +328,17 @@ private:
     return v + 1;
   }
 
-  // Owner-incremented push index. Release-stored after a successful push.
+  /// Owner-incremented push index. Release-stored after a successful push.
   alignas(kCacheLine) std::atomic<std::int64_t> m_bottom{0};
 
-  // Stealer-incremented pop index. CAS-updated by both the owner's `pop`
-  // last-item branch and every successful `steal`.
+  /// Stealer-incremented pop index. CAS-updated by both the owner's `pop`
+  /// last-item branch and every successful `steal`.
   alignas(kCacheLine) std::atomic<std::int64_t> m_top{0};
 
-  // Active backing array. Replaced via release-store by `grow`.
+  /// Active backing array. Replaced via release-store by `grow`.
   alignas(kCacheLine) std::atomic<Array *> m_array{nullptr};
 
-  // Singly-linked freelist of retired arrays; reaped at destruction time.
+  /// Singly-linked freelist of retired arrays; reaped at destruction time.
   alignas(kCacheLine) std::atomic<Array *> m_freelist{nullptr};
 };
 

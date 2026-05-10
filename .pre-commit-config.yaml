@@ -53,10 +53,11 @@ repos:
         files: ^(include/citor/.*\.h|tools/amalgamate\.py)$
         pass_filenames: false
 
-      - id: require-doc-strings
-        name: require-doc-strings
-        entry: python3 scripts/check_doc_strings.py
-        language: system
+      - id: require-doc-comments
+        name: require-doc-comments
+        entry: python3 scripts/check_doc_comments.py
+        language: python
+        additional_dependencies: ["tree-sitter>=0.23", "tree-sitter-cpp>=0.23"]
         files: ^include/citor/.*\.h$
         pass_filenames: true
 

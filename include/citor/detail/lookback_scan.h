@@ -32,9 +32,16 @@ namespace citor::detail {
 /// lookback walk entirely and proceed straight from step 2 to step 4.
 template <class T>
 struct alignas(kCacheLine) LookbackTile {
+  /// State-machine value stored in `flag`. The transitions are monotonic:
+  /// `Initialized` -> `AggregateAvailable` -> `PrefixAvailable`.
   enum class Flag : std::uint64_t {
+    /// The tile owns a slot but has not yet computed its local aggregate.
     Initialized = 0,
+    /// `aggregate` is published and synchronises through an acquire-load
+    /// of `flag`. The prefix is not yet known.
     AggregateAvailable = 1,
+    /// `prefix` is published and synchronises through an acquire-load of
+    /// `flag`. Successors may stop their lookback walk at this tile.
     PrefixAvailable = 2,
   };
 

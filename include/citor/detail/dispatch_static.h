@@ -55,6 +55,10 @@ struct BlockClaim;
 /// until past `blockCount`. No atomic on the hot path.
 template <>
 struct BlockClaim<Balance::StaticUniform> {
+  /// Returns the next block id this rank should run, or `kNoBlock` when
+  /// the rank has run all of its statically assigned blocks. `|prevIdx|`
+  /// is `kNoBlock` on the first call and the previously returned block id
+  /// thereafter.
   [[gnu::always_inline]] static std::size_t
   next(JobDescriptor *desc, std::uint32_t rank, std::size_t prevIdx) noexcept {
     const std::size_t participants = desc->participants;
@@ -71,6 +75,10 @@ struct BlockClaim<Balance::StaticUniform> {
 /// atomic-tail hybrid the bench uses).
 template <>
 struct BlockClaim<Balance::DynamicChunked> {
+  /// Returns the next block id this rank should run, or `kNoBlock` when
+  /// the dispatch is drained. The first call (`|prevIdx| == kNoBlock`)
+  /// claims the rank-indexed block without touching `desc->nextBlock`;
+  /// subsequent calls drain the atomic tail.
   [[gnu::always_inline]] static std::size_t
   next(JobDescriptor *desc, std::uint32_t rank, std::size_t prevIdx) noexcept {
     const std::size_t blockCount = desc->blockCount;
@@ -142,6 +150,10 @@ inline void runPartition(JobDescriptor &desc, std::uint32_t rank) noexcept {
   }
 }
 
+/// Inlined typed counterpart to `BlockClaim<B>::next`. The compile-time
+/// `Balance` selects the strided or atomic-tail policy without going
+/// through the policy struct so the loop body inlines into the typed
+/// worker entry.
 template <Balance B>
 [[gnu::always_inline]] inline std::size_t
 nextTypedBlock(JobDescriptor &desc, std::size_t blockCount,
@@ -245,6 +257,10 @@ template <class FOp>
   runPartitionTyped<Balance::StaticUniform>(desc, rank, fn);
 }
 
+/// Single-block fast path used when `blockCount <= participants`. Runs at
+/// most one block per rank with no claim loop and no atomic counter
+/// touch. Cancellation and exception checks are elided when `HintsT` and
+/// the body's noexcept-ness allow.
 template <class HintsT, class FOp>
 [[gnu::always_inline]] inline void
 runSingleRankBlockTyped(JobDescriptor &desc, std::uint32_t rank, FOp &fn,
@@ -293,6 +309,10 @@ runSingleRankBlockTyped(JobDescriptor &desc, std::uint32_t rank, FOp &fn,
   }
 }
 
+/// Typed partition runner with `HintsT` compile-time gating. Routes to
+/// the single-block fast path when `blockCount <= participants`; otherwise
+/// runs the typed claim loop with cancellation and exception checks
+/// elided per `HintsT`.
 template <Balance B, class HintsT, class FOp>
 [[gnu::always_inline]] inline void runPartitionTypedHinted(JobDescriptor &desc,
                                                            std::uint32_t rank,
@@ -355,6 +375,10 @@ template <Balance B, class HintsT, class FOp>
   }
 }
 
+/// Returns the contiguous `[begin, end)` block span owned by `|rank|`
+/// under a balanced contiguous partition of `|blockCount|` blocks across
+/// `|participants|` ranks. The first `|blockCount| % |participants|`
+/// ranks each get one extra block.
 [[gnu::always_inline]] inline std::pair<std::size_t, std::size_t>
 contiguousRankBlockSpan(std::size_t blockCount, std::size_t participants,
                         std::uint32_t rank) noexcept {
@@ -369,6 +393,11 @@ contiguousRankBlockSpan(std::size_t blockCount, std::size_t participants,
   return {begin, end};
 }
 
+/// Typed contiguous-partition runner driven by precomputed cached
+/// parameters (`blockCount`, `participants`, `chunk`, `first`, `last`).
+/// Each rank walks its `contiguousRankBlockSpan` once with no atomic
+/// counter touch. Detects whether `|fn|` accepts a leading `blockId`
+/// argument and dispatches accordingly.
 template <class HintsT, class FOp>
 [[gnu::always_inline]] inline void runContiguousRankPartitionTypedCached(
     JobDescriptor &desc, std::uint32_t rank, FOp &fn, std::size_t blockCount,
@@ -430,6 +459,9 @@ template <class HintsT, class FOp>
   }
 }
 
+/// Convenience wrapper around `runContiguousRankPartitionTypedCached`
+/// that reads the partition parameters from `|desc|` directly. Used when
+/// the cached typed-for slot is not available (worker fallback paths).
 template <class HintsT, class FOp>
 [[gnu::always_inline]] inline void
 runContiguousRankPartitionTyped(JobDescriptor &desc, std::uint32_t rank,
@@ -450,16 +482,30 @@ runContiguousRankPartitionTyped(JobDescriptor &desc, std::uint32_t rank,
 /// fields. Worker reads cached values from TLS instead of the producer's TLS
 /// desc cache line, eliminating that line transit on the hot path.
 struct alignas(kCacheLine) CachedTypedForJob {
+  /// Total number of blocks in the dispatch.
   std::size_t blockCount{0};
+  /// Number of participating slots (producer plus workers).
   std::size_t participants{0};
+  /// Block size in elements.
   std::size_t chunk{0};
+  /// Inclusive first index of the iteration range.
   std::size_t first{0};
+  /// Exclusive last index of the iteration range.
   std::size_t last{0};
+  /// Type-erased pointer to the body callable. The worker reinterprets it
+  /// as `F *` after the producer's reuse check matches.
   void *fnPtr{nullptr};
+  /// Type-erased pointer to the pool's `WorkerState` array, used for the
+  /// cold-collapse rank-claim CAS.
   void *workerStateBase{nullptr};
+  /// True after the cache has been written at least once. The worker
+  /// trusts cached values only when this is set.
   bool primed{false};
 };
 
+/// Returns the thread-local `CachedTypedForJob` cache for this `(HintsT,
+/// F)` instantiation. Each typed worker entry has its own cache slot;
+/// distinct body types do not collide.
 template <class HintsT, class F>
 inline CachedTypedForJob &cachedTypedForSlot() noexcept {
   static thread_local CachedTypedForJob cache;
@@ -587,6 +633,9 @@ inline void typedStaticUniformWorkerEntry(JobDescriptor *desc,
                                                       generation);
 }
 
+/// Typed worker entry for `Balance::StaticContiguous`. Each rank runs a
+/// contiguous block span computed from its rank id; no claim CAS, no
+/// atomic counter touch.
 template <class HintsT, class F>
 inline void
 typedStaticContiguousWorkerEntry(JobDescriptor *desc, std::uint32_t rankPacked,

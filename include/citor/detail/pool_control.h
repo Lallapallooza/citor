@@ -165,13 +165,15 @@ struct PoolControl {
 /// (futex parks/wakes, steal attempts) live on `WorkerState` and are aggregated
 /// into `PoolCountersSnapshot` by `snapshotCounters()`.
 ///
-/// **Compile-time gated by `CITOR_ENABLE_POOL_COUNTERS`.** When the macro is
+/// Compile-time gated by `CITOR_ENABLE_POOL_COUNTERS`. When the macro is
 /// undefined (the default), the struct has no atomic members and the increment
 /// sites compile to no-ops; the dispatch hot path pays zero extra atomics. When
 /// defined, each increment is `relaxed` and the struct is on its own cache line
 /// so the counter line never bounces with `PoolControl`'s contended atomics.
 /// Reset is not provided; counters are cumulative for the pool's lifetime.
 #ifdef CITOR_ENABLE_POOL_COUNTERS
+/// Pool-scoped diagnostic counters; populated when
+/// `CITOR_ENABLE_POOL_COUNTERS` is defined.
 struct alignas(kCacheLine) PoolCounters {
   /// Producer-side dispatches that reached the worker fan-out path (one
   /// increment per published generation).
@@ -190,8 +192,9 @@ struct alignas(kCacheLine) PoolCounters {
     m_counters.member.fetch_add(1, std::memory_order_relaxed);                 \
   } while (0)
 #else
-struct PoolCounters {
-}; // empty stub; the member is zero-sized when counters are disabled.
+/// Empty stub used when `CITOR_ENABLE_POOL_COUNTERS` is undefined; the
+/// member is zero-sized and every increment site compiles to a no-op.
+struct PoolCounters {};
 #define CITOR_COUNTERS_INC(member)                                             \
   do {                                                                         \
   } while (0)

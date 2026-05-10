@@ -22,107 +22,96 @@ namespace citor {
 inline constexpr std::size_t kCacheLine = 128;
 
 /// Load-balancing strategy a primitive uses across its participants.
-///
-/// - `StaticUniform`: worker-strided block partition, no atomics on the hot
-/// path. Block ids are a
-///   stable function of `(n, site_tag)` and independent of worker count, which
-///   gives deterministic reductions cross-`nJobs` bit-identity for free.
-/// - `DynamicChunked`: workers race on a single relaxed counter
-/// (`nextBlock.fetch_add`). One atomic,
-///   no deque, no stealing. Use when per-block cost varies (kNN, threshold
-///   emit).
 enum class Balance : std::uint8_t {
+  /// Worker-strided block partition with no atomics on the hot path.
+  /// Block ids are a stable function of `(n, site_tag)` and independent
+  /// of worker count, so deterministic reductions get cross-`nJobs`
+  /// bit-identity for free.
   StaticUniform,
+  /// Workers race on a single relaxed counter (`nextBlock.fetch_add`).
+  /// One atomic, no deque, no stealing. Used when per-block cost
+  /// varies (kNN, threshold emit).
   DynamicChunked,
 };
 
 /// Floating-point determinism contract a reduction primitive promises.
-///
-/// - `FixedBlockOrder`: chunk-id pairwise tree combine; bit-identical across
-/// worker counts when
-///   `chunk_size = f(n, site_tag)`.
-/// - `KahanCompensated`: Kahan/Neumaier compensated FP sum on top of the
-/// fixed-block tree.
 enum class Determinism : std::uint8_t {
+  /// Chunk-id pairwise tree combine; bit-identical across worker counts
+  /// when `chunk_size = f(n, site_tag)`.
   FixedBlockOrder,
+  /// Kahan / Neumaier compensated FP sum on top of the fixed-block
+  /// tree.
   KahanCompensated,
 };
 
 /// Worker-placement policy. Controls how each worker thread's affinity
 /// mask is configured at pool construction.
-///
-/// - `PerCpu`: each worker pinned to exactly one logical CPU from the
-///   pool's allowed-CPU set. Strict: the kernel cannot migrate the worker
-///   to any other CPU. Best for HPC / real-time use where determinism
-///   matters more than the kernel's ability to opportunistically rebalance.
-/// - `PerCluster`: each worker pinned to its CCD's full logical-CPU set
-///   (the kernel may migrate the worker within its CCD but not across
-///   clusters). Preserves CCD-locality of caches while letting the kernel
-///   route wakes via `select_idle_sibling` and rebalance under transient
-///   intra-CCD load. Recommended default for memory-bound primitives like
-///   `parallelScan` on multi-CCD parts.
-/// - `None`: workers inherit the producer's process affinity mask without
-///   further pinning. The kernel scheduler is free to migrate at will.
-///   Useful for lightly-loaded systems where the kernel's heuristics
-///   outperform any static policy.
 enum class Affinity : std::uint8_t {
+  /// Workers inherit the producer's process affinity mask without
+  /// further pinning. The kernel scheduler is free to migrate at will.
+  /// Useful for lightly-loaded systems where the kernel's heuristics
+  /// outperform any static policy.
   None,
+  /// Each worker pinned to exactly one logical CPU from the pool's
+  /// allowed-CPU set. Strict: the kernel cannot migrate the worker to
+  /// any other CPU. Best for HPC / real-time use where determinism
+  /// matters more than the kernel's ability to rebalance.
   PerCpu,
+  /// Each worker pinned to its CCD's full logical-CPU set; the kernel
+  /// may migrate the worker within its CCD but not across clusters.
+  /// Preserves CCD-locality of caches while letting the kernel route
+  /// wakes via `select_idle_sibling` and rebalance under transient
+  /// intra-CCD load. Default for memory-bound primitives on multi-CCD
+  /// parts.
   PerCluster,
 };
 
 /// Fork-join steal-victim selection policy.
 ///
-/// Bias the recursive `forkJoin` steal probe toward CCD-local victims
-/// before falling back to cross-CCD. Independent of `Affinity` (which
-/// controls worker placement); a pool with `Affinity::PerCpu` and
-/// `StealPolicy::ClusterLocal` pins each worker to its CPU AND biases its
-/// steal probe to same-CCD victims.
-///
-/// - `Global`: probe every worker uniformly.
-/// - `ClusterLocal`: probe same-CCD victims first; fall back to cross-CCD
-///   only when the local cluster has no work to take. Default for
-///   data-locality-sensitive recursive workloads.
+/// Independent of `Affinity` (which controls worker placement); a pool
+/// with `Affinity::PerCpu` and `StealPolicy::ClusterLocal` pins each
+/// worker to its CPU AND biases its steal probe to same-CCD victims.
 enum class StealPolicy : std::uint8_t {
+  /// Probe every worker uniformly.
   Global,
+  /// Probe same-CCD victims first; fall back to cross-CCD only when the
+  /// local cluster has no work to take. Default for
+  /// data-locality-sensitive recursive workloads.
   ClusterLocal,
 };
 
-/// Per-call priority class consulted when concurrent producers contend on the
-/// same pool.
+/// Per-call priority class consulted when concurrent producers contend
+/// on the same pool.
 ///
-/// The pool serializes concurrent `dispatchOne` calls through a small
-/// two-bucket gate: `Priority::Latency` callers jump ahead of
-/// `Priority::Throughput` callers waiting in the gate; `Priority::Background`
-/// callers yield to throughput on dispatch contention. Within a single
-/// primitive (one producer at a time) the priority is hint-only and the workers
-/// see the same job either way; the gate only matters when two or more threads
-/// call into the pool concurrently.
-///
-/// The bucket is minimal (two preferred, one yielding) to keep the gate's
-/// overhead off the dispatch hot path. `Background` is best-effort: it may be
-/// reordered behind any number of higher-priority dispatches and offers no
-/// progress guarantee in the presence of sustained higher-priority traffic.
+/// The pool serializes concurrent `dispatchOne` calls through a
+/// two-bucket gate. Within a single primitive (one producer at a time)
+/// the priority is hint-only and the workers see the same job either
+/// way; the gate only matters when two or more threads call into the
+/// pool concurrently. The bucket is minimal (two preferred, one
+/// yielding) to keep the gate's overhead off the dispatch hot path.
 enum class Priority : std::uint8_t {
+  /// Jumps ahead of `Throughput` callers waiting in the dispatch gate.
   Latency,
+  /// Default; yields to `Latency` and runs ahead of `Background`.
   Throughput,
+  /// Best-effort; yields to throughput on dispatch contention. May be
+  /// reordered behind any number of higher-priority dispatches and
+  /// offers no progress guarantee under sustained higher-priority
+  /// traffic.
   Background,
 };
 
 /// Synchronization barrier inserted between two adjacent stages of
 /// `parallelChain`.
-///
-/// - `None`: worker proceeds to the next stage without synchronizing.
-/// - `Global`: rendezvous across all `participants`.
-/// - `DeterministicReduce`: `Global` followed by a chunk-id pairwise-tree
-/// reduction.
-/// - `ProducerSerial`: workers other than rank 0 spin on a producer-done flag
-/// while rank 0 runs
-///   the serial body.
 enum class BarrierKind : std::uint8_t {
+  /// Worker proceeds to the next stage without synchronizing.
   None,
+  /// Rendezvous across all `participants`.
   Global,
+  /// `Global` followed by a chunk-id pairwise-tree reduction.
   DeterministicReduce,
+  /// Workers other than rank 0 spin on a producer-done flag while
+  /// rank 0 runs the serial body.
   ProducerSerial,
 };
 

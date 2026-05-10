@@ -184,6 +184,9 @@ struct ScanState {
   /// `[clusterFirstSlot[k], clusterFirstSlot[k] + clusterSlotCount[k])`.
   /// Nullptr when the hierarchical path is disabled.
   const std::uint32_t *clusterFirstSlot = nullptr;
+  /// Companion to `clusterFirstSlot`. `clusterSlotCount[c]` is the number
+  /// of slots in cluster `c`. Nullptr when the hierarchical path is
+  /// disabled.
   const std::uint32_t *clusterSlotCount = nullptr;
 
   /// Per-cluster total / exclusive prefix slots. Each lives on its own
@@ -192,6 +195,9 @@ struct ScanState {
   /// exclusive prefix the producer writes back. Both are sized
   /// `numClusters`. Nullptr when the hierarchical path is disabled.
   T *clusterTotals = nullptr;
+  /// Per-cluster cross-cluster exclusive prefixes the producer writes back
+  /// after the cluster reduce. Sized `numClusters`. Nullptr when the
+  /// hierarchical path is disabled.
   T *clusterPrefixes = nullptr;
 
   /// Subscript a slot by index.

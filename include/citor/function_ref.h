@@ -6,9 +6,9 @@
 
 namespace citor {
 
-// Primary template; the specialization below handles function-type signatures.
-// Instantiating `FunctionRef` with a non-function type produces a compile-time
-// diagnostic.
+/// Primary template; the specialization below handles function-type signatures.
+/// Instantiating `FunctionRef` with a non-function type produces a compile-time
+/// diagnostic.
 template <class Sig>
 class FunctionRef;
 
@@ -32,10 +32,10 @@ public:
   // Construct an empty `FunctionRef`. Invoking an empty instance is undefined.
   constexpr FunctionRef() noexcept = default;
 
-  // Bind to a callable |fn| living in the caller's storage. Stores a non-owning
-  // pointer to |fn| and a thunk that invokes it through the erased pointer.
-  // The SFINAE constraint excludes `FunctionRef`-of-`FunctionRef` self-binding
-  // so copy semantics stay intact.
+  /// Bind to a callable |fn| living in the caller's storage. Stores a
+  /// non-owning pointer to |fn| and a thunk that invokes it through the erased
+  /// pointer. The SFINAE constraint excludes `FunctionRef`-of-`FunctionRef`
+  /// self-binding so copy semantics stay intact.
   template <class F>
     requires(!std::is_same_v<std::remove_cv_t<std::remove_reference_t<F>>,
                              FunctionRef> &&
@@ -72,18 +72,18 @@ public:
   }
 
 private:
-  // Static thunk that downcasts the erased pointer back to the source type
-  // and invokes it. Lives as a function pointer in the `m_invoke` slot so the
-  // `FunctionRef` pays no virtual call cost.
+  /// Static thunk that downcasts the erased pointer back to the source type
+  /// and invokes it. Lives as a function pointer in the `m_invoke` slot so the
+  /// `FunctionRef` pays no virtual call cost.
   template <class F>
   static R invokeImpl(void *obj, Args... args) {
     return (*static_cast<F *>(obj))(std::forward<Args>(args)...);
   }
 
-  // Erased pointer to the bound callable; null when empty.
+  /// Erased pointer to the bound callable; null when empty.
   void *m_obj = nullptr;
-  // Thunk that recovers the source type and invokes the callable; null when
-  // empty.
+  /// Thunk that recovers the source type and invokes the callable; null when
+  /// empty.
   R (*m_invoke)(void *, Args...) = nullptr;
 };
 

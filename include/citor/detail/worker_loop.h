@@ -14,44 +14,41 @@
 
 namespace citor::detail {
 
-// Spin-then-park budget applied after a bulk job completes.
-//
-// Two bounds gate the spin: a PAUSE iteration count and a TSC cycle budget.
-// Both must trip before the worker invokes `FUTEX_WAIT_PRIVATE`. The PAUSE
-// bound captures co-tenancy cases where the scheduler de-schedules our
-// worker (TSC keeps advancing while iterations stay constant); the TSC
-// bound captures the inverse (busy spinning while iterations advance fast).
-//
-// The Karlin 1991 SOSP optimum sets `maxCycles` to roughly twice the wakeup
-// latency.
+/// Spin-then-park budget applied after a bulk job completes.
+///
+/// Two bounds gate the spin: a PAUSE iteration count and a TSC cycle budget.
+/// Both must trip before the worker invokes `FUTEX_WAIT_PRIVATE`. The PAUSE
+/// bound captures co-tenancy cases where the scheduler de-schedules our
+/// worker (TSC keeps advancing while iterations stay constant); the TSC
+/// bound captures the inverse (busy spinning while iterations advance fast).
+///
+/// The Karlin 1991 SOSP optimum sets `maxCycles` to roughly twice the wakeup
+/// latency.
 struct SpinPolicy {
-  // Maximum PAUSE iterations before checking the TSC bound.
+  /// Maximum PAUSE iterations before checking the TSC bound.
   std::uint32_t maxIters = 0;
 
-  // Maximum TSC cycles to spin before parking.
+  /// Maximum TSC cycles to spin before parking.
   std::uint64_t maxCycles = 0;
 };
 
-// Default spin budget applied to workers between jobs.
-//
-// The PAUSE bound and the TSC bound together cover both co-tenancy stalls
-// and runaway loops. The cycle budget is sized above the typical
-// back-to-back dispatch interval on a multi-CCD fan-out so workers do not
-// park between hot dispatches; parking each round costs a `FUTEX_WAIT` /
-// `FUTEX_WAKE` round-trip that dominates the empty-fan-out floor. A worker
-// that idles past the budget still parks promptly.
 #ifndef CITOR_SPIN_AFTER_BULK_JOB_MAX_ITERS
 #define CITOR_SPIN_AFTER_BULK_JOB_MAX_ITERS 8192U
 #endif
 #ifndef CITOR_SPIN_AFTER_BULK_JOB_MAX_CYCLES
 #define CITOR_SPIN_AFTER_BULK_JOB_MAX_CYCLES 1000000ULL
 #endif
+/// Default spin budget applied to workers between jobs. The PAUSE and TSC
+/// bounds together cover co-tenancy stalls and runaway loops; the cycle
+/// budget sits above the typical back-to-back dispatch interval so workers
+/// do not park between hot dispatches. A worker that idles past the budget
+/// still parks promptly.
 inline constexpr SpinPolicy kSpinAfterBulkJob{
     .maxIters = CITOR_SPIN_AFTER_BULK_JOB_MAX_ITERS,
     .maxCycles = CITOR_SPIN_AFTER_BULK_JOB_MAX_CYCLES};
 
-// Read the current TSC for spin-budget bookkeeping. Returns 0 on platforms
-// without a TSC; the caller's loop falls through to the iteration bound.
+/// Read the current TSC for spin-budget bookkeeping. Returns 0 on platforms
+/// without a TSC; the caller's loop falls through to the iteration bound.
 inline std::uint64_t readTsc() noexcept {
 #if defined(__x86_64__) || defined(_M_X64)
   unsigned int aux = 0;
@@ -61,13 +58,13 @@ inline std::uint64_t readTsc() noexcept {
 #endif
 }
 
-// Check whether a generation observed by the worker indicates the pool
-// should exit.
-//
-// The worker exits when the shutdown bit is set AND the active job slot is
-// empty. The active-job check guards the race where the producer publishes
-// a final job concurrently with the shutdown signal: workers must drain
-// that job before exiting.
+/// Check whether a generation observed by the worker indicates the pool
+/// should exit.
+///
+/// The worker exits when the shutdown bit is set AND the active job slot is
+/// empty. The active-job check guards the race where the producer publishes
+/// a final job concurrently with the shutdown signal: workers must drain
+/// that job before exiting.
 inline bool shouldExit(const PoolControl &control) noexcept {
   const std::uint64_t gen = control.generation.load(std::memory_order_acquire);
   if ((gen & PoolControl::kShutdownBit) == 0) {
@@ -76,13 +73,13 @@ inline bool shouldExit(const PoolControl &control) noexcept {
   return control.activeJob.load(std::memory_order_acquire) == nullptr;
 }
 
-// Run the worker's share of the active job with the balance fixed at
-// compile time.
-//
-// Producer call sites know the dispatch shape from the primitive's hint
-// type and use this overload to compile away the runtime branch on
-// `desc.balance`. Workers, which read the descriptor's runtime balance
-// after observing a new generation, use the runtime overload below.
+/// Run the worker's share of the active job with the balance fixed at
+/// compile time.
+///
+/// Producer call sites know the dispatch shape from the primitive's hint
+/// type and use this overload to compile away the runtime branch on
+/// `desc.balance`. Workers, which read the descriptor's runtime balance
+/// after observing a new generation, use the runtime overload below.
 template <Balance BalanceV>
 inline void runActiveJobStatic(JobDescriptor &desc,
                                std::uint32_t rank) noexcept {
@@ -97,11 +94,11 @@ inline void runActiveJobStatic(JobDescriptor &desc,
   }
 }
 
-// Run the worker's share of the active job, dispatching by `Balance` kind
-// at runtime. Reads the published `JobDescriptor` from `control.activeJob`
-// (already acquire-loaded by the caller's logic) and runs the appropriate
-// dispatch tier. Static-uniform takes the worker-strided branch;
-// dynamic-chunked takes the relaxed-counter branch.
+/// Run the worker's share of the active job, dispatching by `Balance` kind
+/// at runtime. Reads the published `JobDescriptor` from `control.activeJob`
+/// (already acquire-loaded by the caller's logic) and runs the appropriate
+/// dispatch tier. Static-uniform takes the worker-strided branch;
+/// dynamic-chunked takes the relaxed-counter branch.
 inline void runActiveJob(JobDescriptor &desc, std::uint32_t rank) noexcept {
   if (desc.balance == Balance::StaticUniform) {
     runActiveJobStatic<Balance::StaticUniform>(desc, rank);
@@ -110,22 +107,22 @@ inline void runActiveJob(JobDescriptor &desc, std::uint32_t rank) noexcept {
   runActiveJobStatic<Balance::DynamicChunked>(desc, rank);
 }
 
-// Spin-then-park between dispatches, exiting cleanly on shutdown.
-//
-// On every observed generation change the worker:
-//   1. Loads `activeJob` (acquire) -- pairs with the producer's
-//      release-store.
-//   2. Runs its share of the job via `runActiveJob`.
-//   3. Stamps `mailbox |= kDoneBit` (release) -- pairs with the
-//      producer's acquire-load on the join path. Same-line ack: the
-//      mailbox line carries publish + ack so the producer's join reads
-//      one cache line per worker, not two.
-//
-// Lost-wakeup defense: the worker reads `futexWord` BEFORE re-checking
-// `generation`, then passes the captured token to `futexWaitPrivate` so
-// the kernel rejects the wait with `EAGAIN` if a wake raced ahead. After
-// the syscall returns the worker re-checks `generation` again; spurious
-// wakes are correctness-neutral.
+/// Spin-then-park between dispatches, exiting cleanly on shutdown.
+///
+/// On every observed generation change the worker:
+///   1. Loads `activeJob` (acquire) -- pairs with the producer's
+///      release-store.
+///   2. Runs its share of the job via `runActiveJob`.
+///   3. Stamps `mailbox |= kDoneBit` (release) -- pairs with the
+///      producer's acquire-load on the join path. Same-line ack: the
+///      mailbox line carries publish + ack so the producer's join reads
+///      one cache line per worker, not two.
+///
+/// Lost-wakeup defense: the worker reads `futexWord` BEFORE re-checking
+/// `generation`, then passes the captured token to `futexWaitPrivate` so
+/// the kernel rejects the wait with `EAGAIN` if a wake raced ahead. After
+/// the syscall returns the worker re-checks `generation` again; spurious
+/// wakes are correctness-neutral.
 inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
   std::uint64_t lastSeenMailbox = 0;
   // Cache the worker's identity locally; `WorkerState::workerId` lives on

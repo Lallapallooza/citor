@@ -56,6 +56,7 @@ struct LatencyMatrix {
   bool valid = false;
 };
 
+/// Coherence-cluster assignment for the CPUs in a `LatencyMatrix`.
 struct ClusterResult {
   /// Cluster identifier for each entry in the parent `LatencyMatrix::cpus`.
   /// Values are `0..numClusters-1`. Empty when clustering was not
@@ -70,9 +71,18 @@ struct ClusterResult {
   std::vector<std::vector<double>> clusterDistanceNs;
 };
 
+/// Combined output of a one-time coherence probe: the raw pairwise latency
+/// matrix, the derived cluster assignment, and a single ratio scalar that
+/// callers can use as a topology bias without inspecting the full matrix.
 struct CoherenceProbe {
+  /// True when the probe completed and `matrix` plus `clusters` are
+  /// populated. False on probe failure or single-CPU pools.
   bool valid = false;
+  /// Pairwise round-trip latency matrix between every pair of CPUs in the
+  /// pool's affinity mask.
   LatencyMatrix matrix;
+  /// Cluster assignment derived from `matrix` via Otsu's threshold on the
+  /// off-diagonal log-latency histogram.
   ClusterResult clusters;
   /// Worst-case (maximum) cross-cluster / intra-cluster median latency
   /// ratio. `1.0` when there is only one cluster. This is the convenience
@@ -82,6 +92,9 @@ struct CoherenceProbe {
 };
 
 #ifdef __linux__
+/// Pins the calling thread to `|cpu|` for the duration of one probe round.
+/// Failures from `pthread_setaffinity_np` are ignored; the probe degrades
+/// to whatever scheduling the kernel chooses.
 [[gnu::always_inline]] inline void coherenceProbePin(int cpu) noexcept {
   cpu_set_t set;
   CPU_ZERO(&set);
@@ -89,6 +102,7 @@ struct CoherenceProbe {
   (void)pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
 }
 #else
+/// No-op fallback on non-Linux platforms; the probe runs unpinned.
 [[gnu::always_inline]] inline void coherenceProbePin(int /*cpu*/) noexcept {}
 #endif
 
@@ -280,11 +294,19 @@ probeLatencyMatrix(const std::vector<std::uint32_t> &cpus,
 /// `[0, 1]`. Scores below ~0.4 indicate the histogram is essentially
 /// unimodal, in which case the caller should fall back to the sysfs
 /// prior rather than trust the threshold.
+/// Output of `otsuThresholdLog`.
 struct OtsuResult {
+  /// Threshold in log-ns that maximises between-class variance on the
+  /// off-diagonal log-latency histogram.
   double threshold = 0.0;
+  /// Normalised between-class variance in `[0, 1]`. Scores below ~0.4
+  /// indicate a unimodal histogram and the threshold should be ignored.
   double bimodality = 0.0;
 };
 
+/// Computes Otsu's threshold on the log-space histogram of `|values|` and
+/// returns the threshold plus a bimodality score the caller uses to decide
+/// whether the bipartition is trustworthy.
 inline OtsuResult otsuThresholdLog(const std::vector<double> &values) noexcept {
   OtsuResult r;
   if (values.size() < 2U) {

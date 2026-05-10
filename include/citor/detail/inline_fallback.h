@@ -4,16 +4,16 @@
 
 namespace citor::detail {
 
-// Predicate gating the inline fallback for small fan-outs.
-//
-// The pool's dispatch overhead is amortized over |n| items at
-// |estimatedItemNs| each; when the fan-out's per-participant wall time falls
-// below |minTaskUs|, the dispatch round-trip dominates and the producer should
-// run inline. The exact gate is `n * estimatedItemNs * 1e-3 < minTaskUs *
-// participants`, in `double` arithmetic to avoid integer-overflow surprises.
-//
-// When |estimatedItemNs| is zero, the gate defaults to "do not inline": the
-// inline fallback is opt-in via a non-zero estimate.
+/// Predicate gating the inline fallback for small fan-outs.
+///
+/// The pool's dispatch overhead is amortized over |n| items at
+/// |estimatedItemNs| each; when the fan-out's per-participant wall time falls
+/// below |minTaskUs|, the dispatch round-trip dominates and the producer should
+/// run inline. The exact gate is `n * estimatedItemNs * 1e-3 < minTaskUs *
+/// participants`, in `double` arithmetic to avoid integer-overflow surprises.
+///
+/// When |estimatedItemNs| is zero, the gate defaults to "do not inline": the
+/// inline fallback is opt-in via a non-zero estimate.
 [[nodiscard]] inline bool shouldRunInline(std::size_t n,
                                           std::size_t participants,
                                           double estimatedItemNs,
@@ -33,10 +33,10 @@ namespace citor::detail {
   return estimatedTotalUs < threshold;
 }
 
-// Compile-time-hinted variant. With a non-zero `HintsT::estimatedItemNs` the
-// caller pays the runtime gate; otherwise the gate folds to `participants <=
-// 1` at compile time. Centralises the `if constexpr` cascade open-coded at
-// every typed primitive's entry.
+/// Compile-time-hinted variant. With a non-zero `HintsT::estimatedItemNs` the
+/// caller pays the runtime gate; otherwise the gate folds to `participants <=
+/// 1` at compile time. Centralises the `if constexpr` cascade open-coded at
+/// every typed primitive's entry.
 template <class HintsT>
 [[nodiscard]] inline bool shouldRunInlineHinted(std::size_t n,
                                                 std::size_t participants) {
