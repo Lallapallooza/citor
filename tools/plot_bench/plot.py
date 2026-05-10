@@ -41,6 +41,83 @@ class WorkloadFigureInputs:
 
 _BASELINE_LINE_COLOR = "#0072B2"
 
+# Vendor prefixes used to canonicalise pool variant names to one row per
+# competitor. Order matters: longer prefixes must come before shorter ones so
+# `Taskflow::Subflow` is matched before `Taskflow`. A pool name `P` is
+# canonicalised to the first prefix `K` such that `P == K`, `P.startswith(K +
+# "[")`, `P.startswith(K + "::")`, or `P.startswith(K + " ")`.
+_VENDOR_PREFIXES: tuple[str, ...] = (
+    "citor::ThreadPool",
+    "citor::PoolGroup",
+    "BS::thread_pool",
+    "Eigen::ThreadPool",
+    "Leopard::ThreadPool",
+    "Leopard::dispatch",
+    "Leopard",
+    "OpenMP",
+    "Sequential",
+    "Taskflow::Subflow",
+    "Taskflow",
+    "dispenso::ThreadPool",
+    "dispenso::parallel_for",
+    "dispenso",
+    "dp::thread_pool",
+    "libfork",
+    "oneTBB",
+    "riften::Thiefpool",
+    "task_thread_pool",
+    "tmc::cpu_executor",
+)
+
+# Pool vendors that should not appear as peer competitors in geomean / scatter /
+# losses charts. `Sequential` is a single-thread baseline that beats every
+# parallel pool on tiny `forkjoin_fib28`-style cells; including it as a peer
+# drags geomeans toward zero on small-recursion workloads.
+_EXCLUDED_PEER_VENDORS: frozenset[str] = frozenset({"Sequential"})
+
+
+def canonical_pool(name: str) -> str:
+    """Map a pool variant name to its primary vendor prefix.
+
+    Aggregates adapter / configuration variants:
+      `BS::thread_pool::parallelFor`               -> `BS::thread_pool`
+      `BS::thread_pool::submit_blocks x30`         -> `BS::thread_pool`
+      `BS::thread_pool[chainAdapter]`              -> `BS::thread_pool`
+      `Eigen::ThreadPool::Schedule x7`             -> `Eigen::ThreadPool`
+      `OpenMP[citor::CancellationToken ...]`       -> `OpenMP`
+      `citor::ThreadPool[Static]`                  -> `citor::ThreadPool`
+      `citor::ThreadPool::parallelFor x7`          -> `citor::ThreadPool`
+
+    Pool names that don't start with a known vendor prefix pass through
+    unchanged so future pools surface visibly rather than silently grouping.
+    """
+    for prefix in _VENDOR_PREFIXES:
+        if name == prefix:
+            return prefix
+        if (
+            name.startswith(prefix + "[")
+            or name.startswith(prefix + "::")
+            or name.startswith(prefix + " ")
+        ):
+            return prefix
+    return name
+
+
+def _canonical_best_medians(by_pool: dict[str, float]) -> dict[str, float]:
+    """Group medians by canonical vendor name; keep the fastest variant per group.
+
+    Skips non-finite or non-positive medians.
+    """
+    out: dict[str, float] = {}
+    for pool, ns in by_pool.items():
+        if not (math.isfinite(ns) and ns > 0):
+            continue
+        canon = canonical_pool(pool)
+        prev = out.get(canon)
+        if prev is None or ns < prev:
+            out[canon] = ns
+    return out
+
 
 def build_workload_figure(inputs: WorkloadFigureInputs) -> Figure:
     """Per-workload strip chart: one row per pool, log time axis."""
@@ -172,31 +249,28 @@ def build_overview_figure(
     *,
     baseline_pool_prefix: str = "citor::ThreadPool",
 ) -> Figure:
-    """Cross-workload overview: per workload, pool dots laid out by median-ratio."""
+    """Cross-workload overview: per workload, peer dots laid out by median-ratio.
+
+    Pool variants are canonicalised to one dot per vendor (the fastest variant);
+    `Sequential` is excluded as a peer. The citor baseline is the fastest
+    variant whose canonical name equals `baseline_pool_prefix`.
+    """
     if samples.empty:
         return _build_empty_figure("citor benchmark overview", "no samples")
 
     workloads = sorted(samples["workload"].drop_duplicates().tolist())
     rows: list[tuple[str, str, float, float]] = []
+    medians_by_workload = _medians_by_workload(samples)
     for workload in workloads:
-        per_workload = samples[samples["workload"] == workload]
-        pools = list(per_workload["pool"].drop_duplicates())
-        baseline = None
-        baseline_median = float("nan")
-        for p in sorted(pools):
-            if p.startswith(baseline_pool_prefix):
-                baseline = p
-                ns = per_workload.loc[per_workload["pool"] == p, "ns"].to_numpy("float64")
-                baseline_median = float(np.median(ns)) if ns.size else float("nan")
-                break
-        if baseline is None or not np.isfinite(baseline_median) or baseline_median <= 0:
+        by_pool = medians_by_workload.get(workload, {})
+        canonical = _canonical_best_medians(by_pool)
+        baseline_median = canonical.get(baseline_pool_prefix)
+        if baseline_median is None:
             continue
-        for pool in pools:
-            ns = per_workload.loc[per_workload["pool"] == pool, "ns"].to_numpy("float64")
-            if ns.size == 0:
+        for pool, median in canonical.items():
+            if pool == baseline_pool_prefix:
                 continue
-            median = float(np.median(ns))
-            if not np.isfinite(median) or median <= 0:
+            if pool in _EXCLUDED_PEER_VENDORS:
                 continue
             rows.append((workload, pool, median / baseline_median, median))
 
@@ -208,8 +282,12 @@ def build_overview_figure(
     n_rows = len(workloads)
     fig_height = max(5.0, 0.55 * n_rows + 3.2)
     fig = _new_svg_figure(figsize=(11.0, fig_height))
-    top_frac = 1.0 - (1.4 / fig_height)
-    bottom_frac = 1.0 / fig_height
+    # Cap top/bottom margins so the header at y=0.945 and caption at y=0.045
+    # always have a clear band above and below the data area, even when the
+    # figure is tall (large workload count). Without the cap a 50+ inch figure
+    # leaves header and caption inside the data region.
+    top_frac = min(0.92, 1.0 - (1.4 / fig_height))
+    bottom_frac = max(0.06, 1.0 / fig_height)
     gs = fig.add_gridspec(
         nrows=1,
         ncols=1,
@@ -273,17 +351,28 @@ def build_family_geomean_figure(
     *,
     citor_pool: str = "citor::ThreadPool",
 ) -> Figure:
-    """Geomean speedup of citor over each competitor across all workloads in `family`."""
+    """Geomean speedup of citor over each canonical competitor across `family`.
+
+    Pool variants collapse to their vendor prefix: `BS::thread_pool::parallelFor`
+    and `BS::thread_pool[chainAdapter]` aggregate as `BS::thread_pool`, with the
+    fastest variant per workload representing the vendor. Citor variants
+    (`citor::ThreadPool[Static]`, `citor::ThreadPool::runPlex`, ...) collapse to
+    `citor::ThreadPool` so the baseline lookup succeeds across families that
+    only ship tagged variants. `Sequential` is excluded as a peer.
+    """
     medians_by_workload = _medians_by_workload(samples)
     speedups: dict[str, list[float]] = collections.defaultdict(list)
     for workload, by_pool in medians_by_workload.items():
         if derive_family(workload) != family:
             continue
-        citor_ns = _baseline_median(by_pool, citor_pool)
+        canonical = _canonical_best_medians(by_pool)
+        citor_ns = canonical.get(citor_pool)
         if citor_ns is None:
             continue
-        for pool, ns in by_pool.items():
-            if pool == citor_pool or ns <= 0:
+        for pool, ns in canonical.items():
+            if pool == citor_pool:
+                continue
+            if pool in _EXCLUDED_PEER_VENDORS:
                 continue
             speedups[pool].append(ns / citor_ns)
 
@@ -329,17 +418,24 @@ def build_family_scatter_figure(
     *,
     citor_pool: str = "citor::ThreadPool",
 ) -> Figure:
-    """Per-workload scatter for one primitive family. Each dot is a workload."""
+    """Per-workload scatter for one primitive family. Each dot is a workload.
+
+    Pool variants are canonicalised to their vendor prefix and `Sequential` is
+    excluded so each peer vendor surfaces once per workload.
+    """
     medians_by_workload = _medians_by_workload(samples)
     points: list[tuple[str, str, float, float]] = []
     for workload, by_pool in medians_by_workload.items():
         if derive_family(workload) != family:
             continue
-        citor_ns = _baseline_median(by_pool, citor_pool)
+        canonical = _canonical_best_medians(by_pool)
+        citor_ns = canonical.get(citor_pool)
         if citor_ns is None:
             continue
-        for pool, ns in by_pool.items():
-            if pool == citor_pool or ns <= 0:
+        for pool, ns in canonical.items():
+            if pool == citor_pool:
+                continue
+            if pool in _EXCLUDED_PEER_VENDORS:
                 continue
             points.append((workload, pool, ns, citor_ns))
 
@@ -418,17 +514,25 @@ def build_losses_figure(
     citor_pool: str = "citor::ThreadPool",
     top_n: int = 20,
 ) -> Figure:
-    """Workloads where citor's median is worse than the best competitor."""
+    """Workloads where citor's median is worse than the best (canonical) competitor.
+
+    `Sequential` is excluded so this surfaces real parallel-pool losses, not
+    workloads where a single-thread baseline beats every parallel pool because
+    the parallelism overhead exceeds the body cost.
+    """
     medians_by_workload = _medians_by_workload(samples)
     losses: list[tuple[str, str, float]] = []
     for workload, by_pool in medians_by_workload.items():
-        citor_ns = _baseline_median(by_pool, citor_pool)
+        canonical = _canonical_best_medians(by_pool)
+        citor_ns = canonical.get(citor_pool)
         if citor_ns is None:
             continue
         best_pool = None
         best_ns = float("inf")
-        for pool, ns in by_pool.items():
-            if pool == citor_pool or ns <= 0:
+        for pool, ns in canonical.items():
+            if pool == citor_pool:
+                continue
+            if pool in _EXCLUDED_PEER_VENDORS:
                 continue
             if ns < best_ns:
                 best_ns = ns
@@ -476,13 +580,6 @@ def _medians_by_workload(samples: pd.DataFrame) -> dict[str, dict[str, float]]:
     for key, median in grouped.items():
         out[str(key[0])][str(key[1])] = float(median)
     return out
-
-
-def _baseline_median(by_pool: dict[str, float], baseline: str) -> float | None:
-    ns = by_pool.get(baseline)
-    if ns is None or ns <= 0 or not math.isfinite(ns):
-        return None
-    return ns
 
 
 def _geomean(values: list[float]) -> float:
