@@ -39,7 +39,7 @@ set(_citor_tests
     parallel_for_tsan_test
     parallel_pool_deadlock_fuzz_test
     parallel_pool_tsan_stress_dispatch_serialization_test
-    parallel_pool_tsan_stress_primitives_test
+    parallel_pool_stress_primitives_test
     parallel_reduce_basic_test
     parallel_reduce_cancellation_test
     parallel_reduce_cpo_test

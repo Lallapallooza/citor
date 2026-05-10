@@ -24,28 +24,6 @@ using citor::makeStage;
 using citor::staticStage;
 using citor::ThreadPool;
 
-namespace {
-
-// `kTsanActive` mirrors the runtime gate used elsewhere in the suite (see
-// the project test suite). The test still compiles outside TSan builds;
-// non-TSan configurations skip at runtime so the test target stays buildable in
-// every configuration.
-constexpr bool kTsanActive =
-#ifdef __has_feature
-#if __has_feature(thread_sanitizer)
-    true
-#else
-    false
-#endif
-#elif defined(__SANITIZE_THREAD__)
-    true
-#else
-    false
-#endif
-    ;
-
-} // namespace
-
 // Hint presets at TU scope so clang-tidy treats every static-constexpr member
 // as a public field of a named type rather than an unused constant.
 struct StressDynamicHints : HintsDefaults {
@@ -57,32 +35,37 @@ struct StressForkJoinHints : HintsDefaults {
   static constexpr citor::Affinity affinity = citor::Affinity::CcdLocal;
 };
 
-// Cross-primitive TSan stress. Each iteration constructs a fresh pool with a
-// randomized participant count, then exercises every public primitive. The
-// contract is "TSan does not flag a race"; the test passes whenever it
-// terminates cleanly under sanitizer build. Non-TSan builds skip the loop
-// entirely so the per-iteration cost is irrelevant in normal ctest runs.
+// Cross-primitive stress: each iteration constructs a fresh pool with a
+// randomized participant count, then exercises one of every public primitive
+// with random shapes. Under ThreadSanitizer the contract is "TSan does not
+// flag a race on any primitive's rendezvous"; under native the contract is
+// "no primitive crashes, deadlocks, or returns NaN under random shapes".
 //
-// Under ThreadSanitizer the test currently times out before completing,
-// because runPlex / parallelChain / dispatch join paths rendezvous via tight
+// Skipped under ThreadSanitizer pending LLVM issue 177529: runPlex /
+// parallelChain / dispatch join paths rendezvous via tight
 // `atomic.load(acquire)` spins on a single shared atomic. TSan instruments
 // every atomic op through a per-address shadow-memory mutex
 // (`__sanitizer::Mutex`, `compiler-rt/lib/sanitizer_common/sanitizer_mutex.h`)
 // that is reader-preferring; N spinning readers monopolize the reader lock
 // and the producer's `atomic.store(release)` parks indefinitely in
 // `__sanitizer::Semaphore::Wait` inside `__tsan_atomic64_store`. The
-// behaviour is documented at LLVM issue 177529 ("TSAN Internal Semaphore
-// Fairness", open) and `google/sanitizers` issue 1552. Re-enable when the
-// TSan runtime fairness issue is resolved upstream.
-TEST(ParallelPoolTsanStressPrimitives,
-     EveryPrimitiveUnderRandomizedParticipantCountsIsRaceFreeUnderTsan) {
+// behaviour is also documented at `google/sanitizers` issue 1552. Re-enable
+// the TSan run when the upstream fairness issue is resolved; native
+// validation continues to run on every CI build.
+TEST(ParallelPoolStressPrimitives,
+     EveryPrimitiveUnderRandomizedParticipantCountsTerminatesCleanly) {
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
   GTEST_SKIP()
       << "Pending LLVM issue 177529: TSan's reader-preferring metaslot mutex "
-         "starves the producer's atomic.store on every rendezvous primitive.";
-  if (!kTsanActive) {
-    GTEST_SKIP()
-        << "TSan build not available; skipping cross-primitive stress run.";
-  }
+         "starves the producer's atomic.store on rendezvous primitives.";
+#endif
+#endif
+#if defined(__SANITIZE_THREAD__)
+  GTEST_SKIP()
+      << "Pending LLVM issue 177529: TSan's reader-preferring metaslot mutex "
+         "starves the producer's atomic.store on rendezvous primitives.";
+#endif
   // 10000 iterations is the target. Each iteration constructs and destructs
   // a pool plus a single primitive call so the loop fits inside ctest's
   // per-test timeout under a TSan build. A wall-clock cap bounds total runtime
