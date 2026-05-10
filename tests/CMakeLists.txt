@@ -1,6 +1,17 @@
 include(${PROJECT_SOURCE_DIR}/cmake/GTestDep.cmake)
 include(GoogleTest)
 
+# Third-party GoogleTest sources do not honour our `.clang-tidy` rules;
+# clear the inherited `CXX_CLANG_TIDY` property so they compile cleanly
+# when `CITOR_ENABLE_CLANG_TIDY=ON` is set on the top-level build.
+if(CITOR_ENABLE_CLANG_TIDY)
+    foreach(_gtest_target IN ITEMS gtest gtest_main gmock gmock_main)
+        if(TARGET ${_gtest_target})
+            set_target_properties(${_gtest_target} PROPERTIES CXX_CLANG_TIDY "")
+        endif()
+    endforeach()
+endif()
+
 set(_citor_tests
     bench_format_test
     bulk_for_queries_cancellation_test
