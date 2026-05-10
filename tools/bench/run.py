@@ -10,7 +10,7 @@ from tools.bench import host
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
-def add_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+def add_parser(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
     p = sub.add_parser("run", help="full bench sweep")
     p.add_argument("--filter", default="", help="workload-name substring filter")
     p.add_argument("--out", default="", help="output dir (default: bench_out/<host>/<sha>)")

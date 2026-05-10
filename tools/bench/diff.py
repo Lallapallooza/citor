@@ -20,7 +20,7 @@ def _load(path: Path) -> dict[tuple[str, str], float]:
     return {k: statistics.median(v) for k, v in samples.items() if v}
 
 
-def add_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+def add_parser(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
     p = sub.add_parser("diff", help="diff two bench JSON exports")
     p.add_argument("baseline", help="JSON file or per-workload dir")
     p.add_argument("target", help="JSON file or per-workload dir")

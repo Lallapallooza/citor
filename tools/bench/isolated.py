@@ -11,7 +11,7 @@ from tools.bench import host
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
-def add_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+def add_parser(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
     p = sub.add_parser("isolated", help="run each workload in its own process")
     p.add_argument("--out", default="bench_out/per_workload", help="per-workload JSON output dir")
     p.add_argument("--taskset", default="0-15", help="taskset CPU mask")
