@@ -21,6 +21,7 @@ TEST(BenchFormat, BootstrapBelowMinReturnsZero) {
   // must return zero so the caller can detect the small-n case without
   // negotiating a sentinel.
   std::vector<double> samples;
+  samples.reserve(29);
   for (int i = 0; i < 29; ++i) {
     samples.push_back(static_cast<double>(100 + i));
   }
@@ -32,6 +33,7 @@ TEST(BenchFormat, BootstrapAboveMinReturnsHalfWidth) {
   // sample. Tight constant-width samples should give a near-zero half-width
   // (the percentile bracket of a constant distribution is a point).
   std::vector<double> samples;
+  samples.reserve(64);
   for (int i = 0; i < 64; ++i) {
     samples.push_back(static_cast<double>(100 + (i % 8)));
   }
@@ -43,10 +45,10 @@ TEST(BenchFormat, BootstrapAboveMinReturnsHalfWidth) {
 TEST(BenchFormat, BootstrapDegenerateInputReturnsZero) {
   // Constant samples produce a zero-width CI; non-finite mean (n < 2,
   // empty) also returns 0.0 so the err% column does not render NaN.
-  std::vector<double> empty;
+  const std::vector<double> empty;
   EXPECT_EQ(citor::bench::bootstrapMedianCiPercent(empty), 0.0);
 
-  std::vector<double> constant(64, 200.0);
+  const std::vector<double> constant(64, 200.0);
   // The bootstrap on identical samples must produce a half-width of zero
   // (every resample's median is identical). This is the property the
   // err% column relies on for "stable" runs.
@@ -58,21 +60,21 @@ TEST(BenchFormat, FormatTableNoTailColumnsWhenAllNullopt) {
   // row's `tailNs` is `std::nullopt`. Downstream awk parsers in the
   // downstream awk parsers key off `$2` (ns/op) and `$NF` (row name); the
   // header order being stable is the contract those parsers depend on.
-  citor::bench::BenchTable table{.workload = "wl",
-                                 .rows = {
-                                     {.name = "citor::ThreadPool",
-                                      .nsPerOp = 100.0,
-                                      .opsPerSec = 1e7,
-                                      .errPercent = 0.5,
-                                      .tailNs = std::nullopt,
-                                      .rawSamplesNs = {}},
-                                     {.name = "oneTBB",
-                                      .nsPerOp = 200.0,
-                                      .opsPerSec = 5e6,
-                                      .errPercent = 0.7,
-                                      .tailNs = std::nullopt,
-                                      .rawSamplesNs = {}},
-                                 }};
+  const citor::bench::BenchTable table{.workload = "wl",
+                                       .rows = {
+                                           {.name = "citor::ThreadPool",
+                                            .nsPerOp = 100.0,
+                                            .opsPerSec = 1e7,
+                                            .errPercent = 0.5,
+                                            .tailNs = std::nullopt,
+                                            .rawSamplesNs = {}},
+                                           {.name = "oneTBB",
+                                            .nsPerOp = 200.0,
+                                            .opsPerSec = 5e6,
+                                            .errPercent = 0.7,
+                                            .tailNs = std::nullopt,
+                                            .rawSamplesNs = {}},
+                                       }};
   std::ostringstream oss;
   citor::bench::formatTable(table, "citor::ThreadPool", oss);
   const std::string out = oss.str();
@@ -83,7 +85,7 @@ TEST(BenchFormat, FormatTableNoTailColumnsWhenAllNullopt) {
 }
 
 TEST(BenchFormat, FormatTableEmitsTailColumnsWhenAnyRowPopulated) {
-  citor::bench::BenchTable table{
+  const citor::bench::BenchTable table{
       .workload = "wl",
       .rows = {
           {.name = "citor::ThreadPool",

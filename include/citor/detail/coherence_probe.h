@@ -98,7 +98,7 @@ struct CoherenceProbe {
 [[gnu::always_inline]] inline void coherenceProbePin(int cpu) noexcept {
   cpu_set_t set;
   CPU_ZERO(&set);
-  CPU_SET(cpu, &set);
+  CPU_SET(static_cast<std::size_t>(cpu), &set);
   (void)pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
 }
 #else
@@ -316,23 +316,19 @@ inline OtsuResult otsuThresholdLog(const std::vector<double> &values) noexcept {
   constexpr std::size_t kBins = 64U;
   double minV = std::numeric_limits<double>::infinity();
   double maxV = -std::numeric_limits<double>::infinity();
-  for (double v : values) {
+  for (const double v : values) {
     if (v <= 0.0) {
       continue;
     }
     const double lv = std::log(v);
-    if (lv < minV) {
-      minV = lv;
-    }
-    if (lv > maxV) {
-      maxV = lv;
-    }
+    minV = std::min(minV, lv);
+    maxV = std::max(maxV, lv);
   }
   if (!(maxV > minV)) {
     return r;
   }
   std::vector<std::uint32_t> hist(kBins, 0U);
-  for (double v : values) {
+  for (const double v : values) {
     if (v <= 0.0) {
       continue;
     }
@@ -382,8 +378,9 @@ inline OtsuResult otsuThresholdLog(const std::vector<double> &values) noexcept {
     tv += static_cast<double>(hist[b]) * diff * diff;
   }
   tv /= static_cast<double>(total);
-  r.threshold = minV + (static_cast<double>(bestBin) + 0.5) /
-                           static_cast<double>(kBins - 1U) * (maxV - minV);
+  r.threshold = minV + (((static_cast<double>(bestBin) + 0.5) /
+                         static_cast<double>(kBins - 1U)) *
+                        (maxV - minV));
   r.bimodality = (tv > 0.0) ? (bestVar / tv) : 0.0;
   return r;
 }
@@ -405,7 +402,7 @@ inline ClusterResult clusterByLatency(
     const LatencyMatrix &mat,
     const std::vector<std::vector<std::uint32_t>> &sysfsPrior) noexcept {
   ClusterResult out;
-  const std::uint32_t n = static_cast<std::uint32_t>(mat.cpus.size());
+  const auto n = static_cast<std::uint32_t>(mat.cpus.size());
   if (!mat.valid || n < 2U) {
     if (n > 0U) {
       out.clusterIdOfCpuIndex.assign(n, 0U);
@@ -491,9 +488,7 @@ inline ClusterResult clusterByLatency(
     std::uint32_t maxCpu = 0U;
     for (const auto &group : sysfsPrior) {
       for (auto c : group) {
-        if (c > maxCpu) {
-          maxCpu = c;
-        }
+        maxCpu = std::max(maxCpu, c);
       }
     }
     std::vector<std::int32_t> sysfsCluster(maxCpu + 1U, -1);
@@ -502,7 +497,7 @@ inline ClusterResult clusterByLatency(
         sysfsCluster[c] = static_cast<std::int32_t>(k);
       }
     }
-    std::uint32_t nextOrphanId = static_cast<std::uint32_t>(sysfsPrior.size());
+    auto nextOrphanId = static_cast<std::uint32_t>(sysfsPrior.size());
     std::uint32_t maxSeen = 0U;
     for (std::uint32_t i = 0; i < n; ++i) {
       const auto cpu = mat.cpus[i];
@@ -512,9 +507,7 @@ inline ClusterResult clusterByLatency(
         clusterId[i] = nextOrphanId;
         ++nextOrphanId;
       }
-      if (clusterId[i] > maxSeen) {
-        maxSeen = clusterId[i];
-      }
+      maxSeen = std::max(maxSeen, clusterId[i]);
     }
     numClusters = maxSeen + 1U;
   }
@@ -578,16 +571,12 @@ runCoherenceProbe(const std::vector<std::uint32_t> &cpus,
   double maxCross = 0.0;
   double maxIntra = 0.0;
   for (std::uint32_t a = 0; a < out.clusters.numClusters; ++a) {
-    if (out.clusters.clusterDistanceNs[a][a] > maxIntra) {
-      maxIntra = out.clusters.clusterDistanceNs[a][a];
-    }
+    maxIntra = std::max(maxIntra, out.clusters.clusterDistanceNs[a][a]);
     for (std::uint32_t b = 0; b < out.clusters.numClusters; ++b) {
       if (a == b) {
         continue;
       }
-      if (out.clusters.clusterDistanceNs[a][b] > maxCross) {
-        maxCross = out.clusters.clusterDistanceNs[a][b];
-      }
+      maxCross = std::max(maxCross, out.clusters.clusterDistanceNs[a][b]);
     }
   }
   if (maxIntra > 0.0 && maxCross > 0.0) {

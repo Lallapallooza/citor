@@ -191,7 +191,7 @@ inline Topology detectTopology() {
     /// indexed past its bit range on hosts with more than `CPU_SETSIZE`
     /// logical CPUs. Pools never need more than `physicalCores` workers so
     /// the cap only affects affinity reporting, not scheduling.
-    const std::uint32_t cpuMax = static_cast<std::uint32_t>(CPU_SETSIZE);
+    const auto cpuMax = static_cast<std::uint32_t>(CPU_SETSIZE);
     const std::uint32_t scanLimit =
         topo.logicalCount < cpuMax ? topo.logicalCount : cpuMax;
     for (std::uint32_t cpu = 0; cpu < scanLimit; ++cpu) {

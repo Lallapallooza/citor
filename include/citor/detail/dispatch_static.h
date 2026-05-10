@@ -399,10 +399,17 @@ contiguousRankBlockSpan(std::size_t blockCount, std::size_t participants,
 /// counter touch. Detects whether `|fn|` accepts a leading `blockId`
 /// argument and dispatches accordingly.
 template <class HintsT, class FOp>
-[[gnu::always_inline]] inline void runContiguousRankPartitionTypedCached(
-    JobDescriptor &desc, std::uint32_t rank, FOp &fn, std::size_t blockCount,
-    std::size_t participants, std::size_t chunk, std::size_t first,
-    std::size_t last) noexcept {
+[[gnu::always_inline]] inline void
+// The `kBodyNoexcept` branch dispatches the no-throw body without a `try`
+// block; the throwing branch wraps the call in `try` and stores the first
+// exception into the descriptor without escaping. Tidy cannot see through
+// the templated condition.
+// NOLINTNEXTLINE(bugprone-exception-escape)
+runContiguousRankPartitionTypedCached(JobDescriptor &desc, std::uint32_t rank,
+                                      FOp &fn, std::size_t blockCount,
+                                      std::size_t participants,
+                                      std::size_t chunk, std::size_t first,
+                                      std::size_t last) noexcept {
   const auto [begin, end] =
       contiguousRankBlockSpan(blockCount, participants, rank);
 

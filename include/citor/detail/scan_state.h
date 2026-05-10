@@ -77,7 +77,6 @@ struct alignas(kCacheLine) ScanDoneSlot {
 /// packing.
 ///
 /// T Reduction value type the scan operates on.
-// NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
 template <class T>
 struct ScanState {
   /// Number of participants (= number of chunks) collaborating in the scan.
@@ -235,15 +234,15 @@ struct ScanState {
   slotRange(std::uint32_t slot) const noexcept {
     __extension__ using u128 = unsigned __int128;
     if (ccdOfSlot == nullptr) {
-      const std::size_t lo = static_cast<std::size_t>(
-          (static_cast<u128>(n) * slot) / participants);
-      const std::size_t hi = static_cast<std::size_t>(
+      const auto lo = static_cast<std::size_t>((static_cast<u128>(n) * slot) /
+                                               participants);
+      const auto hi = static_cast<std::size_t>(
           (static_cast<u128>(n) * (slot + 1U)) / participants);
       return {lo, hi};
     }
     // Producer-CCD slot group covers the prefix `[0, producerVolume)`;
     // cross-CCD group covers `[producerVolume, n)`.
-    const std::size_t producerVolume =
+    const auto producerVolume =
         static_cast<std::size_t>((static_cast<u128>(n) * asymmetricNum) / 16U);
     const std::uint32_t numProducer = slotsOnProducerCcd;
     const std::uint32_t numCross = participants - slotsOnProducerCcd;
@@ -256,9 +255,9 @@ struct ScanState {
       }
     }
     if (isProducerCcd && numProducer > 0U) {
-      const std::size_t lo = static_cast<std::size_t>(
+      const auto lo = static_cast<std::size_t>(
           (static_cast<u128>(producerVolume) * indexInGroup) / numProducer);
-      const std::size_t hi = static_cast<std::size_t>(
+      const auto hi = static_cast<std::size_t>(
           (static_cast<u128>(producerVolume) * (indexInGroup + 1U)) /
           numProducer);
       return {lo, hi};

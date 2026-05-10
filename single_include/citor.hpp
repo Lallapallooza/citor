@@ -2,7 +2,7 @@
 //
 // citor -- header-only C++20 thread pool
 // version: 0.1.0
-// commit:  2e33dedae9e93d16e228764ae83542d7882b7c62
+// commit:  067fd7e4c75c9adf8e070f0f51b6b64818fa8dbb
 // generated: 2026-05-10
 //
 // GENERATED FILE -- DO NOT EDIT.
@@ -1102,7 +1102,7 @@ inline Topology detectTopology() {
     /// indexed past its bit range on hosts with more than `CPU_SETSIZE`
     /// logical CPUs. Pools never need more than `physicalCores` workers so
     /// the cap only affects affinity reporting, not scheduling.
-    const std::uint32_t cpuMax = static_cast<std::uint32_t>(CPU_SETSIZE);
+    const auto cpuMax = static_cast<std::uint32_t>(CPU_SETSIZE);
     const std::uint32_t scanLimit =
         topo.logicalCount < cpuMax ? topo.logicalCount : cpuMax;
     for (std::uint32_t cpu = 0; cpu < scanLimit; ++cpu) {
@@ -2162,9 +2162,9 @@ struct ChainState {
   [[nodiscard]] std::pair<std::size_t, std::size_t>
   slotRange(std::uint32_t slot) const noexcept {
     __extension__ using u128 = unsigned __int128;
-    const std::size_t lo =
+    const auto lo =
         static_cast<std::size_t>((static_cast<u128>(n) * slot) / participants);
-    const std::size_t hi = static_cast<std::size_t>(
+    const auto hi = static_cast<std::size_t>(
         (static_cast<u128>(n) * (slot + 1U)) / participants);
     return {lo, hi};
   }
@@ -2639,7 +2639,7 @@ struct CoherenceProbe {
 [[gnu::always_inline]] inline void coherenceProbePin(int cpu) noexcept {
   cpu_set_t set;
   CPU_ZERO(&set);
-  CPU_SET(cpu, &set);
+  CPU_SET(static_cast<std::size_t>(cpu), &set);
   (void)pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
 }
 #else
@@ -2857,23 +2857,19 @@ inline OtsuResult otsuThresholdLog(const std::vector<double> &values) noexcept {
   constexpr std::size_t kBins = 64U;
   double minV = std::numeric_limits<double>::infinity();
   double maxV = -std::numeric_limits<double>::infinity();
-  for (double v : values) {
+  for (const double v : values) {
     if (v <= 0.0) {
       continue;
     }
     const double lv = std::log(v);
-    if (lv < minV) {
-      minV = lv;
-    }
-    if (lv > maxV) {
-      maxV = lv;
-    }
+    minV = std::min(minV, lv);
+    maxV = std::max(maxV, lv);
   }
   if (!(maxV > minV)) {
     return r;
   }
   std::vector<std::uint32_t> hist(kBins, 0U);
-  for (double v : values) {
+  for (const double v : values) {
     if (v <= 0.0) {
       continue;
     }
@@ -2923,8 +2919,9 @@ inline OtsuResult otsuThresholdLog(const std::vector<double> &values) noexcept {
     tv += static_cast<double>(hist[b]) * diff * diff;
   }
   tv /= static_cast<double>(total);
-  r.threshold = minV + (static_cast<double>(bestBin) + 0.5) /
-                           static_cast<double>(kBins - 1U) * (maxV - minV);
+  r.threshold = minV + (((static_cast<double>(bestBin) + 0.5) /
+                         static_cast<double>(kBins - 1U)) *
+                        (maxV - minV));
   r.bimodality = (tv > 0.0) ? (bestVar / tv) : 0.0;
   return r;
 }
@@ -2946,7 +2943,7 @@ inline ClusterResult clusterByLatency(
     const LatencyMatrix &mat,
     const std::vector<std::vector<std::uint32_t>> &sysfsPrior) noexcept {
   ClusterResult out;
-  const std::uint32_t n = static_cast<std::uint32_t>(mat.cpus.size());
+  const auto n = static_cast<std::uint32_t>(mat.cpus.size());
   if (!mat.valid || n < 2U) {
     if (n > 0U) {
       out.clusterIdOfCpuIndex.assign(n, 0U);
@@ -3032,9 +3029,7 @@ inline ClusterResult clusterByLatency(
     std::uint32_t maxCpu = 0U;
     for (const auto &group : sysfsPrior) {
       for (auto c : group) {
-        if (c > maxCpu) {
-          maxCpu = c;
-        }
+        maxCpu = std::max(maxCpu, c);
       }
     }
     std::vector<std::int32_t> sysfsCluster(maxCpu + 1U, -1);
@@ -3043,7 +3038,7 @@ inline ClusterResult clusterByLatency(
         sysfsCluster[c] = static_cast<std::int32_t>(k);
       }
     }
-    std::uint32_t nextOrphanId = static_cast<std::uint32_t>(sysfsPrior.size());
+    auto nextOrphanId = static_cast<std::uint32_t>(sysfsPrior.size());
     std::uint32_t maxSeen = 0U;
     for (std::uint32_t i = 0; i < n; ++i) {
       const auto cpu = mat.cpus[i];
@@ -3053,9 +3048,7 @@ inline ClusterResult clusterByLatency(
         clusterId[i] = nextOrphanId;
         ++nextOrphanId;
       }
-      if (clusterId[i] > maxSeen) {
-        maxSeen = clusterId[i];
-      }
+      maxSeen = std::max(maxSeen, clusterId[i]);
     }
     numClusters = maxSeen + 1U;
   }
@@ -3119,16 +3112,12 @@ runCoherenceProbe(const std::vector<std::uint32_t> &cpus,
   double maxCross = 0.0;
   double maxIntra = 0.0;
   for (std::uint32_t a = 0; a < out.clusters.numClusters; ++a) {
-    if (out.clusters.clusterDistanceNs[a][a] > maxIntra) {
-      maxIntra = out.clusters.clusterDistanceNs[a][a];
-    }
+    maxIntra = std::max(maxIntra, out.clusters.clusterDistanceNs[a][a]);
     for (std::uint32_t b = 0; b < out.clusters.numClusters; ++b) {
       if (a == b) {
         continue;
       }
-      if (out.clusters.clusterDistanceNs[a][b] > maxCross) {
-        maxCross = out.clusters.clusterDistanceNs[a][b];
-      }
+      maxCross = std::max(maxCross, out.clusters.clusterDistanceNs[a][b]);
     }
   }
   if (maxIntra > 0.0 && maxCross > 0.0) {
@@ -3677,7 +3666,7 @@ template <class T>
 struct alignas(kCacheLine) LookbackTile {
   /// State-machine value stored in `flag`. The transitions are monotonic:
   /// `Initialized` -> `AggregateAvailable` -> `PrefixAvailable`.
-  enum class Flag : std::uint64_t {
+  enum class Flag : std::uint8_t {
     /// The tile owns a slot but has not yet computed its local aggregate.
     Initialized = 0,
     /// `aggregate` is published and synchronises through an acquire-load
@@ -3885,9 +3874,9 @@ struct PlexState {
   [[nodiscard]] std::pair<std::size_t, std::size_t>
   slotRange(std::uint32_t slot) const noexcept {
     __extension__ using u128 = unsigned __int128;
-    const std::size_t lo =
+    const auto lo =
         static_cast<std::size_t>((static_cast<u128>(n) * slot) / participants);
-    const std::size_t hi = static_cast<std::size_t>(
+    const auto hi = static_cast<std::size_t>(
         (static_cast<u128>(n) * (slot + 1U)) / participants);
     return {lo, hi};
   }
@@ -4242,7 +4231,6 @@ struct alignas(kCacheLine) ScanDoneSlot {
 /// packing.
 ///
 /// T Reduction value type the scan operates on.
-// NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
 template <class T>
 struct ScanState {
   /// Number of participants (= number of chunks) collaborating in the scan.
@@ -4400,15 +4388,15 @@ struct ScanState {
   slotRange(std::uint32_t slot) const noexcept {
     __extension__ using u128 = unsigned __int128;
     if (ccdOfSlot == nullptr) {
-      const std::size_t lo = static_cast<std::size_t>(
-          (static_cast<u128>(n) * slot) / participants);
-      const std::size_t hi = static_cast<std::size_t>(
+      const auto lo = static_cast<std::size_t>((static_cast<u128>(n) * slot) /
+                                               participants);
+      const auto hi = static_cast<std::size_t>(
           (static_cast<u128>(n) * (slot + 1U)) / participants);
       return {lo, hi};
     }
     // Producer-CCD slot group covers the prefix `[0, producerVolume)`;
     // cross-CCD group covers `[producerVolume, n)`.
-    const std::size_t producerVolume =
+    const auto producerVolume =
         static_cast<std::size_t>((static_cast<u128>(n) * asymmetricNum) / 16U);
     const std::uint32_t numProducer = slotsOnProducerCcd;
     const std::uint32_t numCross = participants - slotsOnProducerCcd;
@@ -4421,9 +4409,9 @@ struct ScanState {
       }
     }
     if (isProducerCcd && numProducer > 0U) {
-      const std::size_t lo = static_cast<std::size_t>(
+      const auto lo = static_cast<std::size_t>(
           (static_cast<u128>(producerVolume) * indexInGroup) / numProducer);
-      const std::size_t hi = static_cast<std::size_t>(
+      const auto hi = static_cast<std::size_t>(
           (static_cast<u128>(producerVolume) * (indexInGroup + 1U)) /
           numProducer);
       return {lo, hi};
@@ -4970,10 +4958,17 @@ contiguousRankBlockSpan(std::size_t blockCount, std::size_t participants,
 /// counter touch. Detects whether `|fn|` accepts a leading `blockId`
 /// argument and dispatches accordingly.
 template <class HintsT, class FOp>
-[[gnu::always_inline]] inline void runContiguousRankPartitionTypedCached(
-    JobDescriptor &desc, std::uint32_t rank, FOp &fn, std::size_t blockCount,
-    std::size_t participants, std::size_t chunk, std::size_t first,
-    std::size_t last) noexcept {
+[[gnu::always_inline]] inline void
+// The `kBodyNoexcept` branch dispatches the no-throw body without a `try`
+// block; the throwing branch wraps the call in `try` and stores the first
+// exception into the descriptor without escaping. Tidy cannot see through
+// the templated condition.
+// NOLINTNEXTLINE(bugprone-exception-escape)
+runContiguousRankPartitionTypedCached(JobDescriptor &desc, std::uint32_t rank,
+                                      FOp &fn, std::size_t blockCount,
+                                      std::size_t participants,
+                                      std::size_t chunk, std::size_t first,
+                                      std::size_t last) noexcept {
   const auto [begin, end] =
       contiguousRankBlockSpan(blockCount, participants, rank);
 
@@ -5717,8 +5712,8 @@ private:
   ThreadPool(ArenaTag /*tag*/, std::size_t participants,
              const std::vector<std::uint32_t> &cpuPins,
              std::uint32_t arenaIndex)
-      : m_workerAffinity(Affinity::PerCpu), m_kind(PoolKind::Arena),
-        m_arenaIndex(arenaIndex), m_topology(detail::detectTopology()),
+      : m_kind(PoolKind::Arena), m_arenaIndex(arenaIndex),
+        m_topology(detail::detectTopology()),
         m_workers(nullptr, WorkerArrayDeleter{}),
         m_chainDoneSlots(nullptr, ChainDoneSlotDeleter{}),
         m_plexDoneSlots(nullptr, PlexDoneSlotDeleter{}) {
@@ -6300,8 +6295,8 @@ private:
                   m_coherenceProbe.maxCrossOverIntraRatio > 1.0
               ? m_coherenceProbe.maxCrossOverIntraRatio
               : 2.0;
-      const std::uint64_t producerWeight = static_cast<std::uint64_t>(
-          biasFactor * static_cast<double>(slotsOnProducer) + 0.5);
+      const auto producerWeight = static_cast<std::uint64_t>(
+          std::llround(biasFactor * static_cast<double>(slotsOnProducer)));
       const std::uint64_t totalWeight =
           producerWeight + static_cast<std::uint64_t>(crossSlots);
       std::uint32_t derived = 8U;
@@ -6322,9 +6317,8 @@ private:
     // the multi-cluster path under that condition deadlocks on the exception
     // path (a non-leader cluster's leader can throw before publishing its
     // cluster stamp, blocking the producer's cross-cluster wait).
-    if (!(m_coherenceProbe.valid &&
-          m_coherenceProbe.clusters.numClusters >= 2U && participants >= 4U &&
-          foundCross && slotsOnProducer < participants)) {
+    if (!m_coherenceProbe.valid || m_coherenceProbe.clusters.numClusters < 2U ||
+        participants < 4U || !foundCross || slotsOnProducer >= participants) {
       return;
     }
 
@@ -8296,7 +8290,8 @@ private:
   /// Reserved stack-scratch budget for the reduce partials buffer. The
   /// reducer falls back to heap allocation when `kReduceMaxChunks *
   /// sizeof(T)` exceeds this byte budget.
-  static constexpr std::size_t kReduceStackScratchBytes = 32U * 1024U;
+  static constexpr std::size_t kReduceStackScratchBytes =
+      std::size_t{32U} * 1024U;
 
   /// Derive a deterministic chunk size for `parallelReduce` calls. Purely a
   /// function of |n| and the optional hint chunk override and is independent of
@@ -9528,11 +9523,16 @@ private:
     // reduce traffic, so a few line transfers per call are intentional.
     std::vector<T> clusterTotals;
     std::vector<T> clusterPrefixes;
+    // `std::atomic` is non-copyable and non-movable, so
+    // `std::vector<std::atomic<T>>` will not compile and `std::array` needs a
+    // compile-time size. Hence the unique_ptr-owned C array.
+    // NOLINTNEXTLINE(modernize-avoid-c-arrays)
     std::unique_ptr<std::atomic<std::uint64_t>[]> clusterDoneStamps;
     if (useHierarchical) {
       clusterTotals.assign(numClusters, identity);
       clusterPrefixes.assign(numClusters, identity);
       clusterDoneStamps =
+          // NOLINTNEXTLINE(modernize-avoid-c-arrays)
           std::make_unique<std::atomic<std::uint64_t>[]>(numClusters);
       for (std::uint32_t k = 0; k < numClusters; ++k) {
         clusterDoneStamps[k].store(0U, std::memory_order_relaxed);
@@ -9937,7 +9937,7 @@ private:
   template <class HintsT, class T, class PrefixFn>
   T runInclusiveScanLookback(std::span<const T> in, std::span<T> out,
                              T identity, PrefixFn &&prefix,
-                             CancellationToken tok) {
+                             const CancellationToken &tok) {
     if (in.size() != out.size()) {
       throw std::invalid_argument(
           "inclusiveScan: in.size() must equal out.size()");
@@ -9984,8 +9984,8 @@ private:
     // equals participant count when `n` is small enough; the
     // `kMinTileBytes` floor avoids pathological 4-tile dispatches with
     // huge per-tile overhead.
-    constexpr std::size_t kFallbackL2Bytes = 512U * 1024U;
-    constexpr std::size_t kMinTileBytes = 64U * 1024U;
+    constexpr std::size_t kFallbackL2Bytes = std::size_t{512U} * 1024U;
+    constexpr std::size_t kMinTileBytes = std::size_t{64U} * 1024U;
     const std::size_t l2Bytes =
         m_topology.l2KibPerCore == 0U
             ? kFallbackL2Bytes

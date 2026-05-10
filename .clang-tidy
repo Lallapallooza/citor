@@ -27,7 +27,8 @@ Checks: >
   -portability-simd-intrinsics,
   -misc-non-private-member-variables-in-classes,
   -misc-no-recursion,
-  -misc-include-cleaner
+  -misc-include-cleaner,
+  -clang-analyzer-optin.performance.Padding
 
 WarningsAsErrors: '*'
 

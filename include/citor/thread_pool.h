@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <climits>
+#include <cmath>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -137,8 +138,8 @@ private:
   ThreadPool(ArenaTag /*tag*/, std::size_t participants,
              const std::vector<std::uint32_t> &cpuPins,
              std::uint32_t arenaIndex)
-      : m_workerAffinity(Affinity::PerCpu), m_kind(PoolKind::Arena),
-        m_arenaIndex(arenaIndex), m_topology(detail::detectTopology()),
+      : m_kind(PoolKind::Arena), m_arenaIndex(arenaIndex),
+        m_topology(detail::detectTopology()),
         m_workers(nullptr, WorkerArrayDeleter{}),
         m_chainDoneSlots(nullptr, ChainDoneSlotDeleter{}),
         m_plexDoneSlots(nullptr, PlexDoneSlotDeleter{}) {
@@ -720,8 +721,8 @@ private:
                   m_coherenceProbe.maxCrossOverIntraRatio > 1.0
               ? m_coherenceProbe.maxCrossOverIntraRatio
               : 2.0;
-      const std::uint64_t producerWeight = static_cast<std::uint64_t>(
-          biasFactor * static_cast<double>(slotsOnProducer) + 0.5);
+      const auto producerWeight = static_cast<std::uint64_t>(
+          std::llround(biasFactor * static_cast<double>(slotsOnProducer)));
       const std::uint64_t totalWeight =
           producerWeight + static_cast<std::uint64_t>(crossSlots);
       std::uint32_t derived = 8U;
@@ -742,9 +743,8 @@ private:
     // the multi-cluster path under that condition deadlocks on the exception
     // path (a non-leader cluster's leader can throw before publishing its
     // cluster stamp, blocking the producer's cross-cluster wait).
-    if (!(m_coherenceProbe.valid &&
-          m_coherenceProbe.clusters.numClusters >= 2U && participants >= 4U &&
-          foundCross && slotsOnProducer < participants)) {
+    if (!m_coherenceProbe.valid || m_coherenceProbe.clusters.numClusters < 2U ||
+        participants < 4U || !foundCross || slotsOnProducer >= participants) {
       return;
     }
 
@@ -2716,7 +2716,8 @@ private:
   /// Reserved stack-scratch budget for the reduce partials buffer. The
   /// reducer falls back to heap allocation when `kReduceMaxChunks *
   /// sizeof(T)` exceeds this byte budget.
-  static constexpr std::size_t kReduceStackScratchBytes = 32U * 1024U;
+  static constexpr std::size_t kReduceStackScratchBytes =
+      std::size_t{32U} * 1024U;
 
   /// Derive a deterministic chunk size for `parallelReduce` calls. Purely a
   /// function of |n| and the optional hint chunk override and is independent of
@@ -3948,11 +3949,16 @@ private:
     // reduce traffic, so a few line transfers per call are intentional.
     std::vector<T> clusterTotals;
     std::vector<T> clusterPrefixes;
+    // `std::atomic` is non-copyable and non-movable, so
+    // `std::vector<std::atomic<T>>` will not compile and `std::array` needs a
+    // compile-time size. Hence the unique_ptr-owned C array.
+    // NOLINTNEXTLINE(modernize-avoid-c-arrays)
     std::unique_ptr<std::atomic<std::uint64_t>[]> clusterDoneStamps;
     if (useHierarchical) {
       clusterTotals.assign(numClusters, identity);
       clusterPrefixes.assign(numClusters, identity);
       clusterDoneStamps =
+          // NOLINTNEXTLINE(modernize-avoid-c-arrays)
           std::make_unique<std::atomic<std::uint64_t>[]>(numClusters);
       for (std::uint32_t k = 0; k < numClusters; ++k) {
         clusterDoneStamps[k].store(0U, std::memory_order_relaxed);
@@ -4357,7 +4363,7 @@ private:
   template <class HintsT, class T, class PrefixFn>
   T runInclusiveScanLookback(std::span<const T> in, std::span<T> out,
                              T identity, PrefixFn &&prefix,
-                             CancellationToken tok) {
+                             const CancellationToken &tok) {
     if (in.size() != out.size()) {
       throw std::invalid_argument(
           "inclusiveScan: in.size() must equal out.size()");
@@ -4404,8 +4410,8 @@ private:
     // equals participant count when `n` is small enough; the
     // `kMinTileBytes` floor avoids pathological 4-tile dispatches with
     // huge per-tile overhead.
-    constexpr std::size_t kFallbackL2Bytes = 512U * 1024U;
-    constexpr std::size_t kMinTileBytes = 64U * 1024U;
+    constexpr std::size_t kFallbackL2Bytes = std::size_t{512U} * 1024U;
+    constexpr std::size_t kMinTileBytes = std::size_t{64U} * 1024U;
     const std::size_t l2Bytes =
         m_topology.l2KibPerCore == 0U
             ? kFallbackL2Bytes

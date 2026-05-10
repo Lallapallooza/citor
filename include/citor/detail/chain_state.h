@@ -182,9 +182,9 @@ struct ChainState {
   [[nodiscard]] std::pair<std::size_t, std::size_t>
   slotRange(std::uint32_t slot) const noexcept {
     __extension__ using u128 = unsigned __int128;
-    const std::size_t lo =
+    const auto lo =
         static_cast<std::size_t>((static_cast<u128>(n) * slot) / participants);
-    const std::size_t hi = static_cast<std::size_t>(
+    const auto hi = static_cast<std::size_t>(
         (static_cast<u128>(n) * (slot + 1U)) / participants);
     return {lo, hi};
   }
