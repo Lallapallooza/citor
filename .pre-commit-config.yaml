@@ -69,6 +69,14 @@ repos:
         exclude: ^single_include/
         pass_filenames: true
 
+      - id: clang-tidy-full
+        name: clang-tidy (full build at CI parity)
+        entry: python3 scripts/run_clang_tidy.py --full
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+        always_run: true
+
       - id: ctest
         name: ctest (full test suite)
         entry: python3 scripts/run_ctest.py
