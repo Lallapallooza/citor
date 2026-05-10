@@ -113,7 +113,18 @@ Numbers age out on every microarchitecture and compiler bump. The shape is what'
 - **Persistent-worker amortisation.** `runPlex` collapses N phases into one dispatch; per-phase overhead drops from a futex round-trip to a user-space rendezvous spin (typically a few hundred nanoseconds depending on participant count and contention).
 - **Inline fallback.** When `n * estimatedItemNs * 1e-3 < minTaskUs * participants`, the pool runs the call inline on the producer with zero wake. Set `minTaskUs > 0` and a non-zero `estimatedItemNs` on hot paths where the dispatch floor matters.
 
-`benchmark/parallel_bench` measures the actual numbers on your hardware against ten peer pools and exports JSON suitable for `tools.plot_bench`. See [Benchmarks](#benchmarks) for the recipe.
+The charts below are the per-family geomean from one run of `parallel_bench` on a 16-core Zen 5 CCD (governor=performance, boost off, ten peer pools). Lower is faster.
+
+| family | what's measured | chart |
+|---|---|---|
+| empty fan-out | `parallelFor` dispatch floor with no body work | [`docs/charts/family_empty_geomean.svg`](docs/charts/family_empty_geomean.svg) |
+| chain dispatch | one descriptor publishing N stages vs N separate `parallelFor` calls | [`docs/charts/family_chain_geomean.svg`](docs/charts/family_chain_geomean.svg) |
+| plex transitions | `runPlex` per-phase rendezvous in user-space | [`docs/charts/family_plex_geomean.svg`](docs/charts/family_plex_geomean.svg) |
+| forkJoin recursion | cilksort + Fibonacci recursive shapes | [`docs/charts/family_forkjoin_geomean.svg`](docs/charts/family_forkjoin_geomean.svg) |
+| runPlex stencil | heat / Jacobi sweep over a stable partition | [`docs/charts/family_runplex_geomean.svg`](docs/charts/family_runplex_geomean.svg) |
+| reduce | deterministic sums (Kahan, integer plus, Pareto-distributed body) | [`docs/charts/family_reduce_geomean.svg`](docs/charts/family_reduce_geomean.svg) |
+
+`benchmark/parallel_bench` measures the actual numbers on your hardware against ten peer pools and exports JSON suitable for `tools.plot_bench`. See [Benchmarks](#benchmarks) for the recipe -- run it on your hardware before quoting any number.
 
 ## Install
 
