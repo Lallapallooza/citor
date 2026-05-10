@@ -123,6 +123,7 @@ The charts below are the per-family geomean from one run of `parallel_bench` on 
 | forkJoin recursion | cilksort + Fibonacci recursive shapes | [`docs/charts/family_forkjoin_geomean.svg`](docs/charts/family_forkjoin_geomean.svg) |
 | runPlex stencil | heat / Jacobi sweep over a stable partition | [`docs/charts/family_runplex_geomean.svg`](docs/charts/family_runplex_geomean.svg) |
 | reduce | deterministic sums (Kahan, integer plus, Pareto-distributed body) | [`docs/charts/family_reduce_geomean.svg`](docs/charts/family_reduce_geomean.svg) |
+| losses | workloads where citor's median is worse than the best peer | [`docs/charts/losses.svg`](docs/charts/losses.svg) |
 
 `benchmark/parallel_bench` measures the actual numbers on your hardware against ten peer pools and exports JSON suitable for `tools.plot_bench`. See [Benchmarks](#benchmarks) for the recipe -- run it on your hardware before quoting any number.
 

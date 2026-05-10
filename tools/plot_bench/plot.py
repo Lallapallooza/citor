@@ -72,8 +72,25 @@ _VENDOR_PREFIXES: tuple[str, ...] = (
 # Pool vendors that should not appear as peer competitors in geomean / scatter /
 # losses charts. `Sequential` is a single-thread baseline that beats every
 # parallel pool on tiny `forkjoin_fib28`-style cells; including it as a peer
-# drags geomeans toward zero on small-recursion workloads.
-_EXCLUDED_PEER_VENDORS: frozenset[str] = frozenset({"Sequential"})
+# drags geomeans toward zero on small-recursion workloads. `citor::PoolGroup`
+# canonicalises as its own vendor but it is still citor; excluding it keeps
+# the losses chart from listing "citor::ThreadPool loses to citor::PoolGroup",
+# and keeps the vs-competitors charts honest.
+_EXCLUDED_PEER_VENDORS: frozenset[str] = frozenset({"Sequential", "citor::PoolGroup"})
+
+
+def _is_peer(pool: str, citor_pool: str) -> bool:
+    """Whether `pool` is a peer competitor for the citor baseline.
+
+    Excludes the baseline itself, anything in `_EXCLUDED_PEER_VENDORS`, and
+    any pool whose canonical name starts with `citor::` (catches future citor
+    sub-pools the bench may add).
+    """
+    if pool == citor_pool:
+        return False
+    if pool in _EXCLUDED_PEER_VENDORS:
+        return False
+    return not pool.startswith("citor::")
 
 
 def canonical_pool(name: str) -> str:
@@ -268,9 +285,7 @@ def build_overview_figure(
         if baseline_median is None:
             continue
         for pool, median in canonical.items():
-            if pool == baseline_pool_prefix:
-                continue
-            if pool in _EXCLUDED_PEER_VENDORS:
+            if not _is_peer(pool, baseline_pool_prefix):
                 continue
             rows.append((workload, pool, median / baseline_median, median))
 
@@ -370,9 +385,7 @@ def build_family_geomean_figure(
         if citor_ns is None:
             continue
         for pool, ns in canonical.items():
-            if pool == citor_pool:
-                continue
-            if pool in _EXCLUDED_PEER_VENDORS:
+            if not _is_peer(pool, citor_pool):
                 continue
             speedups[pool].append(ns / citor_ns)
 
@@ -433,9 +446,7 @@ def build_family_scatter_figure(
         if citor_ns is None:
             continue
         for pool, ns in canonical.items():
-            if pool == citor_pool:
-                continue
-            if pool in _EXCLUDED_PEER_VENDORS:
+            if not _is_peer(pool, citor_pool):
                 continue
             points.append((workload, pool, ns, citor_ns))
 
@@ -530,9 +541,7 @@ def build_losses_figure(
         best_pool = None
         best_ns = float("inf")
         for pool, ns in canonical.items():
-            if pool == citor_pool:
-                continue
-            if pool in _EXCLUDED_PEER_VENDORS:
+            if not _is_peer(pool, citor_pool):
                 continue
             if ns < best_ns:
                 best_ns = ns
