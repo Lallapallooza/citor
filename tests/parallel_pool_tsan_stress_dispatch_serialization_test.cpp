@@ -15,7 +15,8 @@ using citor::staticStage;
 using citor::ThreadPool;
 
 struct StressForkJoinHints : HintsDefaults {
-  static constexpr citor::Affinity affinity = citor::Affinity::CcdLocal;
+  static constexpr citor::StealPolicy stealPolicy =
+      citor::StealPolicy::ClusterLocal;
 };
 
 // Two producer threads dispatch synchronous primitives to the same pool

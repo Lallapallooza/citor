@@ -1,18 +1,16 @@
-// Affinity enum sweep on citor under memory-irregular parallelFor.
+// StealPolicy sweep on citor under memory-irregular parallelFor.
 //
-// Claim: Affinity::CcdLocal reduces cross-CCD coherence cost on memory-
-// irregular parallelFor. Two rows -- Affinity::None vs Affinity::CcdLocal --
-// run a strided memory access pattern designed to exercise cross-CCD cache
+// Two rows -- StealPolicy::Global vs StealPolicy::ClusterLocal -- run a
+// strided memory access pattern designed to exercise cross-CCD cache
 // coherence: a 64MB buffer is swept with a 2KB stride, so each iteration
-// touches a fresh cache line outside the per-core L2 working set. Workers
-// with poor topology placement pay coherence traffic that workers pinned to
-// a CCD-local L3 do not.
+// touches a fresh cache line outside the per-core L2 working set.
+// Cluster-local steal probes keep load-balancing traffic inside the
+// shared L3 most of the time and reach across the inter-cluster fabric
+// only when the local cluster's deques drain; the contrast against the
+// global probe shows the per-row coherence-traffic difference.
 //
-// 4 of 6 Affinity values are unwired in the citor engine (only
-// Affinity::None and Affinity::CcdLocal currently have effect on this host);
-// the sweep registers only those two so each row reflects a real engine path.
-//
-// j=16 only -- affinity differences are most visible at full machine width.
+// j=16 only -- steal-policy differences are most visible at full
+// machine width.
 
 #include <atomic>
 #include <cstddef>
@@ -114,7 +112,7 @@ template <class RunFn>
 
 [[nodiscard]] BenchRow measureWithAffinity(const char *name,
                                            std::size_t participants,
-                                           citor::Affinity affinity,
+                                           citor::StealPolicy stealPolicy,
                                            const CyclesPerNanosecond &cal) {
   ThreadPool pool(participants);
   std::vector<std::uint64_t> buffer(kBufferBytes / sizeof(std::uint64_t), 0ULL);
@@ -125,7 +123,7 @@ template <class RunFn>
   const std::uint64_t referenceXor = computeReferenceXor(buffer);
 
   citor::Hints hints;
-  hints.affinity = affinity;
+  hints.stealPolicy = stealPolicy;
   hints.cancellationChecks = false;
 
   return measureLoop(
@@ -148,12 +146,12 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
                       const CyclesPerNanosecond &cal) {
   BenchTable table;
   table.workload = std::string{"affinity_sweep_strided_"} + suffix;
-  table.rows.push_back(measureWithAffinity("citor::ThreadPool[Affinity::None]",
-                                           participants, citor::Affinity::None,
-                                           cal));
   table.rows.push_back(
-      measureWithAffinity("citor::ThreadPool[Affinity::CcdLocal]", participants,
-                          citor::Affinity::CcdLocal, cal));
+      measureWithAffinity("citor::ThreadPool[StealPolicy::Global]",
+                          participants, citor::StealPolicy::Global, cal));
+  table.rows.push_back(
+      measureWithAffinity("citor::ThreadPool[StealPolicy::ClusterLocal]",
+                          participants, citor::StealPolicy::ClusterLocal, cal));
   return table;
 }
 

@@ -75,10 +75,11 @@ struct ForkJoinFn {
 /// flag is set as part of the throw response) so the join does not block on
 /// quiescence.
 ///
-/// The `HintsT` policy carries the `Affinity` choice that the engine uses to
-/// bias victim selection: `Affinity::CcdLocal` prefers same-CCD victims,
-/// mirroring the topology's shared-L3 grouping. Other affinity values fall back
-/// to a uniform xorshift random victim probe.
+/// The `HintsT` policy carries the `StealPolicy` choice that the engine
+/// uses to bias victim selection: `StealPolicy::ClusterLocal` prefers
+/// same-CCD victims, mirroring the topology's shared-L3 grouping.
+/// `StealPolicy::Global` falls back to a uniform xorshift random victim
+/// probe.
 inline constexpr detail::ForkJoinFn forkJoin{};
 
 } // namespace citor

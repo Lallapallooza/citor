@@ -110,7 +110,8 @@ static_assert(
 #endif
 
 struct ForkJoinHints : citor::HintsDefaults {
-  static constexpr citor::Affinity affinity = citor::Affinity::CcdLocal;
+  static constexpr citor::StealPolicy stealPolicy =
+      citor::StealPolicy::ClusterLocal;
 };
 
 namespace citor::bench {

@@ -56,7 +56,8 @@ constexpr std::size_t kDetachedTasks = 100;
 constexpr std::uint64_t kDetachedSpinNs = 5000;
 
 struct ForkJoinHints : citor::HintsDefaults {
-  static constexpr citor::Affinity affinity = citor::Affinity::CcdLocal;
+  static constexpr citor::StealPolicy stealPolicy =
+      citor::StealPolicy::ClusterLocal;
 };
 
 [[nodiscard]] std::int64_t seqFib(int n) noexcept {

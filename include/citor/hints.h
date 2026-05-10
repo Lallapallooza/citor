@@ -48,21 +48,44 @@ enum class Determinism : std::uint8_t {
   KahanCompensated,
 };
 
-/// CPU-affinity policy applied to the pool's workers.
+/// Worker-placement policy. Controls how each worker thread's affinity
+/// mask is configured at pool construction.
 ///
-/// Worker placement on the pool is fixed at construction
-/// (one-logical-per-physical-core, all pinned to slot 0's CCD by default; see
-/// `Affinity::CcdLocal`). The hint controls where fork-join steal probes look
-/// for victims, NOT where workers spawn.
-///
-/// - `CcdLocal`: bias steal probes toward same-CCD workers first; fall back to
-/// cross-CCD only if
-///   the local CCD has no work to take. Matches the default placement and is
-///   the right choice for data-locality-sensitive recursive workloads.
-/// - `None`: no steal-direction preference; probe every worker uniformly.
+/// - `PerCpu`: each worker pinned to exactly one logical CPU from the
+///   pool's allowed-CPU set. Strict: the kernel cannot migrate the worker
+///   to any other CPU. Best for HPC / real-time use where determinism
+///   matters more than the kernel's ability to opportunistically rebalance.
+/// - `PerCluster`: each worker pinned to its CCD's full logical-CPU set
+///   (the kernel may migrate the worker within its CCD but not across
+///   clusters). Preserves CCD-locality of caches while letting the kernel
+///   route wakes via `select_idle_sibling` and rebalance under transient
+///   intra-CCD load. Recommended default for memory-bound primitives like
+///   `parallelScan` on multi-CCD parts.
+/// - `None`: workers inherit the producer's process affinity mask without
+///   further pinning. The kernel scheduler is free to migrate at will.
+///   Useful for lightly-loaded systems where the kernel's heuristics
+///   outperform any static policy.
 enum class Affinity : std::uint8_t {
   None,
-  CcdLocal,
+  PerCpu,
+  PerCluster,
+};
+
+/// Fork-join steal-victim selection policy.
+///
+/// Bias the recursive `forkJoin` steal probe toward CCD-local victims
+/// before falling back to cross-CCD. Independent of `Affinity` (which
+/// controls worker placement); a pool with `Affinity::PerCpu` and
+/// `StealPolicy::ClusterLocal` pins each worker to its CPU AND biases its
+/// steal probe to same-CCD victims.
+///
+/// - `Global`: probe every worker uniformly.
+/// - `ClusterLocal`: probe same-CCD victims first; fall back to cross-CCD
+///   only when the local cluster has no work to take. Default for
+///   data-locality-sensitive recursive workloads.
+enum class StealPolicy : std::uint8_t {
+  Global,
+  ClusterLocal,
 };
 
 /// Per-call priority class consulted when concurrent producers contend on the
@@ -114,7 +137,8 @@ enum class BarrierKind : std::uint8_t {
 struct Hints {
   Balance balance = Balance::StaticUniform;
   Determinism determinism = Determinism::FixedBlockOrder;
-  Affinity affinity = Affinity::CcdLocal;
+  Affinity affinity = Affinity::PerCluster;
+  StealPolicy stealPolicy = StealPolicy::ClusterLocal;
   Priority priority = Priority::Throughput;
   /// Estimated per-item cost in nanoseconds; `n * estimatedItemNs` gates the
   /// inline fallback.
@@ -161,7 +185,8 @@ struct HintsDefaults {
   // as under StaticUniform.
   static constexpr Balance balance = Balance::DynamicChunked;
   static constexpr Determinism determinism = Determinism::FixedBlockOrder;
-  static constexpr Affinity affinity = Affinity::CcdLocal;
+  static constexpr Affinity affinity = Affinity::PerCluster;
+  static constexpr StealPolicy stealPolicy = StealPolicy::ClusterLocal;
   static constexpr Priority priority = Priority::Throughput;
   static constexpr double estimatedItemNs = 0.0;
   static constexpr double minTaskUs = 0.0;
@@ -225,13 +250,13 @@ struct FixedBlockReduceHints : HintsDefaults {
   static constexpr double minTaskUs = 25.0;
 };
 
-/// Fork-join preset with same-CCD victim biasing for cross-CCD locality.
-///
-/// Inherits from `HintsDefaults` and only changes the steal-direction hint.
-/// forkJoin uses its own Chase-Lev deques; the `Balance` field is not consulted
-/// on the fork-join hot path.
+/// Fork-join preset with same-cluster victim biasing for cross-cluster
+/// locality. Inherits from `HintsDefaults` and only sets the
+/// steal-direction hint explicitly. forkJoin uses its own Chase-Lev
+/// deques; the `Balance` field is not consulted on the fork-join hot
+/// path.
 struct CcdLocalForkJoinHints : HintsDefaults {
-  static constexpr Affinity affinity = Affinity::CcdLocal;
+  static constexpr StealPolicy stealPolicy = StealPolicy::ClusterLocal;
 };
 
 namespace detail {
@@ -250,6 +275,7 @@ struct NoCancellationHints {
   static constexpr Balance balance = HintsT::balance;
   static constexpr Determinism determinism = HintsT::determinism;
   static constexpr Affinity affinity = HintsT::affinity;
+  static constexpr StealPolicy stealPolicy = HintsT::stealPolicy;
   static constexpr Priority priority = HintsT::priority;
   static constexpr double estimatedItemNs = HintsT::estimatedItemNs;
   static constexpr double minTaskUs = HintsT::minTaskUs;

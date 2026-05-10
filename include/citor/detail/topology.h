@@ -43,6 +43,15 @@ struct Topology {
   /// sysfs is absent.
   std::vector<std::uint64_t> l3KibOfCcd;
 
+  /// Per-core L2 cache size in KiB, sampled from
+  /// `cache/index2/size` of the first physical-core CPU id once per probe.
+  /// Per-core L2 is uniform on every supported microarchitecture today,
+  /// so one sample suffices; heterogeneous chips will need a per-cluster
+  /// probe later. Used by primitives that pick tile sizes from the
+  /// runtime cache hierarchy instead of hardcoded constants. Zero when
+  /// sysfs is absent; primitives fall back to a conservative default.
+  std::uint64_t l2KibPerCore = 0;
+
   /// Index into `ccdGroups` of the preferred CCD for small pools that fit in a
   /// single L3. Picks the largest L3 (= 3D V-Cache CCD on V-Cache parts, where
   /// one CCD has a stacked SRAM die); breaks ties by lowest index so the choice
@@ -287,6 +296,16 @@ inline Topology detectTopology() {
     topo.l3KibOfCcd[ccd] =
         readCacheSizeKib("/sys/devices/system/cpu/cpu" + std::to_string(rep) +
                          "/cache/index3/size");
+  }
+  // Per-core L2: probe one representative CPU. Per-core L2 is
+  // architecture-uniform on every CPU we currently target (Zen, P-cores
+  // on Alder Lake, Apple firestorm/icestorm), so a single sample is
+  // sufficient. Future heterogeneous parts will need a per-cluster
+  // probe.
+  if (!topo.physicalCores.empty()) {
+    topo.l2KibPerCore = readCacheSizeKib(
+        "/sys/devices/system/cpu/cpu" +
+        std::to_string(topo.physicalCores.front()) + "/cache/index2/size");
   }
   std::uint64_t bestKib = 0U;
   std::uint32_t bestIdx = 0;

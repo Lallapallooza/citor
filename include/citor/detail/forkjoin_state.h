@@ -59,14 +59,15 @@ struct alignas(kCacheLine) ForkJoinState {
   /// traffic on `pendingTasks` keeps the line uncontended.
   std::atomic<std::uint32_t> forkJoinCancelled{0};
 
-  /// CCD index for each participant slot; used by the victim-selection RNG to
-  /// bias stealing toward same-CCD victims when `Affinity::CcdLocal` is
-  /// requested. Sized `participants`.
+  /// CCD index for each participant slot; used by the victim-selection RNG
+  /// to bias stealing toward same-CCD victims when
+  /// `StealPolicy::ClusterLocal` is requested. Sized `participants`.
   const std::uint32_t *ccdOfSlot = nullptr;
 
-  /// CCD-local affinity flag derived from the call's `HintsT::affinity`. When
-  /// `true`, the victim-selection probe order biases toward same-CCD workers;
-  /// when `false`, the probe order is a uniform xorshift random.
+  /// CCD-local steal-policy flag derived from the call's
+  /// `HintsT::stealPolicy`. When `true`, the victim-selection probe order
+  /// biases toward same-CCD workers; when `false`, the probe order is a
+  /// uniform xorshift random.
   bool preferSameCcd = false;
 
   /// Cancellation token observed by workers at task-boundary chunks; copied

@@ -49,7 +49,8 @@ constexpr int kFibN = 28;
 constexpr int kFibCutoff = 16;
 
 struct ForkJoinHints : citor::HintsDefaults {
-  static constexpr citor::Affinity affinity = citor::Affinity::CcdLocal;
+  static constexpr citor::StealPolicy stealPolicy =
+      citor::StealPolicy::ClusterLocal;
 };
 
 [[nodiscard]] std::int64_t seqFib(int n) noexcept {

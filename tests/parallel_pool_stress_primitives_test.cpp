@@ -32,7 +32,8 @@ struct StressDynamicHints : HintsDefaults {
 };
 
 struct StressForkJoinHints : HintsDefaults {
-  static constexpr citor::Affinity affinity = citor::Affinity::CcdLocal;
+  static constexpr citor::StealPolicy stealPolicy =
+      citor::StealPolicy::ClusterLocal;
 };
 
 // Cross-primitive stress: each iteration constructs a fresh pool with a

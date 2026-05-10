@@ -2,7 +2,7 @@
 //
 // citor -- header-only C++20 thread pool
 // version: 0.1.0
-// commit:  0d7997e93d718404832555d55b82939d03a6154c
+// commit:  bc085b4ef465dd600a83ecb61983b1c9658ff628
 // generated: 2026-05-10
 //
 // GENERATED FILE -- DO NOT EDIT.
@@ -26,6 +26,7 @@
 #include <cctype>
 #include <chrono>
 #include <climits>
+#include <cmath>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -38,7 +39,9 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <numeric>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -421,21 +424,44 @@ enum class Determinism : std::uint8_t {
   KahanCompensated,
 };
 
-/// CPU-affinity policy applied to the pool's workers.
+/// Worker-placement policy. Controls how each worker thread's affinity
+/// mask is configured at pool construction.
 ///
-/// Worker placement on the pool is fixed at construction
-/// (one-logical-per-physical-core, all pinned to slot 0's CCD by default; see
-/// `Affinity::CcdLocal`). The hint controls where fork-join steal probes look
-/// for victims, NOT where workers spawn.
-///
-/// - `CcdLocal`: bias steal probes toward same-CCD workers first; fall back to
-/// cross-CCD only if
-///   the local CCD has no work to take. Matches the default placement and is
-///   the right choice for data-locality-sensitive recursive workloads.
-/// - `None`: no steal-direction preference; probe every worker uniformly.
+/// - `PerCpu`: each worker pinned to exactly one logical CPU from the
+///   pool's allowed-CPU set. Strict: the kernel cannot migrate the worker
+///   to any other CPU. Best for HPC / real-time use where determinism
+///   matters more than the kernel's ability to opportunistically rebalance.
+/// - `PerCluster`: each worker pinned to its CCD's full logical-CPU set
+///   (the kernel may migrate the worker within its CCD but not across
+///   clusters). Preserves CCD-locality of caches while letting the kernel
+///   route wakes via `select_idle_sibling` and rebalance under transient
+///   intra-CCD load. Recommended default for memory-bound primitives like
+///   `parallelScan` on multi-CCD parts.
+/// - `None`: workers inherit the producer's process affinity mask without
+///   further pinning. The kernel scheduler is free to migrate at will.
+///   Useful for lightly-loaded systems where the kernel's heuristics
+///   outperform any static policy.
 enum class Affinity : std::uint8_t {
   None,
-  CcdLocal,
+  PerCpu,
+  PerCluster,
+};
+
+/// Fork-join steal-victim selection policy.
+///
+/// Bias the recursive `forkJoin` steal probe toward CCD-local victims
+/// before falling back to cross-CCD. Independent of `Affinity` (which
+/// controls worker placement); a pool with `Affinity::PerCpu` and
+/// `StealPolicy::ClusterLocal` pins each worker to its CPU AND biases its
+/// steal probe to same-CCD victims.
+///
+/// - `Global`: probe every worker uniformly.
+/// - `ClusterLocal`: probe same-CCD victims first; fall back to cross-CCD
+///   only when the local cluster has no work to take. Default for
+///   data-locality-sensitive recursive workloads.
+enum class StealPolicy : std::uint8_t {
+  Global,
+  ClusterLocal,
 };
 
 /// Per-call priority class consulted when concurrent producers contend on the
@@ -487,7 +513,8 @@ enum class BarrierKind : std::uint8_t {
 struct Hints {
   Balance balance = Balance::StaticUniform;
   Determinism determinism = Determinism::FixedBlockOrder;
-  Affinity affinity = Affinity::CcdLocal;
+  Affinity affinity = Affinity::PerCluster;
+  StealPolicy stealPolicy = StealPolicy::ClusterLocal;
   Priority priority = Priority::Throughput;
   /// Estimated per-item cost in nanoseconds; `n * estimatedItemNs` gates the
   /// inline fallback.
@@ -534,7 +561,8 @@ struct HintsDefaults {
   // as under StaticUniform.
   static constexpr Balance balance = Balance::DynamicChunked;
   static constexpr Determinism determinism = Determinism::FixedBlockOrder;
-  static constexpr Affinity affinity = Affinity::CcdLocal;
+  static constexpr Affinity affinity = Affinity::PerCluster;
+  static constexpr StealPolicy stealPolicy = StealPolicy::ClusterLocal;
   static constexpr Priority priority = Priority::Throughput;
   static constexpr double estimatedItemNs = 0.0;
   static constexpr double minTaskUs = 0.0;
@@ -598,13 +626,13 @@ struct FixedBlockReduceHints : HintsDefaults {
   static constexpr double minTaskUs = 25.0;
 };
 
-/// Fork-join preset with same-CCD victim biasing for cross-CCD locality.
-///
-/// Inherits from `HintsDefaults` and only changes the steal-direction hint.
-/// forkJoin uses its own Chase-Lev deques; the `Balance` field is not consulted
-/// on the fork-join hot path.
+/// Fork-join preset with same-cluster victim biasing for cross-cluster
+/// locality. Inherits from `HintsDefaults` and only sets the
+/// steal-direction hint explicitly. forkJoin uses its own Chase-Lev
+/// deques; the `Balance` field is not consulted on the fork-join hot
+/// path.
 struct CcdLocalForkJoinHints : HintsDefaults {
-  static constexpr Affinity affinity = Affinity::CcdLocal;
+  static constexpr StealPolicy stealPolicy = StealPolicy::ClusterLocal;
 };
 
 namespace detail {
@@ -623,6 +651,7 @@ struct NoCancellationHints {
   static constexpr Balance balance = HintsT::balance;
   static constexpr Determinism determinism = HintsT::determinism;
   static constexpr Affinity affinity = HintsT::affinity;
+  static constexpr StealPolicy stealPolicy = HintsT::stealPolicy;
   static constexpr Priority priority = HintsT::priority;
   static constexpr double estimatedItemNs = HintsT::estimatedItemNs;
   static constexpr double minTaskUs = HintsT::minTaskUs;
@@ -936,6 +965,15 @@ struct Topology {
   /// sysfs is absent.
   std::vector<std::uint64_t> l3KibOfCcd;
 
+  /// Per-core L2 cache size in KiB, sampled from
+  /// `cache/index2/size` of the first physical-core CPU id once per probe.
+  /// Per-core L2 is uniform on every supported microarchitecture today,
+  /// so one sample suffices; heterogeneous chips will need a per-cluster
+  /// probe later. Used by primitives that pick tile sizes from the
+  /// runtime cache hierarchy instead of hardcoded constants. Zero when
+  /// sysfs is absent; primitives fall back to a conservative default.
+  std::uint64_t l2KibPerCore = 0;
+
   /// Index into `ccdGroups` of the preferred CCD for small pools that fit in a
   /// single L3. Picks the largest L3 (= 3D V-Cache CCD on V-Cache parts, where
   /// one CCD has a stacked SRAM die); breaks ties by lowest index so the choice
@@ -1181,6 +1219,16 @@ inline Topology detectTopology() {
         readCacheSizeKib("/sys/devices/system/cpu/cpu" + std::to_string(rep) +
                          "/cache/index3/size");
   }
+  // Per-core L2: probe one representative CPU. Per-core L2 is
+  // architecture-uniform on every CPU we currently target (Zen, P-cores
+  // on Alder Lake, Apple firestorm/icestorm), so a single sample is
+  // sufficient. Future heterogeneous parts will need a per-cluster
+  // probe.
+  if (!topo.physicalCores.empty()) {
+    topo.l2KibPerCore = readCacheSizeKib(
+        "/sys/devices/system/cpu/cpu" +
+        std::to_string(topo.physicalCores.front()) + "/cache/index2/size");
+  }
   std::uint64_t bestKib = 0U;
   std::uint32_t bestIdx = 0;
   for (std::size_t ccd = 0; ccd < topo.l3KibOfCcd.size(); ++ccd) {
@@ -1424,11 +1472,80 @@ struct ForkJoinFn {
 /// flag is set as part of the throw response) so the join does not block on
 /// quiescence.
 ///
-/// The `HintsT` policy carries the `Affinity` choice that the engine uses to
-/// bias victim selection: `Affinity::CcdLocal` prefers same-CCD victims,
-/// mirroring the topology's shared-L3 grouping. Other affinity values fall back
-/// to a uniform xorshift random victim probe.
+/// The `HintsT` policy carries the `StealPolicy` choice that the engine
+/// uses to bias victim selection: `StealPolicy::ClusterLocal` prefers
+/// same-CCD victims, mirroring the topology's shared-L3 grouping.
+/// `StealPolicy::Global` falls back to a uniform xorshift random victim
+/// probe.
 inline constexpr detail::ForkJoinFn forkJoin{};
+
+} // namespace citor
+
+// ===== citor/cpos/inclusive_scan.h =====
+
+
+
+namespace citor {
+
+/// Tag type identifying the `citor::inclusiveScan` customization point.
+struct InclusiveScanTag {};
+
+namespace detail {
+
+/// Function-object backing the `citor::inclusiveScan` customization
+/// point.
+///
+/// `inclusiveScan` is an opinionated buffer-to-buffer prefix-sum entry
+/// distinct from `parallelScan`. The two differ in what the engine
+/// observes:
+///
+///   * `parallelScan` takes a user body. The engine knows the chunk
+///     ranges but not the addresses of the input or output buffers, so
+///     it cannot prefetch, NT-store, or otherwise reorder the user's
+///     memory accesses. It is fully general (any monoid, any
+///     side-effecting body) at the cost of leaving micro-architectural
+///     headroom on the table.
+///   * `inclusiveScan` takes the input and output buffers directly. The
+///     engine owns the inner loop and is free to use whatever memory
+///     traffic shape minimises wall time on the host: decoupled-lookback
+///     single-pass, `PREFETCHW` write-prefetch ahead of Pass 2, NT stores
+///     on workloads where the output is larger than L3, AVX-512 in-register
+///     scan, per-cluster lookback chains, etc.
+///
+/// The tradeoff: `inclusiveScan` is restricted to plain memory-to-memory
+/// scans of trivially-relocatable types under a user-supplied associative
+/// combiner. Bodies that need to inspect or mutate side state, allocate,
+/// or otherwise reach beyond `[in, out)` should keep using
+/// `parallelScan`.
+struct InclusiveScanFn {
+  /// Compute an inclusive prefix scan from `in` to `out` under `prefix`.
+  ///
+  /// `in` and `out` must have equal length and may alias only when the
+  /// caller has made the alias safe (the engine reads `in[i]` before
+  /// writing `out[i]` for every `i` so `in == out` is well-formed). The
+  /// returned value is the inclusive total at the right edge --
+  /// `prefix(prefix(... prefix(identity, in[0]) ...), in[n-1])` -- and
+  /// matches the value Blelloch's two-pass scan produces.
+  ///
+  /// The hint type carries compile-time policy (per-tile size cap,
+  /// affinity, priority); the engine consults `HintsT::stealPolicy` only
+  /// for any nested fork/join the implementation may use internally
+  /// (currently none).
+  template <class HintsT, class Pool, class T, class PrefixFn>
+  [[nodiscard]] T
+  operator()(Pool &pool, std::span<const T> in, std::span<T> out, T identity,
+             PrefixFn &&prefix,
+             CancellationToken tok = CancellationToken{}) const {
+    return tag_invoke(*this, pool, in, out, std::move(identity),
+                      std::forward<PrefixFn>(prefix), HintsT{}, std::move(tok));
+  }
+};
+
+} // namespace detail
+
+/// Customization-point object for the buffer-to-buffer inclusive
+/// prefix scan. See `detail::InclusiveScanFn` for the contract.
+inline constexpr detail::InclusiveScanFn inclusiveScan{};
 
 } // namespace citor
 
@@ -2418,6 +2535,599 @@ private:
 
 } // namespace citor::detail
 
+// ===== citor/detail/cpu_relax.h =====
+
+// Spin-loop CPU hint used by every busy-wait in the engine.
+//
+// Factored out of `worker_loop.h` so headers that only need the hint
+// (`lookback_scan.h`, `coherence_probe.h`, ...) avoid pulling in the
+// full worker dispatch state.
+
+
+#if defined(__x86_64__) || defined(_M_X64)
+#endif
+
+namespace citor::detail {
+
+/// Insert a single PAUSE / YIELD hint to back off without de-scheduling.
+///
+/// `_mm_pause` on x86-64 is the spin-loop hint of choice (P0514R4); it
+/// lets the CPU drop hyper-thread issue slots without yielding the
+/// scheduler quantum. Non-x86 builds fall through to a compiler barrier.
+inline void cpuRelax() noexcept {
+#if defined(__x86_64__) || defined(_M_X64)
+  _mm_pause();
+#else
+  std::atomic_signal_fence(std::memory_order_acq_rel);
+#endif
+}
+
+} // namespace citor::detail
+
+// ===== citor/detail/coherence_probe.h =====
+
+
+#ifdef __linux__
+#endif
+
+
+namespace citor::detail {
+
+/// One-time pool-init coherence probe.
+///
+/// Builds an NxN cache-line ping-pong latency matrix between every pair of
+/// CPUs in the pool's affinity mask, then clusters CPUs into coherence
+/// groups so primitives that benefit from topology-aware partitioning
+/// (parallelScan, parallelReduce, fork/join victim selection) can size
+/// their cross-cluster work share from observed cost ratios instead of
+/// hardware-specific constants.
+///
+/// Methodology summary (from research):
+/// - Ping-pong probe: two threads, one shared `std::atomic<uint64_t>`,
+///   each side flips even/odd parity; median of N round-trips is the
+///   pair's latency in ns. (nviennot/core-to-core-latency, ChipsandCheese
+///   Microbenchmarks.)
+/// - Disjoint-pair scheduling: for N CPUs, run N-1 rounds where each
+///   round's pairs are a perfect matching of K_N. Compresses wall time
+///   from O(N^2 * probe-ms) to O(N * probe-ms).
+/// - Clustering: log-latency single-linkage agglomerative + Otsu's
+///   threshold on the off-diagonal histogram. Parameter-free,
+///   scale-invariant, falls back to the sysfs/L3 grouping prior when
+///   the histogram is unimodal (single-CCX consumer chip).
+/// - Cache nothing across pool ctors in this header; the pool may
+///   memoise the result if it wants.
+
+struct LatencyMatrix {
+  /// CPU ids (in matrix index order). `cpus.size() == matrix.size()`.
+  std::vector<std::uint32_t> cpus;
+  /// Symmetric pairwise latency in nanoseconds. `matrix[i][j]` is the
+  /// median round-trip latency between `cpus[i]` and `cpus[j]`. The
+  /// diagonal is zero (defined; not measured).
+  std::vector<std::vector<double>> matrix;
+  /// Valid if every off-diagonal cell was successfully measured.
+  bool valid = false;
+};
+
+struct ClusterResult {
+  /// Cluster identifier for each entry in the parent `LatencyMatrix::cpus`.
+  /// Values are `0..numClusters-1`. Empty when clustering was not
+  /// performed (single-CPU pool, probe failed, etc.).
+  std::vector<std::uint32_t> clusterIdOfCpuIndex;
+  /// Number of distinct clusters discovered.
+  std::uint32_t numClusters = 0;
+  /// Median pairwise latency between cluster pairs. `clusterDistanceNs[i][j]`
+  /// is the median over all `(cpu_a, cpu_b)` with `cluster(a)==i,
+  /// cluster(b)==j`. Diagonal entries hold the median intra-cluster
+  /// pairwise latency.
+  std::vector<std::vector<double>> clusterDistanceNs;
+};
+
+struct CoherenceProbe {
+  bool valid = false;
+  LatencyMatrix matrix;
+  ClusterResult clusters;
+  /// Worst-case (maximum) cross-cluster / intra-cluster median latency
+  /// ratio. `1.0` when there is only one cluster. This is the convenience
+  /// scalar used by primitives that want a single bias factor without
+  /// inspecting the full matrix.
+  double maxCrossOverIntraRatio = 1.0;
+};
+
+#ifdef __linux__
+[[gnu::always_inline]] inline void coherenceProbePin(int cpu) noexcept {
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  CPU_SET(cpu, &set);
+  (void)pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+}
+#else
+[[gnu::always_inline]] inline void coherenceProbePin(int /*cpu*/) noexcept {}
+#endif
+
+/// Single-pair atomic-CAS ping-pong. Pins one helper thread to `cpuB`,
+/// pins the calling thread to `cpuA`, then runs `roundTrips` round-trips
+/// of an even/odd parity flip on a single shared cache line. Returns the
+/// MEAN round-trip time in nanoseconds; mean is fine here because the
+/// loop body is an atomic-RMW that dominates; outliers from interrupts
+/// average out across hundreds of round-trips.
+///
+/// Restores caller's pre-probe affinity mask on exit.
+inline double pingPongLatencyNs(int cpuA, int cpuB,
+                                std::uint32_t roundTrips = 1024U) noexcept {
+  alignas(kCacheLine) std::atomic<std::uint64_t> counter{0};
+  alignas(kCacheLine) std::atomic<int> ready{0};
+  alignas(kCacheLine) std::atomic<int> stop{0};
+
+#ifdef __linux__
+  cpu_set_t savedSet;
+  CPU_ZERO(&savedSet);
+  const bool savedOk =
+      pthread_getaffinity_np(pthread_self(), sizeof(savedSet), &savedSet) == 0;
+#endif
+
+  std::thread helper([&, cpuB] {
+    coherenceProbePin(cpuB);
+    ready.store(1, std::memory_order_release);
+    while (stop.load(std::memory_order_acquire) == 0) {
+      const std::uint64_t observed = counter.load(std::memory_order_acquire);
+      if ((observed & 1ULL) == 1ULL) {
+        counter.store(observed + 1ULL, std::memory_order_release);
+      } else {
+        cpuRelax();
+      }
+    }
+  });
+
+  coherenceProbePin(cpuA);
+  while (ready.load(std::memory_order_acquire) == 0) {
+    cpuRelax();
+  }
+
+  // Warmup: 64 round-trips to settle the shared cache line and let the
+  // helper's first scheduler dispatch retire.
+  for (std::uint32_t i = 0; i < 64U; ++i) {
+    const std::uint64_t observed = counter.load(std::memory_order_acquire);
+    counter.store(observed + 1ULL, std::memory_order_release);
+    while ((counter.load(std::memory_order_acquire) & 1ULL) == 1ULL) {
+      cpuRelax();
+    }
+  }
+
+  const auto t0 = std::chrono::steady_clock::now();
+  for (std::uint32_t i = 0; i < roundTrips; ++i) {
+    const std::uint64_t observed = counter.load(std::memory_order_acquire);
+    counter.store(observed + 1ULL, std::memory_order_release);
+    while ((counter.load(std::memory_order_acquire) & 1ULL) == 1ULL) {
+      cpuRelax();
+    }
+  }
+  const auto t1 = std::chrono::steady_clock::now();
+
+  stop.store(1, std::memory_order_release);
+  // Helper observes `stop` on its next iter (it is currently spinning on
+  // an even counter waiting for us to flip it). To unblock cleanly we
+  // flip the counter to odd one more time, helper advances it to even,
+  // observes stop, and exits.
+  const std::uint64_t observed = counter.load(std::memory_order_acquire);
+  counter.store(observed + 1ULL, std::memory_order_release);
+  helper.join();
+
+#ifdef __linux__
+  if (savedOk) {
+    (void)pthread_setaffinity_np(pthread_self(), sizeof(savedSet), &savedSet);
+  }
+#endif
+
+  const double totalNs =
+      std::chrono::duration<double, std::nano>(t1 - t0).count();
+  return totalNs / static_cast<double>(roundTrips);
+}
+
+/// Build the round-robin disjoint-pair schedule for `N` participants.
+/// Returns `N-1` rounds when `N` is even, each round containing `N/2`
+/// pairs. For odd `N` adds a "bye" slot internally and returns `N`
+/// rounds with one bye per round; bye pairs are filtered out.
+///
+/// Each pair (i, j) appears in exactly one round, so the union of all
+/// rounds' pairs is the complete graph K_N's edge set.
+inline std::vector<std::vector<std::pair<std::uint32_t, std::uint32_t>>>
+roundRobinPairs(std::uint32_t n) {
+  std::vector<std::vector<std::pair<std::uint32_t, std::uint32_t>>> rounds;
+  if (n < 2U) {
+    return rounds;
+  }
+  const bool addBye = (n % 2U) != 0U;
+  const std::uint32_t m = addBye ? (n + 1U) : n;
+  std::vector<std::uint32_t> arr(m);
+  std::iota(arr.begin(), arr.end(), 0U);
+  rounds.reserve(m - 1U);
+  for (std::uint32_t r = 0; r < m - 1U; ++r) {
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> pairs;
+    pairs.reserve(m / 2U);
+    for (std::uint32_t i = 0; i < m / 2U; ++i) {
+      const std::uint32_t a = arr[i];
+      const std::uint32_t b = arr[m - 1U - i];
+      if (addBye && (a == n || b == n)) {
+        continue; // bye for this round's affected participant
+      }
+      pairs.emplace_back(a, b);
+    }
+    rounds.push_back(std::move(pairs));
+    // Rotate: arr[0] is the pivot, arr[1..m-1] rotate by one (last to
+    // index 1, others shift right).
+    const std::uint32_t last = arr[m - 1U];
+    for (std::uint32_t i = m - 1U; i > 1U; --i) {
+      arr[i] = arr[i - 1U];
+    }
+    arr[1U] = last;
+  }
+  return rounds;
+}
+
+/// Probe the full pairwise latency matrix for `cpus`. Uses disjoint-pair
+/// scheduling: per round, every active CPU is in at most one pair, so we
+/// can spawn one std::thread per pair (each pair has 2 threads) and
+/// collect all measurements in parallel. Total wall time is approximately
+/// `(N - 1) * single-pair-probe-time + thread-spawn-overhead`.
+///
+/// Caller's affinity is saved on entry and restored on exit.
+inline LatencyMatrix
+probeLatencyMatrix(const std::vector<std::uint32_t> &cpus,
+                   std::uint32_t roundTrips = 1024U) noexcept {
+  LatencyMatrix out;
+  if (cpus.size() < 2U) {
+    return out;
+  }
+  const auto n = static_cast<std::uint32_t>(cpus.size());
+  out.cpus = cpus;
+  out.matrix.assign(n, std::vector<double>(n, 0.0));
+
+#ifdef __linux__
+  cpu_set_t savedSet;
+  CPU_ZERO(&savedSet);
+  const bool savedOk =
+      pthread_getaffinity_np(pthread_self(), sizeof(savedSet), &savedSet) == 0;
+#endif
+
+  const auto schedule = roundRobinPairs(n);
+  for (const auto &round : schedule) {
+    // Spawn one thread per pair. Each pair is (cpus[a], cpus[b]). A and
+    // B in different pairs are non-overlapping CPUs (matching property),
+    // so per-pair threads do not contend with each other for the
+    // measurement window.
+    std::vector<std::thread> pairThreads;
+    pairThreads.reserve(round.size());
+    std::vector<double> roundLatencies(round.size(), 0.0);
+    for (std::size_t pi = 0; pi < round.size(); ++pi) {
+      const auto [a, b] = round[pi];
+      const int cpuA = static_cast<int>(cpus[a]);
+      const int cpuB = static_cast<int>(cpus[b]);
+      pairThreads.emplace_back([cpuA, cpuB, &roundLatencies, pi, roundTrips] {
+        roundLatencies[pi] = pingPongLatencyNs(cpuA, cpuB, roundTrips);
+      });
+    }
+    for (auto &t : pairThreads) {
+      t.join();
+    }
+    for (std::size_t pi = 0; pi < round.size(); ++pi) {
+      const auto [a, b] = round[pi];
+      out.matrix[a][b] = roundLatencies[pi];
+      out.matrix[b][a] = roundLatencies[pi];
+    }
+  }
+
+#ifdef __linux__
+  if (savedOk) {
+    (void)pthread_setaffinity_np(pthread_self(), sizeof(savedSet), &savedSet);
+  }
+#endif
+
+  out.valid = true;
+  return out;
+}
+
+/// Otsu's method for choosing a bimodal threshold on the off-diagonal
+/// log-latency histogram. Returns the threshold in log-ns, plus a
+/// `bimodality` score (between-class variance / total variance) in
+/// `[0, 1]`. Scores below ~0.4 indicate the histogram is essentially
+/// unimodal, in which case the caller should fall back to the sysfs
+/// prior rather than trust the threshold.
+struct OtsuResult {
+  double threshold = 0.0;
+  double bimodality = 0.0;
+};
+
+inline OtsuResult otsuThresholdLog(const std::vector<double> &values) noexcept {
+  OtsuResult r;
+  if (values.size() < 2U) {
+    return r;
+  }
+  // Histogram in log-space, 64 bins.
+  constexpr std::size_t kBins = 64U;
+  double minV = std::numeric_limits<double>::infinity();
+  double maxV = -std::numeric_limits<double>::infinity();
+  for (double v : values) {
+    if (v <= 0.0) {
+      continue;
+    }
+    const double lv = std::log(v);
+    if (lv < minV) {
+      minV = lv;
+    }
+    if (lv > maxV) {
+      maxV = lv;
+    }
+  }
+  if (!(maxV > minV)) {
+    return r;
+  }
+  std::vector<std::uint32_t> hist(kBins, 0U);
+  for (double v : values) {
+    if (v <= 0.0) {
+      continue;
+    }
+    const double lv = std::log(v);
+    auto bin = static_cast<std::size_t>((lv - minV) / (maxV - minV) *
+                                        static_cast<double>(kBins - 1U));
+    if (bin >= kBins) {
+      bin = kBins - 1U;
+    }
+    hist[bin] += 1U;
+  }
+  std::uint64_t total = 0U;
+  double sumAll = 0.0;
+  for (std::size_t b = 0; b < kBins; ++b) {
+    total += hist[b];
+    sumAll += static_cast<double>(hist[b]) * static_cast<double>(b);
+  }
+  if (total == 0U) {
+    return r;
+  }
+  std::uint64_t cumCount = 0U;
+  double cumSum = 0.0;
+  double bestVar = -1.0;
+  std::size_t bestBin = 0U;
+  for (std::size_t b = 0; b < kBins; ++b) {
+    cumCount += hist[b];
+    cumSum += static_cast<double>(hist[b]) * static_cast<double>(b);
+    if (cumCount == 0U || cumCount == total) {
+      continue;
+    }
+    const double w0 =
+        static_cast<double>(cumCount) / static_cast<double>(total);
+    const double w1 = 1.0 - w0;
+    const double m0 = cumSum / static_cast<double>(cumCount);
+    const double m1 = (sumAll - cumSum) / static_cast<double>(total - cumCount);
+    const double bcv = w0 * w1 * (m0 - m1) * (m0 - m1);
+    if (bcv > bestVar) {
+      bestVar = bcv;
+      bestBin = b;
+    }
+  }
+  // Total variance.
+  const double mean = sumAll / static_cast<double>(total);
+  double tv = 0.0;
+  for (std::size_t b = 0; b < kBins; ++b) {
+    const double diff = static_cast<double>(b) - mean;
+    tv += static_cast<double>(hist[b]) * diff * diff;
+  }
+  tv /= static_cast<double>(total);
+  r.threshold = minV + (static_cast<double>(bestBin) + 0.5) /
+                           static_cast<double>(kBins - 1U) * (maxV - minV);
+  r.bimodality = (tv > 0.0) ? (bestVar / tv) : 0.0;
+  return r;
+}
+
+/// Cluster the matrix CPUs by latency. Builds a graph where edge `(i, j)`
+/// exists if `log(matrix[i][j]) <= threshold` (Otsu cut on the
+/// off-diagonal log-latency histogram), then finds connected components.
+/// Each component is one cluster.
+///
+/// Falls back to the `sysfsPrior` (per-CCD/L3 grouping from
+/// `topology.h`) when the histogram is essentially unimodal -- a
+/// single-CCX consumer chip will produce a unimodal histogram with no
+/// useful threshold; the sysfs grouping is the right answer there.
+///
+/// `sysfsPrior[k]` is a list of CPU ids that share an L3 cache. The
+/// function maps prior CPU ids to matrix indices and uses them as the
+/// fallback partition.
+inline ClusterResult clusterByLatency(
+    const LatencyMatrix &mat,
+    const std::vector<std::vector<std::uint32_t>> &sysfsPrior) noexcept {
+  ClusterResult out;
+  const std::uint32_t n = static_cast<std::uint32_t>(mat.cpus.size());
+  if (!mat.valid || n < 2U) {
+    if (n > 0U) {
+      out.clusterIdOfCpuIndex.assign(n, 0U);
+      out.numClusters = 1U;
+      out.clusterDistanceNs.assign(1U, std::vector<double>(1U, 0.0));
+    }
+    return out;
+  }
+
+  // Off-diagonal latencies for Otsu.
+  std::vector<double> offDiag;
+  offDiag.reserve(static_cast<std::size_t>(n) * (n - 1U) / 2U);
+  for (std::uint32_t i = 0; i < n; ++i) {
+    for (std::uint32_t j = i + 1U; j < n; ++j) {
+      offDiag.push_back(mat.matrix[i][j]);
+    }
+  }
+  const OtsuResult ot = otsuThresholdLog(offDiag);
+
+  // Use Otsu cut only if the histogram is sufficiently bimodal. The
+  // threshold is the BCV/TV ratio (between-class variance over total
+  // variance, computed in log-space). For a unimodal Gaussian sample,
+  // Otsu picks the median and yields BCV/TV ~0.32; for a clearly bimodal
+  // sample with two well-separated peaks, BCV/TV approaches 1.0. The
+  // 0.55 cutoff rejects the Gaussian-noise case (single CCD on a
+  // multi-core probe) while accepting genuine multi-cluster splits;
+  // 0.555 (5/9) is the textbook bimodality-coefficient cutoff.
+  //
+  // Otsu's bimodality is unstable on tiny samples: a 4-CPU probe yields
+  // only 6 off-diagonal pairs, and ordinary timing jitter can push the
+  // BCV/TV ratio above 0.55 even on a homogeneous CCD. Require at least
+  // 10 pairs (= 5 CPUs) before trusting the histogram split; on smaller
+  // pools fall through to the sysfs prior, which on a single-CCD
+  // worker subset returns one cluster.
+  constexpr double kBimodalCutoff = 0.55;
+  constexpr std::size_t kMinOtsuPairs = 10U;
+  std::vector<std::uint32_t> clusterId(n, 0U);
+  std::uint32_t numClusters = 1U;
+
+  if (offDiag.size() >= kMinOtsuPairs && ot.bimodality >= kBimodalCutoff) {
+    // Connected-components on the "fast" graph (union-find).
+    std::vector<std::uint32_t> parent(n);
+    std::iota(parent.begin(), parent.end(), 0U);
+    auto find = [&](std::uint32_t x) {
+      while (parent[x] != x) {
+        parent[x] = parent[parent[x]];
+        x = parent[x];
+      }
+      return x;
+    };
+    auto unite = [&](std::uint32_t a, std::uint32_t b) {
+      a = find(a);
+      b = find(b);
+      if (a != b) {
+        parent[a] = b;
+      }
+    };
+    for (std::uint32_t i = 0; i < n; ++i) {
+      for (std::uint32_t j = i + 1U; j < n; ++j) {
+        if (mat.matrix[i][j] > 0.0 &&
+            std::log(mat.matrix[i][j]) <= ot.threshold) {
+          unite(i, j);
+        }
+      }
+    }
+    // Compact roots to dense cluster ids.
+    constexpr std::uint32_t kUnassigned = UINT32_MAX;
+    std::vector<std::uint32_t> rootToCluster(n, kUnassigned);
+    std::uint32_t next = 0U;
+    for (std::uint32_t i = 0; i < n; ++i) {
+      const std::uint32_t r = find(i);
+      if (rootToCluster[r] == kUnassigned) {
+        rootToCluster[r] = next;
+        ++next;
+      }
+      clusterId[i] = rootToCluster[r];
+    }
+    numClusters = next;
+  } else if (!sysfsPrior.empty()) {
+    // Sysfs prior fallback. Each probed CPU keyed into the prior keeps
+    // the prior's cluster id; any CPU absent from every prior group gets
+    // a fresh cluster id so it cannot be silently merged with cluster 0.
+    std::uint32_t maxCpu = 0U;
+    for (const auto &group : sysfsPrior) {
+      for (auto c : group) {
+        if (c > maxCpu) {
+          maxCpu = c;
+        }
+      }
+    }
+    std::vector<std::int32_t> sysfsCluster(maxCpu + 1U, -1);
+    for (std::size_t k = 0; k < sysfsPrior.size(); ++k) {
+      for (auto c : sysfsPrior[k]) {
+        sysfsCluster[c] = static_cast<std::int32_t>(k);
+      }
+    }
+    std::uint32_t nextOrphanId = static_cast<std::uint32_t>(sysfsPrior.size());
+    std::uint32_t maxSeen = 0U;
+    for (std::uint32_t i = 0; i < n; ++i) {
+      const auto cpu = mat.cpus[i];
+      if (cpu < sysfsCluster.size() && sysfsCluster[cpu] >= 0) {
+        clusterId[i] = static_cast<std::uint32_t>(sysfsCluster[cpu]);
+      } else {
+        clusterId[i] = nextOrphanId;
+        ++nextOrphanId;
+      }
+      if (clusterId[i] > maxSeen) {
+        maxSeen = clusterId[i];
+      }
+    }
+    numClusters = maxSeen + 1U;
+  }
+
+  out.clusterIdOfCpuIndex = std::move(clusterId);
+  out.numClusters = numClusters;
+  out.clusterDistanceNs.assign(numClusters,
+                               std::vector<double>(numClusters, 0.0));
+  // Median pairwise per-cluster-pair distance.
+  std::vector<std::vector<std::vector<double>>> bucket(
+      numClusters, std::vector<std::vector<double>>(numClusters));
+  for (std::uint32_t i = 0; i < n; ++i) {
+    for (std::uint32_t j = i; j < n; ++j) {
+      const std::uint32_t ci = out.clusterIdOfCpuIndex[i];
+      const std::uint32_t cj = out.clusterIdOfCpuIndex[j];
+      if (i == j) {
+        continue;
+      }
+      bucket[ci][cj].push_back(mat.matrix[i][j]);
+      if (ci != cj) {
+        bucket[cj][ci].push_back(mat.matrix[i][j]);
+      }
+    }
+  }
+  for (std::uint32_t a = 0; a < numClusters; ++a) {
+    for (std::uint32_t b = 0; b < numClusters; ++b) {
+      if (bucket[a][b].empty()) {
+        continue;
+      }
+      std::sort(bucket[a][b].begin(), bucket[a][b].end());
+      out.clusterDistanceNs[a][b] = bucket[a][b][bucket[a][b].size() / 2U];
+    }
+  }
+  return out;
+}
+
+/// Top-level: build the latency matrix, cluster, populate
+/// `CoherenceProbe`. `cpus` is the flat list of CPU ids the pool is
+/// allowed to schedule on (typically the union of the sysfs CCD groups
+/// intersected with the process affinity mask). `sysfsPrior` is the
+/// per-CCD CPU grouping from `detail::detectTopology()`; used only as
+/// a fallback when the latency histogram is unimodal.
+inline CoherenceProbe
+runCoherenceProbe(const std::vector<std::uint32_t> &cpus,
+                  const std::vector<std::vector<std::uint32_t>> &sysfsPrior,
+                  std::uint32_t roundTrips = 1024U) noexcept {
+  CoherenceProbe out;
+  if (cpus.size() < 2U) {
+    return out;
+  }
+  out.matrix = probeLatencyMatrix(cpus, roundTrips);
+  if (!out.matrix.valid) {
+    return out;
+  }
+  out.clusters = clusterByLatency(out.matrix, sysfsPrior);
+  out.valid = !out.clusters.clusterIdOfCpuIndex.empty();
+
+  // Convenience scalar: max(cluster i to cluster j median) / max(cluster
+  // i intra median). Intra is the diagonal of `clusterDistanceNs`. If
+  // there is only one cluster the ratio is 1.0.
+  double maxCross = 0.0;
+  double maxIntra = 0.0;
+  for (std::uint32_t a = 0; a < out.clusters.numClusters; ++a) {
+    if (out.clusters.clusterDistanceNs[a][a] > maxIntra) {
+      maxIntra = out.clusters.clusterDistanceNs[a][a];
+    }
+    for (std::uint32_t b = 0; b < out.clusters.numClusters; ++b) {
+      if (a == b) {
+        continue;
+      }
+      if (out.clusters.clusterDistanceNs[a][b] > maxCross) {
+        maxCross = out.clusters.clusterDistanceNs[a][b];
+      }
+    }
+  }
+  if (maxIntra > 0.0 && maxCross > 0.0) {
+    out.maxCrossOverIntraRatio = maxCross / maxIntra;
+  }
+  return out;
+}
+
+} // namespace citor::detail
+
 // ===== citor/detail/forkjoin_state.h =====
 
 
@@ -2472,14 +3182,15 @@ struct alignas(kCacheLine) ForkJoinState {
   /// traffic on `pendingTasks` keeps the line uncontended.
   std::atomic<std::uint32_t> forkJoinCancelled{0};
 
-  /// CCD index for each participant slot; used by the victim-selection RNG to
-  /// bias stealing toward same-CCD victims when `Affinity::CcdLocal` is
-  /// requested. Sized `participants`.
+  /// CCD index for each participant slot; used by the victim-selection RNG
+  /// to bias stealing toward same-CCD victims when
+  /// `StealPolicy::ClusterLocal` is requested. Sized `participants`.
   const std::uint32_t *ccdOfSlot = nullptr;
 
-  /// CCD-local affinity flag derived from the call's `HintsT::affinity`. When
-  /// `true`, the victim-selection probe order biases toward same-CCD workers;
-  /// when `false`, the probe order is a uniform xorshift random.
+  /// CCD-local steal-policy flag derived from the call's
+  /// `HintsT::stealPolicy`. When `true`, the victim-selection probe order
+  /// biases toward same-CCD workers; when `false`, the probe order is a
+  /// uniform xorshift random.
   bool preferSameCcd = false;
 
   /// Cancellation token observed by workers at task-boundary chunks; copied
@@ -2918,6 +3629,114 @@ struct KahanPair {
 [[nodiscard]] inline KahanPair kahanCombine(KahanPair a, KahanPair b) noexcept {
   const KahanPair afterSum = kahanAdd(a, b.sum);
   return kahanAdd(afterSum, -b.c);
+}
+
+} // namespace citor::detail
+
+// ===== citor/detail/lookback_scan.h =====
+
+
+
+namespace citor::detail {
+
+/// Per-tile state for Merrill-Garland 2016 decoupled-lookback scan.
+///
+/// Each tile lives on its own cache line so a worker's release-store on
+/// `flag` for one tile does not invalidate a neighbour's flag line. The
+/// state machine is:
+///
+///   `Initialized` -> `AggregateAvailable` -> `PrefixAvailable`
+///
+/// A tile's worker:
+///   1. Reads `d.in[tile_lo..tile_hi]`, computes local total and writes
+///      the chunk-local inclusive scan into `d.out[tile_lo..tile_hi]`.
+///   2. Release-stores `aggregate` and lifts `flag` to
+///      `AggregateAvailable`.
+///   3. Walks predecessors, summing `aggregate`s, until it finds a
+///      predecessor in `PrefixAvailable` (acquire). That predecessor's
+///      `prefix` plus the accumulated aggregates is this tile's prefix.
+///   4. Release-stores `prefix` and lifts `flag` to `PrefixAvailable`.
+///   5. Adds `prefix` in place over `d.out[tile_lo..tile_hi]`.
+///
+/// Tile 0 is special: its prefix is `identity`, so it can skip the
+/// lookback walk entirely and proceed straight from step 2 to step 4.
+template <class T>
+struct alignas(kCacheLine) LookbackTile {
+  enum class Flag : std::uint64_t {
+    Initialized = 0,
+    AggregateAvailable = 1,
+    PrefixAvailable = 2,
+  };
+
+  /// State-machine bit; release-stored after the corresponding payload
+  /// (aggregate or prefix) has been written, so an acquire-load of
+  /// `flag` synchronises with the payload.
+  std::atomic<std::uint64_t> flag{0};
+
+  /// Tile's local total. Valid (well-defined) when `flag >=
+  /// AggregateAvailable`.
+  T aggregate{};
+
+  /// Tile's exclusive prefix. Valid when `flag >= PrefixAvailable`.
+  T prefix{};
+};
+
+/// Walk back from `myTile - 1`, summing predecessor aggregates, until a
+/// predecessor is observed in `PrefixAvailable` state. Returns the
+/// computed prefix for `myTile`.
+///
+/// `prefix` is the user-supplied associative combiner; the walk
+/// composes left-to-right (oldest predecessor first) to preserve
+/// associativity even when the combiner is not commutative.
+///
+/// The walk avoids stalling on a slow predecessor by spinning with
+/// `cpuRelax()`; on workloads where every tile's Pass-1 work is
+/// roughly uniform, the chain typically terminates after one step (the
+/// immediate predecessor's prefix is already published by the time the
+/// successor finishes its own aggregate).
+///
+/// `noexcept` follows the user combiner: a throwing |prefix| propagates
+/// to the caller, which the engine catches in `runInclusiveScanLookback`
+/// and surfaces through `firstException`.
+template <class T, class PrefixFn>
+[[gnu::always_inline]] inline T
+lookbackWalk(LookbackTile<T> *tiles, std::uint32_t myTile, T identity,
+             PrefixFn &&prefix) noexcept(noexcept(prefix(std::declval<T>(),
+                                                         std::declval<T>()))) {
+  // `accum` carries the running total of every tile whose `aggregate`
+  // we have folded in but whose `prefix` was not yet published. When
+  // we hit a tile in `PrefixAvailable` state, that tile's prefix
+  // covers everything to its left, so the result is
+  // `prefix.left = prefix(prefix.left, peer.prefix, peer.aggregate, accum)`.
+  // Compose left-to-right (peer is to the left of accum) so the user
+  // monoid only needs to be associative, not commutative.
+  T accum = identity;
+  std::uint32_t cursor = myTile;
+  while (cursor > 0U) {
+    --cursor;
+    auto &peer = tiles[cursor];
+    while (true) {
+      const auto state = peer.flag.load(std::memory_order_acquire);
+      if (state >=
+          static_cast<std::uint64_t>(LookbackTile<T>::Flag::PrefixAvailable)) {
+        // peer.prefix is the exclusive total of [0, cursor_lo);
+        // peer.aggregate is the total of [cursor_lo, cursor_hi);
+        // accum is the total of [cursor_hi, myTile_lo). Stitch them
+        // left-to-right.
+        T leftCombined = prefix(peer.prefix, peer.aggregate);
+        return prefix(std::move(leftCombined), std::move(accum));
+      }
+      if (state >= static_cast<std::uint64_t>(
+                       LookbackTile<T>::Flag::AggregateAvailable)) {
+        // peer's prefix not yet ready; fold its aggregate into `accum`
+        // and keep walking back.
+        accum = prefix(peer.aggregate, std::move(accum));
+        break;
+      }
+      cpuRelax();
+    }
+  }
+  return accum;
 }
 
 } // namespace citor::detail
@@ -3464,6 +4283,59 @@ struct ScanState {
   /// advance.
   std::uint64_t epochBase = 0;
 
+  /// Borrowed pointer to the pool's per-slot CCD index array.
+  ///
+  /// Set when the call enables CCD-aware asymmetric chunk partitioning;
+  /// nullptr otherwise. Used by `slotRange` to give larger chunks to slots on
+  /// the producer's CCD and smaller chunks to slots on a different CCD,
+  /// reducing the cross-CCD coherence volume on Pass-2 writes.
+  const std::uint32_t *ccdOfSlot = nullptr;
+
+  /// CCD identity of the producer (slot 0). When asymmetric partitioning is
+  /// enabled, slots whose `ccdOfSlot[s] == producerCcd` are the
+  /// "producer-CCD" slots and receive a larger share of `n`.
+  std::uint32_t producerCcd = UINT32_MAX;
+
+  /// Numerator (out of 16) of `n` allocated to the producer-CCD slot group as
+  /// a whole. The cross-CCD slot group receives `(16 - asymmetricNum) / 16`.
+  /// Used only when `ccdOfSlot != nullptr`. Shared evenly within each group.
+  /// The declarator default matches the pool's initial value so the field
+  /// stays in a consistent neutral state until the per-call setup overwrites
+  /// it.
+  std::uint32_t asymmetricNum = 8;
+
+  /// Number of slots on the producer's CCD. Precomputed by the caller to
+  /// avoid a per-`slotRange()` walk over `ccdOfSlot`.
+  std::uint32_t slotsOnProducerCcd = 0;
+
+  /// Probe-derived per-slot cluster id; `clusterIdOfSlot[s]` indexes a
+  /// `[0, numClusters)` cluster. Set when the pool's coherence probe
+  /// returns `numClusters >= 2` and the scan call opts into the
+  /// hierarchical algorithm. Nullptr when the call uses the
+  /// single-cluster reduce path.
+  const std::uint32_t *clusterIdOfSlot = nullptr;
+
+  /// Number of distinct clusters in this scan call. Zero when the
+  /// hierarchical path is disabled.
+  std::uint32_t numClusters = 0;
+
+  /// Per-cluster slot ranges precomputed by the caller. `clusterFirstSlot[c]`
+  /// is the lowest slot index in cluster `c`; `clusterSlotCount[c]` is the
+  /// count of slots in cluster `c`. The caller arranges that each cluster's
+  /// slots are contiguous in slot-index order, so cluster k's slots are
+  /// `[clusterFirstSlot[k], clusterFirstSlot[k] + clusterSlotCount[k])`.
+  /// Nullptr when the hierarchical path is disabled.
+  const std::uint32_t *clusterFirstSlot = nullptr;
+  const std::uint32_t *clusterSlotCount = nullptr;
+
+  /// Per-cluster total / exclusive prefix slots. Each lives on its own
+  /// cache line. `clusterTotals[k]` is written by cluster k's leader
+  /// after its local reduce; `clusterPrefixes[k]` is the cross-cluster
+  /// exclusive prefix the producer writes back. Both are sized
+  /// `numClusters`. Nullptr when the hierarchical path is disabled.
+  T *clusterTotals = nullptr;
+  T *clusterPrefixes = nullptr;
+
   /// Subscript a slot by index.
   ///
   /// The slot itself owns mutable atomics; the accessor is `const` because
@@ -3476,23 +4348,71 @@ struct ScanState {
     return doneSlots[idx];
   }
 
-  /// Compute a slot's contiguous row range over `[0, n)` using static
-  /// partitioning.
+  /// Compute a slot's contiguous row range over `[0, n)`.
   ///
-  /// The partition is `lo = (n * slot) / participants`, `hi = (n * (slot + 1))
-  /// / participants`, matching the chain / plex convention so the scan's chunk
-  /// identity is bit-stable across worker counts at fixed `n`.
+  /// Uniform mode (`ccdOfSlot == nullptr`): `lo = (n * slot) / participants`,
+  /// `hi = (n * (slot + 1)) / participants`, matching the chain / plex
+  /// convention so the scan's chunk identity is bit-stable across worker
+  /// counts at fixed `n`.
+  ///
+  /// Asymmetric mode (`ccdOfSlot != nullptr`): producer-CCD slots receive a
+  /// larger contiguous prefix of `n` (`asymmetricNum / 16`), cross-CCD slots
+  /// receive the trailing remainder. Within each group the chunks are
+  /// uniform. The producer-CCD slots take the prefix `[0, producerVolume)` so
+  /// chunk-id-order over slots is still left-to-right, preserving the
+  /// `slot=0` -> `chunk-id=0` invariant the seq-reduce relies on. Whether
+  /// this is enabled is decided per-call by `runScanParallel` based on
+  /// detected cross-CCD presence; it is opt-in to avoid regressing balanced
+  /// compute-bound bodies on single-CCD or homogeneous-CCD topologies.
   ///
   /// slot Worker slot index in `[0, participants)`.
   /// `(lo, hi)` pair denoting the slot's contiguous range over `[0, n)`.
   [[nodiscard]] std::pair<std::size_t, std::size_t>
   slotRange(std::uint32_t slot) const noexcept {
     __extension__ using u128 = unsigned __int128;
-    const std::size_t lo =
-        static_cast<std::size_t>((static_cast<u128>(n) * slot) / participants);
-    const std::size_t hi = static_cast<std::size_t>(
-        (static_cast<u128>(n) * (slot + 1U)) / participants);
-    return {lo, hi};
+    if (ccdOfSlot == nullptr) {
+      const std::size_t lo = static_cast<std::size_t>(
+          (static_cast<u128>(n) * slot) / participants);
+      const std::size_t hi = static_cast<std::size_t>(
+          (static_cast<u128>(n) * (slot + 1U)) / participants);
+      return {lo, hi};
+    }
+    // Producer-CCD slot group covers the prefix `[0, producerVolume)`;
+    // cross-CCD group covers `[producerVolume, n)`.
+    const std::size_t producerVolume =
+        static_cast<std::size_t>((static_cast<u128>(n) * asymmetricNum) / 16U);
+    const std::uint32_t numProducer = slotsOnProducerCcd;
+    const std::uint32_t numCross = participants - slotsOnProducerCcd;
+    // Index of `slot` within its CCD group (0-based, in slot-index order).
+    std::uint32_t indexInGroup = 0;
+    const bool isProducerCcd = (ccdOfSlot[slot] == producerCcd);
+    for (std::uint32_t s = 0; s < slot; ++s) {
+      if ((ccdOfSlot[s] == producerCcd) == isProducerCcd) {
+        ++indexInGroup;
+      }
+    }
+    if (isProducerCcd && numProducer > 0U) {
+      const std::size_t lo = static_cast<std::size_t>(
+          (static_cast<u128>(producerVolume) * indexInGroup) / numProducer);
+      const std::size_t hi = static_cast<std::size_t>(
+          (static_cast<u128>(producerVolume) * (indexInGroup + 1U)) /
+          numProducer);
+      return {lo, hi};
+    }
+    if (numCross > 0U) {
+      const std::size_t crossVolume = n - producerVolume;
+      const std::size_t lo =
+          producerVolume +
+          static_cast<std::size_t>(
+              (static_cast<u128>(crossVolume) * indexInGroup) / numCross);
+      const std::size_t hi =
+          producerVolume +
+          static_cast<std::size_t>(
+              (static_cast<u128>(crossVolume) * (indexInGroup + 1U)) /
+              numCross);
+      return {lo, hi};
+    }
+    return {0U, 0U};
   }
 };
 
@@ -4275,9 +5195,6 @@ template <class FOp>
 // ===== citor/detail/worker_loop.h =====
 
 
-#if defined(__x86_64__) || defined(_M_X64)
-#endif
-
 
 namespace citor::detail {
 
@@ -4316,19 +5233,6 @@ struct SpinPolicy {
 inline constexpr SpinPolicy kSpinAfterBulkJob{
     .maxIters = CITOR_SPIN_AFTER_BULK_JOB_MAX_ITERS,
     .maxCycles = CITOR_SPIN_AFTER_BULK_JOB_MAX_CYCLES};
-
-// Insert a single PAUSE / YIELD hint to back off without de-scheduling.
-//
-// `_mm_pause` on x86-64 is the spin-loop hint of choice (P0514R4); it lets
-// the CPU drop hyper-thread issue slots without yielding the scheduler
-// quantum. Non-x86 builds fall through to a compiler barrier.
-inline void cpuRelax() noexcept {
-#if defined(__x86_64__) || defined(_M_X64)
-  _mm_pause();
-#else
-  std::atomic_signal_fence(std::memory_order_acq_rel);
-#endif
-}
 
 // Read the current TSC for spin-budget bookkeeping. Returns 0 on platforms
 // without a TSC; the caller's loop falls through to the iteration bound.
@@ -4693,13 +5597,29 @@ public:
   // Construct a pool with |participants| total participants (producer +
   // background). Probes topology, truncates |participants| to at most the
   // number of physical cores in the process affinity mask, then spawns
-  // `participants - 1` background pthreads pinned to their assigned cores.
+  // `participants - 1` background pthreads pinned per |workerAffinity|.
+  //
+  // |workerAffinity| controls how each worker's CPU mask is configured:
+  //   * `Affinity::PerCpu` -- one CPU per worker. Strict; the kernel cannot
+  //     migrate the worker to any other CPU. Best for HPC / real-time use
+  //     where determinism matters more than the kernel's ability to
+  //     opportunistically rebalance.
+  //   * `Affinity::PerCluster` -- each worker is pinned to its CCD's full
+  //     logical-CPU set; the kernel may migrate within a CCD but not
+  //     across clusters. Preserves CCD-locality of caches while letting
+  //     the kernel route wakes via `select_idle_sibling` and rebalance
+  //     under intra-CCD load. Recommended default for memory-bound
+  //     primitives on multi-CCD parts.
+  //   * `Affinity::None` -- no per-worker pinning; workers inherit the
+  //     producer's process affinity mask. The kernel scheduler is free to
+  //     migrate at will.
   //
   // Throws `std::invalid_argument` when |participants| is 0; throws
-  // `std::system_error` when pthread attribute init, stack-size set, or thread
-  // create fails.
-  explicit ThreadPool(std::size_t participants)
-      : m_topology(detail::detectTopology()),
+  // `std::system_error` when pthread attribute init, stack-size set, or
+  // thread create fails.
+  explicit ThreadPool(std::size_t participants,
+                      Affinity workerAffinity = Affinity::PerCpu)
+      : m_workerAffinity(workerAffinity), m_topology(detail::detectTopology()),
         m_workers(nullptr, WorkerArrayDeleter{}),
         m_chainDoneSlots(nullptr, ChainDoneSlotDeleter{}),
         m_plexDoneSlots(nullptr, PlexDoneSlotDeleter{}) {
@@ -4722,8 +5642,8 @@ private:
   ThreadPool(ArenaTag /*tag*/, std::size_t participants,
              const std::vector<std::uint32_t> &cpuPins,
              std::uint32_t arenaIndex)
-      : m_kind(PoolKind::Arena), m_arenaIndex(arenaIndex),
-        m_topology(detail::detectTopology()),
+      : m_workerAffinity(Affinity::PerCpu), m_kind(PoolKind::Arena),
+        m_arenaIndex(arenaIndex), m_topology(detail::detectTopology()),
         m_workers(nullptr, WorkerArrayDeleter{}),
         m_chainDoneSlots(nullptr, ChainDoneSlotDeleter{}),
         m_plexDoneSlots(nullptr, PlexDoneSlotDeleter{}) {
@@ -5114,10 +6034,28 @@ private:
                                 "ThreadPool: pthread_attr_setstacksize");
       }
       const std::uint32_t cpu = (m_workers.get() + i)->cpuId;
-      if (cpu != UINT32_MAX) {
+      if (cpu != UINT32_MAX && m_workerAffinity != Affinity::None) {
         cpu_set_t affSet;
         CPU_ZERO(&affSet);
-        CPU_SET(cpu, &affSet);
+        if (m_workerAffinity == Affinity::PerCluster) {
+          // Pin to every CPU in this worker's CCD (shared L3 group). The
+          // kernel can migrate the worker within the CCD but not across
+          // clusters; preserves CCD locality while letting `wake_affine`
+          // and idle-balance opportunistically rebalance under transient
+          // intra-CCD load.
+          const std::uint32_t ccdIdx = (m_workers.get() + i)->ccdId;
+          if (ccdIdx != UINT32_MAX && ccdIdx < m_topology.ccdGroups.size() &&
+              !m_topology.ccdGroups[ccdIdx].empty()) {
+            for (auto c : m_topology.ccdGroups[ccdIdx]) {
+              CPU_SET(c, &affSet);
+            }
+          } else {
+            CPU_SET(cpu, &affSet);
+          }
+        } else {
+          // Affinity::PerCpu (strict, single-CPU pin). Original behaviour.
+          CPU_SET(cpu, &affSet);
+        }
         const int affRc =
             pthread_attr_setaffinity_np(&localAttrs, sizeof(affSet), &affSet);
         if (affRc != 0) {
@@ -5173,6 +6111,43 @@ private:
     if (m_kind == PoolKind::Standalone) {
       autoPinProducerOnce();
     }
+    // One-time coherence probe. Measures the constant factor by which a
+    // cache-line ping-pong between two cores on different CCDs is slower
+    // than a ping-pong between two cores on the same CCD. Primitives that
+    // benefit from CCD-aware partitioning (`parallelScan`, future
+    // tile-decoupled scans, ...) read this ratio to size their cross-CCD
+    // share without any hardware-specific constants in the engine.
+    //
+    // Skipped on single-CCD topologies (the probe would be a no-op),
+    // skipped on `PoolKind::Arena` (the parent `PoolGroup` is responsible
+    // for any cross-arena cost model -- per-arena probes would be both
+    // wasted work and biased by the arena's narrower CPU set).
+    if (m_kind == PoolKind::Standalone && m_topology.ccdCount > 1U) {
+      // Build the flat CPU list the probe should walk: producer CPU plus
+      // every worker's pinned CPU. Skip CPUs we could not pin (UINT32_MAX
+      // sentinel from `initWorkers` on a permission-restricted host) so
+      // the probe never tries to thread-spawn on a CPU it cannot reach.
+      std::vector<std::uint32_t> probeCpus;
+      probeCpus.reserve(effective);
+      for (std::size_t i = 0; i < effective; ++i) {
+        const std::uint32_t cpu = (m_workers.get() + i)->cpuId;
+        if (cpu != UINT32_MAX) {
+          probeCpus.push_back(cpu);
+        }
+      }
+      // 1024 round-trips per pair amortises ping-pong jitter; the probe
+      // runs in N-1 disjoint-pair-parallel rounds so wall time scales
+      // with (cpus - 1) * single-pair-probe-time. On a single-CCD probe
+      // the histogram is unimodal and `clusterByLatency` falls back to
+      // the sysfs prior.
+      m_coherenceProbe =
+          detail::runCoherenceProbe(probeCpus, m_topology.ccdGroups);
+    }
+    // Pre-resolve the parallelScan-specific topology fields. Inputs are all
+    // pool-immutable post-ctor (slot CCDs, cpu ids, probe cluster ids and
+    // ratio); resolving them here turns the per-call topology resolution in
+    // `runScanParallel` into O(1) field reads.
+    initScanScratch(effective);
     // Best-effort lock the WorkerState array into RAM. The hot-path `mailbox` /
     // `doneEpoch` lines must never page-fault: a fault on the producer's
     // acquire-spin would replace cache traffic with a kernel round-trip and the
@@ -5185,6 +6160,140 @@ private:
       (void)mlock(m_workers.get(), sizeof(detail::WorkerState) * effective);
     }
 #endif
+  }
+
+  // Pre-resolve the parallelScan-specific topology fields. Inputs are all
+  // pool-immutable post-ctor: the per-slot CCD vector, each worker's
+  // `cpuId`, the coherence probe's matrix CPU list, the probe's per-CPU
+  // cluster ids, and the probe's max cross-over-intra ratio. Output is
+  // stored on the pool so the scan path can replace its per-call topology
+  // resolution (slot -> cluster mapping, contiguity check, asymmetric-bias
+  // derivation) with O(1) field reads.
+  void initScanScratch(std::size_t participants) noexcept {
+    m_scanClusterIdOfSlot.assign(participants, 0U);
+    m_scanClusterFirstSlot.clear();
+    m_scanClusterSlotCount.clear();
+    m_scanNumClusters = 0;
+    m_scanUseHierarchical = false;
+    m_scanAsymmetricNum = 8U;
+    m_scanProducerCcd = UINT32_MAX;
+    m_scanSlotsOnProducerCcd = 0;
+
+    if (m_ccdOfSlot.empty()) {
+      return;
+    }
+    const std::uint32_t producerCcd = m_ccdOfSlot[0];
+    std::uint32_t slotsOnProducer = 0;
+    bool foundCross = false;
+    for (std::size_t s = 0; s < participants; ++s) {
+      if (s < m_ccdOfSlot.size() && m_ccdOfSlot[s] == producerCcd) {
+        ++slotsOnProducer;
+      } else {
+        foundCross = true;
+      }
+    }
+    m_scanProducerCcd = producerCcd;
+    m_scanSlotsOnProducerCcd = slotsOnProducer;
+
+    if (foundCross && slotsOnProducer > 0U && slotsOnProducer < participants) {
+      const std::uint32_t crossSlots =
+          static_cast<std::uint32_t>(participants) - slotsOnProducer;
+      const double biasFactor =
+          m_coherenceProbe.valid &&
+                  m_coherenceProbe.maxCrossOverIntraRatio > 1.0
+              ? m_coherenceProbe.maxCrossOverIntraRatio
+              : 2.0;
+      const std::uint64_t producerWeight = static_cast<std::uint64_t>(
+          biasFactor * static_cast<double>(slotsOnProducer) + 0.5);
+      const std::uint64_t totalWeight =
+          producerWeight + static_cast<std::uint64_t>(crossSlots);
+      std::uint32_t derived = 8U;
+      if (totalWeight > 0U) {
+        derived =
+            static_cast<std::uint32_t>((16ULL * producerWeight) / totalWeight);
+      }
+      m_scanAsymmetricNum =
+          std::clamp(derived, std::uint32_t{9U}, std::uint32_t{15U});
+    }
+
+    // Hierarchical requires: probe found multiple clusters, enough
+    // participants to amortise the per-cluster reduce, and crucially that
+    // slots actually span more than one CCD. The last gate guards against
+    // false-positive clustering when every worker sits on a single CCD --
+    // a 4-CPU same-CCD probe has occasionally clustered into 2-3 spurious
+    // groups due to per-pair latency jitter, and routing the scan through
+    // the multi-cluster path under that condition deadlocks on the exception
+    // path (a non-leader cluster's leader can throw before publishing its
+    // cluster stamp, blocking the producer's cross-cluster wait).
+    if (!(m_coherenceProbe.valid &&
+          m_coherenceProbe.clusters.numClusters >= 2U && participants >= 4U &&
+          foundCross && slotsOnProducer < participants)) {
+      return;
+    }
+
+    bool resolveOk = true;
+    for (std::size_t s = 0; s < participants; ++s) {
+      const std::uint32_t cpuId = (m_workers.get() + s)->cpuId;
+      std::uint32_t cpuIdx = UINT32_MAX;
+      for (std::size_t i = 0; i < m_coherenceProbe.matrix.cpus.size(); ++i) {
+        if (m_coherenceProbe.matrix.cpus[i] == cpuId) {
+          cpuIdx = static_cast<std::uint32_t>(i);
+          break;
+        }
+      }
+      if (cpuIdx == UINT32_MAX) {
+        resolveOk = false;
+        break;
+      }
+      m_scanClusterIdOfSlot[s] =
+          m_coherenceProbe.clusters.clusterIdOfCpuIndex[cpuIdx];
+    }
+    if (!resolveOk) {
+      m_scanClusterIdOfSlot.assign(participants, 0U);
+      return;
+    }
+
+    const std::uint32_t numClusters = m_coherenceProbe.clusters.numClusters;
+    m_scanClusterFirstSlot.assign(numClusters, UINT32_MAX);
+    m_scanClusterSlotCount.assign(numClusters, 0U);
+    for (std::size_t s = 0; s < participants; ++s) {
+      const auto k = m_scanClusterIdOfSlot[s];
+      if (k >= numClusters) {
+        return;
+      }
+      if (m_scanClusterFirstSlot[k] == UINT32_MAX) {
+        m_scanClusterFirstSlot[k] = static_cast<std::uint32_t>(s);
+      }
+      ++m_scanClusterSlotCount[k];
+    }
+    bool contiguous = true;
+    for (std::uint32_t k = 0; k < numClusters; ++k) {
+      if (m_scanClusterSlotCount[k] == 0U) {
+        continue;
+      }
+      const std::uint32_t first = m_scanClusterFirstSlot[k];
+      for (std::uint32_t i = 0; i < m_scanClusterSlotCount[k]; ++i) {
+        if (first + i >= participants ||
+            m_scanClusterIdOfSlot[first + i] != k) {
+          contiguous = false;
+          break;
+        }
+      }
+      if (!contiguous) {
+        break;
+      }
+    }
+    std::uint32_t nonEmpty = 0;
+    for (std::uint32_t k = 0; k < numClusters; ++k) {
+      if (m_scanClusterSlotCount[k] > 0U) {
+        ++nonEmpty;
+      }
+    }
+    const bool producerInClusterZero = m_scanClusterIdOfSlot[0] == 0U;
+    if (contiguous && nonEmpty >= 2U && producerInClusterZero) {
+      m_scanUseHierarchical = true;
+      m_scanNumClusters = numClusters;
+    }
   }
 
 public:
@@ -6095,8 +7204,9 @@ public:
   // descriptor and pushed onto a participating worker's Chase-Lev
   // work-stealing deque. Workers pop from their own deque first; on empty
   // they steal from another worker's deque, biased toward same-CCD victims
-  // when `HintsT::affinity == Affinity::CcdLocal`. The producer participates
-  // as slot 0 and joins on the outstanding-task counter reaching zero.
+  // when `HintsT::stealPolicy == StealPolicy::ClusterLocal`. The producer
+  // participates as slot 0 and joins on the outstanding-task counter reaching
+  // zero.
   //
   // Recursive children: tasks may call back into `forkJoin` from inside their
   // bodies. The nested call detects it is running on one of this pool's
@@ -6172,7 +7282,7 @@ public:
                        std::make_index_sequence<kNTasks - 1>{});
         runForkJoinTypedTailNested<HasToken>(
             deferred.data(), kNTasks - 1, std::get<kNTasks - 1>(closures),
-            std::move(tok), affinityFromHints<HintsT>(),
+            std::move(tok), stealPolicyFromHints<HintsT>(),
             static_cast<std::uint32_t>(ctx.slot));
         return;
       }
@@ -6180,7 +7290,7 @@ public:
       fillTaskBodies(closures, tasks, std::index_sequence_for<TaskFns...>{});
       ensureProducerPinnedForChunkZero();
       runForkJoinOuter<HasToken>(tasks.data(), kNTasks, std::move(tok),
-                                 affinityFromHints<HintsT>());
+                                 stealPolicyFromHints<HintsT>());
     }
   }
 
@@ -6262,7 +7372,7 @@ public:
       }
       runForkJoinTypedTailNested</*HasToken=*/false>(
           tasks, deferred, [&]() { bodyRef(n - 1U); }, CancellationToken{},
-          affinityFromHints<HintsT>(), static_cast<std::uint32_t>(ctx.slot));
+          stealPolicyFromHints<HintsT>(), static_cast<std::uint32_t>(ctx.slot));
       if (n <= kStackTaskBudget) {
         // Trivially-destructible types: no destructor calls needed.
         static_assert(std::is_trivially_destructible_v<IndexedClosure>);
@@ -6284,7 +7394,7 @@ public:
       }
     }
     runForkJoinOuter</*HasToken=*/false>(tasks, n, CancellationToken{},
-                                         affinityFromHints<HintsT>());
+                                         stealPolicyFromHints<HintsT>());
   }
 
   // Friend overload routing the `citor::forkJoin` CPO to this pool. Both
@@ -6640,6 +7750,50 @@ public:
     return self.template parallelScan<HintsT>(
         n, std::move(identity), std::forward<BodyFn>(body),
         std::forward<PrefixFn>(prefix), std::move(tok));
+  }
+
+  // Buffer-to-buffer inclusive prefix scan. Engine owns the inner loop
+  // (no user body), so it can use the most aggressive memory-traffic
+  // shape -- decoupled-lookback single-pass with `PREFETCHW` ahead of
+  // the writes, per-cluster lookback chains on multi-CCD parts -- to
+  // hit the hardware bandwidth floor.
+  //
+  // `in` and `out` are caller-owned spans of equal length; aliasing
+  // (in.data() == out.data()) is safe because the engine reads `in[i]`
+  // before writing `out[i]` for every `i`. `identity` is the monoid
+  // identity (e.g. 0 for plus). `prefix` is the associative combiner
+  // (must be associative; need not be commutative).
+  //
+  // Returns the inclusive total at the right edge:
+  // `prefix(prefix(... prefix(identity, in[0]) ...), in[n-1])`.
+  template <class HintsT, class T, class PrefixFn>
+  [[nodiscard]] T inclusiveScan(std::span<const T> in, std::span<T> out,
+                                T identity, PrefixFn &&prefix,
+                                CancellationToken tok = CancellationToken{}) {
+    return runInclusiveScanLookback<HintsT, T>(in, out, std::move(identity),
+                                               std::forward<PrefixFn>(prefix),
+                                               std::move(tok));
+  }
+
+  // Friend overload routing the `citor::inclusiveScan` CPO to this pool.
+  template <class HintsT, class T, class PrefixFn>
+  friend T tag_invoke(InclusiveScanTag /*cpo*/, ThreadPool &self,
+                      std::span<const T> in, std::span<T> out, T identity,
+                      PrefixFn &&prefix, HintsT /*hints*/,
+                      CancellationToken tok) {
+    return self.template inclusiveScan<HintsT>(in, out, std::move(identity),
+                                               std::forward<PrefixFn>(prefix),
+                                               std::move(tok));
+  }
+
+  template <class HintsT, class T, class PrefixFn>
+  friend T tag_invoke(const detail::InclusiveScanFn & /*cpo*/, ThreadPool &self,
+                      std::span<const T> in, std::span<T> out, T identity,
+                      PrefixFn &&prefix, HintsT /*hints*/,
+                      CancellationToken tok) {
+    return self.template inclusiveScan<HintsT>(in, out, std::move(identity),
+                                               std::forward<PrefixFn>(prefix),
+                                               std::move(tok));
   }
 
   // Submit |fn| for fire-and-forget execution; returns without joining.
@@ -8212,6 +9366,29 @@ private:
     std::vector<ScanSlot> partials;
     partials.resize(participants);
 
+    // Hierarchical-scan setup. The slot-to-cluster mapping, contiguity
+    // check, and `useHierarchical` flag were precomputed once at pool ctor
+    // by `initScanScratch` from pool-immutable inputs. Reading the cached
+    // fields takes the per-call topology resolution off the hot path.
+    const bool useHierarchical = m_scanUseHierarchical;
+    const std::uint32_t numClusters = m_scanNumClusters;
+    // Cluster scratch. Numbers are tiny (`numClusters <= participants` and
+    // typically <= 8) so false sharing across cluster entries is not worth
+    // padding away: the cluster-total line bounce IS the cross-cluster
+    // reduce traffic, so a few line transfers per call are intentional.
+    std::vector<T> clusterTotals;
+    std::vector<T> clusterPrefixes;
+    std::unique_ptr<std::atomic<std::uint64_t>[]> clusterDoneStamps;
+    if (useHierarchical) {
+      clusterTotals.assign(numClusters, identity);
+      clusterPrefixes.assign(numClusters, identity);
+      clusterDoneStamps =
+          std::make_unique<std::atomic<std::uint64_t>[]>(numClusters);
+      for (std::uint32_t k = 0; k < numClusters; ++k) {
+        clusterDoneStamps[k].store(0U, std::memory_order_relaxed);
+      }
+    }
+
     // Acquire the dispatch gate BEFORE touching pool-owned scratch
     // (`m_chainDoneSlots`, `m_chainEpochBase`). Concurrent producers would
     // otherwise race on the epoch advance and on the residual stamps left by a
@@ -8237,6 +9414,29 @@ private:
     state.n = n;
     state.doneSlots = slotsBase;
     state.epochBase = epochBase;
+    if (useHierarchical) {
+      state.clusterIdOfSlot = m_scanClusterIdOfSlot.data();
+      state.numClusters = numClusters;
+      state.clusterFirstSlot = m_scanClusterFirstSlot.data();
+      state.clusterSlotCount = m_scanClusterSlotCount.data();
+      state.clusterTotals = clusterTotals.data();
+      state.clusterPrefixes = clusterPrefixes.data();
+    }
+
+    // CCD-aware asymmetric chunk partitioning. The slot-to-CCD layout, the
+    // producer-CCD slot count, and the asymmetric numerator (out of 16)
+    // were precomputed once at pool ctor by `initScanScratch` from the
+    // pool-immutable inputs (`m_ccdOfSlot`, the coherence probe's
+    // `maxCrossOverIntraRatio`). The hot path reads the cached fields
+    // directly; this saves the per-call O(participants) sweep over
+    // `m_ccdOfSlot` plus the floating-point bias derivation.
+    if (m_scanSlotsOnProducerCcd > 0U &&
+        m_scanSlotsOnProducerCcd < participants) {
+      state.ccdOfSlot = m_ccdOfSlot.data();
+      state.producerCcd = m_scanProducerCcd;
+      state.slotsOnProducerCcd = m_scanSlotsOnProducerCcd;
+      state.asymmetricNum = m_scanAsymmetricNum;
+    }
 
     CancellationToken scanTok = std::move(tok);
 
@@ -8246,12 +9446,23 @@ private:
     // `inclusiveTotal` until `dispatchOne` joins.
     T inclusiveTotal{};
 
+    std::atomic<std::uint64_t> *const clusterStampsPtr =
+        clusterDoneStamps.get();
     auto bodyWrapper = [&state, &body, &prefix, &identity, &scanTok, &partials,
-                        &inclusiveTotal](std::size_t lo, std::size_t /*hi*/) {
+                        &inclusiveTotal, useHierarchical,
+                        clusterStampsPtr](std::size_t lo, std::size_t /*hi*/) {
       const auto slot = static_cast<std::uint32_t>(lo);
       const auto [slotLo, slotHi] = state.slotRange(slot);
       const std::uint64_t pass1Stamp = state.epochBase + 1U;
       const std::uint64_t pass2Stamp = state.epochBase + 2U;
+      // Worker-side failure capture: stamp the first exception slot,
+      // then arm the cancellation flag so peers short-circuit at the
+      // next pass-2 gate. Both stores are release; readers acquire-load
+      // matching atomics elsewhere in the body wrapper.
+      auto recordFailure = [&state] {
+        captureFirstException(state);
+        state.scanCancelled.store(1U, std::memory_order_release);
+      };
 
       // ----- Pass 1: compute this chunk's partial sum with `initial =
       // identity`. Output buffer is `nullptr` to signal "Pass 1,
@@ -8262,8 +9473,7 @@ private:
                          identity, static_cast<T *>(nullptr));
         partials[slot].value = std::move(partial);
       } catch (...) {
-        captureFirstException(state);
-        state.scanCancelled.store(1U, std::memory_order_release);
+        recordFailure();
         // Stamp the final epoch so the producer's exit join completes
         // regardless of pass.
         state.doneSlot(slot).done.store(pass2Stamp, std::memory_order_release);
@@ -8284,6 +9494,127 @@ private:
       // Release-store: pairs with the producer's acquire-load before computing
       // prefixes.
       state.doneSlot(slot).done.store(pass1Stamp, std::memory_order_release);
+
+      // Hierarchical per-cluster reduce path. Each cluster's leader does
+      // its own local seq-reduce over its cluster's slots; cluster
+      // leaders then exchange one cluster-total cache line each across
+      // the fabric, bounding inter-cluster line transit to one transfer
+      // per cluster pair. The producer combines the per-cluster totals
+      // into per-cluster exclusive prefixes and publishes them; each
+      // cluster leader folds its prefix into its slots' partials before
+      // Pass 2 reads them. Triggered when the pool's coherence probe
+      // found two or more contiguous clusters and the producer is in
+      // cluster 0.
+      if (useHierarchical) {
+        const std::uint32_t cluster = state.clusterIdOfSlot[slot];
+        const std::uint32_t firstSlot = state.clusterFirstSlot[cluster];
+        const std::uint32_t slotCount = state.clusterSlotCount[cluster];
+        const bool isLeader = (slot == firstSlot);
+
+        if (isLeader) {
+          // Wait for cluster's slots' Pass 1.
+          for (std::uint32_t s = firstSlot; s < firstSlot + slotCount; ++s) {
+            if (s == slot) {
+              continue;
+            }
+            while (state.doneSlot(s).done.load(std::memory_order_acquire) <
+                   pass1Stamp) {
+              detail::cpuRelax();
+            }
+          }
+          // Local seq-reduce: write per-slot intra-cluster exclusive
+          // prefixes back into `partials`, accumulate into `localAcc`.
+          T localAcc = identity;
+          try {
+            for (std::uint32_t s = firstSlot; s < firstSlot + slotCount; ++s) {
+              T t = std::move(partials[s].value);
+              partials[s].value = localAcc;
+              localAcc = prefix(std::move(localAcc), std::move(t));
+            }
+          } catch (...) {
+            recordFailure();
+          }
+          // Publish cluster total. The store on `clusterTotals[cluster]`
+          // happens-before the release on `clusterStampsPtr[cluster]`, so
+          // the producer's acquire on the same atomic synchronises the
+          // cluster total read.
+          state.clusterTotals[cluster] = std::move(localAcc);
+          clusterStampsPtr[cluster].store(1U, std::memory_order_release);
+
+          if (slot == 0U) {
+            // Producer (cluster 0 leader) waits for every other cluster
+            // total, then computes the cross-cluster exclusive prefixes.
+            for (std::uint32_t k = 1; k < state.numClusters; ++k) {
+              while (clusterStampsPtr[k].load(std::memory_order_acquire) < 1U) {
+                detail::cpuRelax();
+              }
+            }
+            T globalAcc = identity;
+            try {
+              for (std::uint32_t k = 0; k < state.numClusters; ++k) {
+                state.clusterPrefixes[k] = globalAcc;
+                globalAcc =
+                    prefix(std::move(globalAcc), state.clusterTotals[k]);
+              }
+            } catch (...) {
+              recordFailure();
+            }
+            inclusiveTotal = std::move(globalAcc);
+            // Publish prefixes globally so non-producer leaders proceed.
+            state.prefixesPublished.store(1U, std::memory_order_release);
+          } else {
+            // Non-producer cluster leader: wait for global prefix
+            // publication (the producer's release-store).
+            while (state.prefixesPublished.load(std::memory_order_acquire) ==
+                   0U) {
+              detail::cpuRelax();
+            }
+          }
+
+          // Cluster leader (every leader, including producer) combines
+          // its cluster's exclusive prefix with each slot's intra-cluster
+          // exclusive prefix to produce the per-slot global exclusive
+          // prefix that Pass 2's body will read.
+          const T cPrefix = state.clusterPrefixes[cluster];
+          try {
+            for (std::uint32_t s = firstSlot; s < firstSlot + slotCount; ++s) {
+              partials[s].value = prefix(cPrefix, std::move(partials[s].value));
+            }
+          } catch (...) {
+            recordFailure();
+          }
+          // Final per-cluster signal: cluster's slots can read their
+          // partials and run Pass 2.
+          clusterStampsPtr[cluster].store(2U, std::memory_order_release);
+        } else {
+          // Non-leader slot in this cluster: wait for the cluster's
+          // leader to combine the global prefix into our `partials[slot]`.
+          while (clusterStampsPtr[cluster].load(std::memory_order_acquire) <
+                 2U) {
+            detail::cpuRelax();
+          }
+        }
+
+        // ----- Pass 2: every slot reads `partials[slot]` (now the
+        // global exclusive prefix for this slot's chunk) and runs the
+        // body with that prefix as `initial`.
+        const bool cancelObserved =
+            state.scanCancelled.load(std::memory_order_acquire) != 0U ||
+            scanTok.stop_requested();
+        if (!cancelObserved) {
+          try {
+            T myPrefix = partials[slot].value;
+            (void)body(static_cast<std::size_t>(slot), slotLo, slotHi,
+                       std::move(myPrefix), static_cast<T *>(nullptr));
+          } catch (...) {
+            recordFailure();
+          }
+        } else if (scanTok.stop_requested()) {
+          state.scanCancelled.store(1U, std::memory_order_release);
+        }
+        state.doneSlot(slot).done.store(pass2Stamp, std::memory_order_release);
+        return;
+      }
 
       if (slot == 0U) {
         // Producer waits for every chunk's Pass-1 partial. A peer that threw
@@ -8322,8 +9653,7 @@ private:
               acc = prefix(std::move(acc), std::move(t));
             }
           } catch (...) {
-            captureFirstException(state);
-            state.scanCancelled.store(1U, std::memory_order_release);
+            recordFailure();
           }
         }
         // Publish the prefixes via release: workers' acquire-load on
@@ -8344,23 +9674,19 @@ private:
             (void)body(std::size_t{0}, slotLo, slotHi, std::move(myPrefix),
                        static_cast<T *>(nullptr));
           } catch (...) {
-            captureFirstException(state);
-            state.scanCancelled.store(1U, std::memory_order_release);
+            recordFailure();
           }
         } else if (scanTok.stop_requested()) {
           state.scanCancelled.store(1U, std::memory_order_release);
         }
         state.doneSlot(0).done.store(pass2Stamp, std::memory_order_release);
 
-        // Producer joins on every slot's Pass-2 completion.
-        for (std::uint32_t s = 1; s < state.participants; ++s) {
-          while (state.doneSlot(s).done.load(std::memory_order_acquire) <
-                 pass2Stamp) {
-            detail::cpuRelax();
-          }
-        }
-        // Stash the inclusive accumulator on the producer-owned stack slot for
-        // the caller to read after `dispatchOne` joins.
+        // Stash the inclusive accumulator now, before returning. It is
+        // captured by reference in this lambda; the caller reads it after
+        // `dispatchOneStaticLocked` returns, which already waits for every
+        // worker's mailbox to stamp the dispatch's done sentinel. That
+        // mailbox-join provides the per-slot Pass-2 rendezvous, so the
+        // producer does not need a second scan over `done` slots here.
         inclusiveTotal = std::move(acc);
       } else {
         // Background worker: spin on `prefixesPublished` until the producer
@@ -8388,8 +9714,7 @@ private:
           (void)body(static_cast<std::size_t>(slot), slotLo, slotHi,
                      std::move(myPrefix), static_cast<T *>(nullptr));
         } catch (...) {
-          captureFirstException(state);
-          state.scanCancelled.store(1U, std::memory_order_release);
+          recordFailure();
           state.doneSlot(slot).done.store(pass2Stamp,
                                           std::memory_order_release);
           return;
@@ -8425,17 +9750,302 @@ private:
     return inclusiveTotal;
   }
 
-  // Resolve the affinity field of |HintsT|, defaulting to
-  // `Affinity::CcdLocal` when the hint type does not declare one. The
-  // detection idiom keeps the `forkJoin` entry compatible with hint presets
-  // that omit the field. The fallback matches `HintsDefaults` so an absent
-  // field behaves identically to the default-constructed hint.
+  // Decoupled-lookback inclusive prefix-sum engine. Single-pass: each
+  // tile reads its slice of `in` once and writes its slice of `out`
+  // once, so the bandwidth floor is 2n bytes (read input + write
+  // output) instead of two-pass Blelloch's 3n.
+  //
+  // Per-tile state machine (Merrill-Garland 2016): every tile cycles
+  // through `Initialized -> AggregateAvailable -> PrefixAvailable`.
+  // Tile T's worker computes its local total, publishes it as
+  // `aggregate`, walks predecessors backward summing aggregates until
+  // it finds a predecessor in `PrefixAvailable`, computes its own
+  // prefix, publishes `prefix`, then runs the inclusive scan into
+  // `out[T_lo..T_hi]` with `prefix` as the seed.
+  //
+  // Cross-CCD adaptation: each tile is owned by a single worker (slot)
+  // and per-tile state lines live with the owner; the lookback chain
+  // sweeps backward across tiles, so workers on cluster N reading a
+  // predecessor tile owned by cluster M pay the cross-cluster
+  // coherence cost. With tiles sized to the runtime-probed L2/2 the
+  // chain typically terminates within a couple of hops because
+  // immediate predecessors finish their aggregate before the
+  // successor's body returns.
+  //
+  // Output prefetch: each tile issues `PREFETCHW` over its own
+  // `out[T_lo..T_hi]` slice immediately after publishing its
+  // aggregate, so the cross-cluster RFO traffic for the writes runs
+  // concurrently with the lookback walk and the local scan, hiding
+  // the inter-die fabric round-trip behind per-tile compute.
+  //
+  // Tile size: `tileBytes = max(64 KiB, l2KibPerCore * 1024 / 2)` --
+  // half the runtime-probed L2 leaves room for both the input read
+  // and the output write of a tile to be L2-resident. Falls back to
+  // 256 KiB when sysfs is absent.
+  //
+  // Returns the inclusive total at the right edge.
+  template <class HintsT, class T, class PrefixFn>
+  T runInclusiveScanLookback(std::span<const T> in, std::span<T> out,
+                             T identity, PrefixFn &&prefix,
+                             CancellationToken tok) {
+    if (in.size() != out.size()) {
+      throw std::invalid_argument(
+          "inclusiveScan: in.size() must equal out.size()");
+    }
+    const std::size_t n = in.size();
+    if (n == 0U) {
+      return identity;
+    }
+    const std::size_t participants = m_control.participants;
+
+    // Choose tile bytes from the runtime-probed L2-per-core. The tile
+    // size balances: (a) tile-local working set should fit in L2 so
+    // Pass-1's chunk-local scan stays cache-resident through the
+    // lookback wait, (b) tile count >= participants so every worker
+    // has work and the lookback chain pipelines (more tiles than
+    // workers means a slow tile doesn't stall the whole chain), (c)
+    // tile compute time should be a few microseconds so the lookback
+    // chain hops overlap with adjacent tiles' Pass-1 work.
+    //
+    // Heuristic: tile_bytes = min(l2_per_core / 4, n / participants).
+    // The L2/4 cap leaves headroom for d.in + d.out + a small cushion
+    // of locked stack frames in cache; the n/participants cap ensures
+    // there are at least `participants` tiles. Hardware-agnostic:
+    // works on any CPU that exposes index2/size in sysfs; falls back
+    // to 64 KiB when sysfs is absent.
+    // Tile sizing -- balance two competing constraints:
+    //   (a) Chain parallelism: in a single coherence cluster, the
+    //       lookback chain serializes the workers (tile T waits on
+    //       T-1's prefix). If `numTiles > participants`, some workers
+    //       grab a second tile and must then wait for the chain to
+    //       progress past the first wave, defeating parallelism. So
+    //       prefer `numTiles ~= participants_per_cluster` so each
+    //       cluster's chain length matches its worker count.
+    //   (b) L2 residency: Pass-1 writes d.out chunk-local-scan (one
+    //       cache pass) and Pass-2 in-place adds the global prefix
+    //       (second pass over the same lines). Each worker's per-tile
+    //       working set is `2 * tileBytes` (the tile's d.out lines
+    //       are read+written twice). If this exceeds L2, Pass-2's
+    //       reads spill to L3, costing bandwidth.
+    //
+    // Resolve: pick `tileBytes = clamp(perParticipantBytes, kMinTileBytes,
+    // l2KibPerCore*1024)`. The L2 cap ensures the tile's working set is
+    // L2-resident; the per-participant ratio ensures the chain length
+    // equals participant count when `n` is small enough; the
+    // `kMinTileBytes` floor avoids pathological 4-tile dispatches with
+    // huge per-tile overhead.
+    constexpr std::size_t kFallbackL2Bytes = 512U * 1024U;
+    constexpr std::size_t kMinTileBytes = 64U * 1024U;
+    const std::size_t l2Bytes =
+        m_topology.l2KibPerCore == 0U
+            ? kFallbackL2Bytes
+            : static_cast<std::size_t>(m_topology.l2KibPerCore) * 1024U;
+    const std::size_t nBytes = n * sizeof(T);
+    const std::size_t perParticipantBytes =
+        (nBytes + participants - 1U) / participants;
+    std::size_t tileBytes = perParticipantBytes;
+    if (tileBytes > l2Bytes) {
+      tileBytes = l2Bytes;
+    }
+    if (tileBytes < kMinTileBytes) {
+      tileBytes = kMinTileBytes;
+    }
+    const std::size_t tileElems = tileBytes / sizeof(T);
+    if (tileElems == 0U) {
+      // T larger than the tile budget; fall through to a serial scan.
+      T running = identity;
+      for (std::size_t i = 0; i < n; ++i) {
+        running = prefix(std::move(running), in[i]);
+        out[i] = running;
+      }
+      return running;
+    }
+    const std::size_t numTiles = (n + tileElems - 1U) / tileElems;
+    if (participants <= 1U || numTiles == 1U || shouldFallThroughCrossArena()) {
+      // Serial path: a single thread does the whole scan.
+      if (tok.stop_requested()) {
+        return identity;
+      }
+      T running = identity;
+      for (std::size_t i = 0; i < n; ++i) {
+        running = prefix(std::move(running), in[i]);
+        out[i] = running;
+      }
+      return running;
+    }
+
+    using Tile = detail::LookbackTile<T>;
+    std::vector<Tile> tiles(numTiles);
+    std::atomic<std::exception_ptr *> firstException{nullptr};
+
+    // Per-cluster tile claim counters. Each cluster's workers atomically
+    // claim tiles from their cluster's contiguous tile range. The
+    // partition is `tilesPerCluster_k = round(numTiles * slotsInCluster_k
+    // / participants)`, with the residual tile (if `numTiles %
+    // participants != 0`) assigned to the last cluster. The lookback
+    // chain runs intra-cluster except for the single hop at the
+    // cluster-0 / cluster-1 boundary, so cross-cluster cache-line
+    // transit on the chain is bounded to one line per scan.
+    const bool multiCluster = m_scanUseHierarchical && m_scanNumClusters >= 2U;
+    const std::uint32_t numClustersUsed = multiCluster ? m_scanNumClusters : 1U;
+    std::vector<std::uint64_t> clusterFirstTile(numClustersUsed, 0U);
+    std::vector<std::uint64_t> clusterLastTile(numClustersUsed, numTiles);
+    if (multiCluster) {
+      std::uint64_t cursor = 0;
+      for (std::uint32_t k = 0; k < numClustersUsed; ++k) {
+        clusterFirstTile[k] = cursor;
+        const std::uint64_t kSlots = m_scanClusterSlotCount[k];
+        std::uint64_t kTiles =
+            (numTiles * kSlots + participants - 1ULL) / participants;
+        if (k + 1U == numClustersUsed || cursor + kTiles > numTiles) {
+          kTiles = numTiles - cursor;
+        }
+        cursor += kTiles;
+        clusterLastTile[k] = cursor;
+      }
+    }
+    std::vector<std::atomic<std::uint64_t>> clusterNextTile(numClustersUsed);
+    for (std::uint32_t k = 0; k < numClustersUsed; ++k) {
+      clusterNextTile[k].store(clusterFirstTile[k], std::memory_order_relaxed);
+    }
+
+    auto claimAndRunTile = [&](std::uint32_t slot) noexcept(noexcept(
+                               prefix(std::declval<T>(), std::declval<T>()))) {
+      const std::uint32_t cluster =
+          multiCluster ? m_scanClusterIdOfSlot[slot] : 0U;
+      const std::uint64_t myLast = clusterLastTile[cluster];
+      while (true) {
+        const std::uint64_t tIdx =
+            clusterNextTile[cluster].fetch_add(1U, std::memory_order_acq_rel);
+        if (tIdx >= myLast) {
+          return;
+        }
+        if (firstException.load(std::memory_order_acquire) != nullptr) {
+          // A peer threw; mark our tile's prefix as identity and
+          // publish so successors don't deadlock on lookback.
+          tiles[tIdx].prefix = identity;
+          tiles[tIdx].flag.store(
+              static_cast<std::uint64_t>(Tile::Flag::PrefixAvailable),
+              std::memory_order_release);
+          continue;
+        }
+        try {
+          const std::size_t lo = tIdx * tileElems;
+          const std::size_t hi = (lo + tileElems > n) ? n : (lo + tileElems);
+
+          // Pass 1: read `in[lo..hi]` once, compute the chunk-local
+          // inclusive scan with prefix=identity, write directly to
+          // `out[lo..hi]`. The chunk total (= scan's last element)
+          // is also published as the tile's `aggregate`. By
+          // reusing `out` as the scratch buffer for the
+          // local-scan output we avoid a separate temp buffer's
+          // allocation and keep the data path L2-resident: Pass 2
+          // immediately re-reads the same lines from L2 and
+          // overwrites them with the global-prefix-corrected
+          // values, so total memory traffic through the cache
+          // hierarchy is `n bytes read in + n bytes written out`,
+          // matching the 2n bandwidth floor.
+          T localTotal = identity;
+          for (std::size_t i = lo; i < hi; ++i) {
+            localTotal = prefix(std::move(localTotal), in[i]);
+            out[i] = localTotal;
+          }
+
+          // Publish aggregate. Release-store on the flag pairs with
+          // a successor tile's acquire-load in `lookbackWalk`.
+          tiles[tIdx].aggregate = localTotal;
+          tiles[tIdx].flag.store(
+              static_cast<std::uint64_t>(Tile::Flag::AggregateAvailable),
+              std::memory_order_release);
+
+          // Compute exclusive prefix for this tile.
+          T myPrefix;
+          if (tIdx == 0U) {
+            myPrefix = identity;
+          } else {
+            myPrefix = detail::lookbackWalk<T>(tiles.data(),
+                                               static_cast<std::uint32_t>(tIdx),
+                                               identity, prefix);
+          }
+          tiles[tIdx].prefix = myPrefix;
+          tiles[tIdx].flag.store(
+              static_cast<std::uint64_t>(Tile::Flag::PrefixAvailable),
+              std::memory_order_release);
+
+          // Pass 2: in-place adjust the chunk-local inclusive scan
+          // we wrote in Pass 1 by adding the global prefix. The
+          // lines are warm in L1/L2 from Pass 1's write so this is
+          // an L2-bandwidth-bound read+write pass with no
+          // additional input read from `in`.
+          if (tIdx > 0U) {
+            for (std::size_t i = lo; i < hi; ++i) {
+              out[i] = prefix(myPrefix, std::move(out[i]));
+            }
+          }
+        } catch (...) {
+          auto *eptr = new std::exception_ptr(std::current_exception());
+          std::exception_ptr *expected = nullptr;
+          if (!firstException.compare_exchange_strong(
+                  expected, eptr, std::memory_order_release,
+                  std::memory_order_acquire)) {
+            delete eptr;
+          }
+          tiles[tIdx].prefix = identity;
+          tiles[tIdx].flag.store(
+              static_cast<std::uint64_t>(Tile::Flag::PrefixAvailable),
+              std::memory_order_release);
+        }
+      }
+    };
+
+    // Dispatch: every slot pulls tiles from the shared atomic counter.
+    // Producer participates as slot 0. The dispatch's existing
+    // mailbox-join handles the rendezvous after every tile is
+    // consumed.
+    auto bodyWrapper = [&claimAndRunTile](std::size_t slot,
+                                          std::size_t /*hi*/) {
+      claimAndRunTile(static_cast<std::uint32_t>(slot));
+    };
+    const FunctionRef<void(std::size_t, std::size_t)> bodyRef{bodyWrapper};
+
+    const DispatchLease lease(*this, Priority::Throughput);
+    detail::JobDescriptor desc;
+    desc.first = 0;
+    desc.last = participants;
+    desc.participants = static_cast<std::uint32_t>(participants);
+    desc.balance = Balance::StaticUniform;
+    desc.priority = Priority::Throughput;
+    desc.body = bodyRef;
+    desc.chunk = 1;
+    desc.blockCount = participants;
+    dispatchOneStaticLocked<Balance::StaticUniform>(desc);
+
+    auto *eptr = firstException.load(std::memory_order_acquire);
+    if (eptr != nullptr) [[unlikely]] {
+      const std::exception_ptr captured = *eptr;
+      delete eptr;
+      firstException.store(nullptr, std::memory_order_release);
+      std::rethrow_exception(captured);
+    }
+    if (tok.stop_requested()) {
+      return identity;
+    }
+    // Inclusive total at the right edge: combine the last tile's
+    // exclusive prefix with its own aggregate.
+    return prefix(tiles[numTiles - 1U].prefix, tiles[numTiles - 1U].aggregate);
+  }
+
+  // Resolve the steal-policy field of |HintsT|, defaulting to
+  // `StealPolicy::ClusterLocal` when the hint type does not declare one.
+  // The detection idiom keeps the `forkJoin` entry compatible with hint
+  // presets that omit the field. The fallback matches `HintsDefaults` so
+  // an absent field behaves identically to the default-constructed hint.
   template <class HintsT>
-  static constexpr Affinity affinityFromHints() noexcept {
-    if constexpr (requires { HintsT::affinity; }) {
-      return HintsT::affinity;
+  static constexpr StealPolicy stealPolicyFromHints() noexcept {
+    if constexpr (requires { HintsT::stealPolicy; }) {
+      return HintsT::stealPolicy;
     } else {
-      return Affinity::CcdLocal;
+      return StealPolicy::ClusterLocal;
     }
   }
 
@@ -8458,14 +10068,14 @@ private:
   // (if any) is rethrown after the join.
   template <bool HasToken = true>
   void runForkJoinOuter(detail::Task *tasks, std::size_t nTasks,
-                        CancellationToken tok, Affinity affinity) {
+                        CancellationToken tok, StealPolicy stealPolicy) {
     const std::size_t participants = m_control.participants;
 
     // Construct shared state on the producer's stack.
     detail::ForkJoinState state;
     state.participants = static_cast<std::uint32_t>(participants);
     state.ccdOfSlot = m_ccdOfSlot.empty() ? nullptr : m_ccdOfSlot.data();
-    state.preferSameCcd = (affinity == Affinity::CcdLocal);
+    state.preferSameCcd = (stealPolicy == StealPolicy::ClusterLocal);
     state.token = std::move(tok);
     state.pendingTasks.store(static_cast<std::int64_t>(nTasks),
                              std::memory_order_relaxed);
@@ -8565,13 +10175,13 @@ private:
   void runForkJoinTypedTailNested(
       detail::Task *deferred, std::size_t deferredCount, InlineFn &&inlineLast,
       CancellationToken tok, // NOLINT(performance-unnecessary-value-param)
-      Affinity affinity, std::uint32_t callerSlot) {
+      StealPolicy stealPolicy, std::uint32_t callerSlot) {
     const std::size_t participants = m_control.participants;
 
     detail::ForkJoinState state;
     state.participants = static_cast<std::uint32_t>(participants);
     state.ccdOfSlot = m_ccdOfSlot.empty() ? nullptr : m_ccdOfSlot.data();
-    state.preferSameCcd = (affinity == Affinity::CcdLocal);
+    state.preferSameCcd = (stealPolicy == StealPolicy::ClusterLocal);
     if constexpr (HasToken) {
       if (tok != CancellationToken{}) {
         state.token = std::move(tok);
@@ -8649,7 +10259,7 @@ private:
   // zero. The outer state's drain loop is unaffected; the inner call
   // borrows the worker for the duration of the recursive frame.
   void runForkJoinNested(detail::Task *tasks, std::size_t nTasks,
-                         CancellationToken tok, Affinity affinity,
+                         CancellationToken tok, StealPolicy stealPolicy,
                          std::uint32_t callerSlot) {
     const std::size_t participants = m_control.participants;
 
@@ -8662,7 +10272,7 @@ private:
     detail::ForkJoinState state;
     state.participants = static_cast<std::uint32_t>(participants);
     state.ccdOfSlot = m_ccdOfSlot.empty() ? nullptr : m_ccdOfSlot.data();
-    state.preferSameCcd = (affinity == Affinity::CcdLocal);
+    state.preferSameCcd = (stealPolicy == StealPolicy::ClusterLocal);
     if (tok != CancellationToken{}) {
       state.token = std::move(tok);
     }
@@ -9533,24 +11143,37 @@ private:
     }
 
     if (!lowLatencyActive && !preWakeAllDone) {
-      // Single-writer load/store on `futexWord`: under `m_dispatchMutex` the
-      // dispatching producer is the only writer, so a non-atomic load + release
-      // store is sufficient to bump the parking token. Workers acquire
-      // `generation` (not `futexWord`) for descriptor visibility; the
-      // producer's lifetime contract serializes shutdown against active
-      // dispatch.
-      const std::uint32_t nextFutex =
-          m_control.futexWord.load(std::memory_order_relaxed) + 1U;
-      m_control.futexWord.store(nextFutex, std::memory_order_release);
-      // Chain-wake-2: producer wakes only the first two parked workers; each
-      // woken worker fires futex_wake(N=2) on its post-park branch (see
-      // workerMainLoop), doubling the chain at logarithmic depth. Workers'
-      // chain costs are paid out-of-band on their own cores, so the producer's
-      // critical path is less sensitive to parked-worker count. The mechanism
-      // mirrors oneTBB's private_server::wake_some + propagate_chain_reaction.
-      // Hot path is unaffected: the pre-wake probe above short-circuits this
-      // branch when workers are already spinning.
-      (void)detail::futexWakePrivate(&m_control.futexWord, 2);
+      // Hot-cadence skip: workers' spin-then-park budget is bounded by
+      // `kSpinAfterBulkJob.maxCycles` of TSC time. If the previous dispatch
+      // on this pool published within half that budget ago, no worker can
+      // have completed its spin window and parked since then -- all of them
+      // are still in the spin loop polling their mailbox lines, and the
+      // futex syscall is a guaranteed no-op (kernel finds zero waiters).
+      // The half-budget guard keeps a margin against worst-case dispatch
+      // latency variance pushing a worker past the parking gate before
+      // this branch fires.
+      const std::uint64_t nowTsc = detail::readTsc();
+      const std::uint64_t prevTsc = m_recentDispatchTsc;
+      const std::uint64_t hotWindow =
+          detail::kSpinAfterBulkJob.maxCycles / 2ULL;
+      const bool hotCadence =
+          prevTsc != 0ULL && nowTsc > prevTsc && (nowTsc - prevTsc) < hotWindow;
+      if (!hotCadence) {
+        // Single-writer load/store on `futexWord`: under `m_dispatchMutex`
+        // the dispatching producer is the only writer, so a non-atomic load
+        // + release store is sufficient to bump the parking token. Workers
+        // acquire `generation` (not `futexWord`) for descriptor visibility;
+        // the producer's lifetime contract serializes shutdown against
+        // active dispatch.
+        const std::uint32_t nextFutex =
+            m_control.futexWord.load(std::memory_order_relaxed) + 1U;
+        m_control.futexWord.store(nextFutex, std::memory_order_release);
+        // Chain-wake-2: producer wakes only the first two parked workers;
+        // each woken worker fires futex_wake(N=2) on its post-park branch
+        // (see `workerMainLoop`), doubling the chain at logarithmic depth.
+        (void)detail::futexWakePrivate(&m_control.futexWord, 2);
+      }
+      m_recentDispatchTsc = nowTsc;
     }
 
     // Producer participates as slot 0. Install the slot-0 TLS context once for
@@ -9966,6 +11589,13 @@ private:
     }
   };
 
+  // Worker-affinity policy chosen at construction. Drives the pool ctor's
+  // `pthread_attr_setaffinity_np` mask -- single-CPU mask for `PerCpu`,
+  // CCD's full CPU set for `PerCluster`, no pin for `None`. Declared here
+  // so its initializer-list position matches the ctor's leading-field
+  // initializer.
+  Affinity m_workerAffinity = Affinity::PerCpu;
+
   // Origin tag: distinguishes user-owned pools from `PoolGroup`-owned
   // arenas.
   PoolKind m_kind = PoolKind::Standalone;
@@ -10022,6 +11652,16 @@ private:
   // dispatches.
   std::uint64_t m_chainEpochBase = 0;
 
+  // TSC of the most recent dispatch's publish window, written by
+  // `dispatchOneStaticLockedBody` under `m_dispatchMutex` (single-writer).
+  // Used as a hot-cadence predicate to skip the `futex_wake` syscall when
+  // the previous dispatch was within a worker's spin-budget ago: in that
+  // window no worker can have parked, so the kernel transit would find
+  // zero waiters. Plain integral because every mutation happens under the
+  // dispatch gate. Read by the same writer path in immediate succession,
+  // so torn-read concerns do not apply.
+  std::uint64_t m_recentDispatchTsc = 0;
+
   // Per-worker Chase-Lev work-stealing deques. One deque per participant;
   // allocated at construction time so the `forkJoin` steal probe never
   // pays an allocator round-trip on its hot path. Each deque is owner-only
@@ -10036,6 +11676,39 @@ private:
   // reads this array (not `WorkerState`) so the steal probe stays off the
   // worker's hot identity line.
   std::vector<std::uint32_t> m_ccdOfSlot;
+
+  // One-time coherence ping-pong probe result, run at pool construction on
+  // multi-CCD topologies. Primitives that benefit from CCD-aware
+  // partitioning (currently `parallelScan`) read
+  // `m_coherenceProbe.crossOverIntraRatio` to derive their cross-CCD work
+  // share without any hardware-specific constants in the engine. Default
+  // value (`valid == false`, ratio == 1.0) on single-CCD pools and on
+  // arenas owned by a `PoolGroup`.
+  detail::CoherenceProbe m_coherenceProbe;
+
+  // Pre-resolved `parallelScan` topology, computed once at pool ctor (after
+  // the coherence probe lands) from invariant pool inputs (`m_ccdOfSlot`,
+  // `m_workers[i].cpuId`, `m_coherenceProbe.matrix.cpus`,
+  // `m_coherenceProbe.clusters.clusterIdOfCpuIndex`,
+  // `m_coherenceProbe.maxCrossOverIntraRatio`). The scan path reads these
+  // fields directly instead of recomputing the slot-to-cluster mapping +
+  // contiguity check + asymmetric-bias derivation on every call.
+  //
+  // `m_scanClusterIdOfSlot[s]` is the cluster id for slot `s` (per the
+  // probe's clustering or zero when the probe is invalid).
+  // `m_scanClusterFirstSlot[k]` and `m_scanClusterSlotCount[k]` are the
+  // contiguous slot range belonging to cluster `k`; only valid when
+  // `m_scanUseHierarchical` is true. `m_scanAsymmetricNum` is the
+  // producer-CCD volume fraction (out of 16) used by `slotRange`'s
+  // asymmetric path.
+  std::vector<std::uint32_t> m_scanClusterIdOfSlot;
+  std::vector<std::uint32_t> m_scanClusterFirstSlot;
+  std::vector<std::uint32_t> m_scanClusterSlotCount;
+  std::uint32_t m_scanNumClusters = 0;
+  bool m_scanUseHierarchical = false;
+  std::uint32_t m_scanAsymmetricNum = 8;
+  std::uint32_t m_scanProducerCcd = UINT32_MAX;
+  std::uint32_t m_scanSlotsOnProducerCcd = 0;
 
   // Cached background-worker CPU ids for `bindProducerSlot`'s worker-CPU
   // exclusion logic. Populated once at construction so the producer-side

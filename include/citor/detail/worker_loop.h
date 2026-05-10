@@ -3,10 +3,7 @@
 #include <atomic>
 #include <cstdint>
 
-#if defined(__x86_64__) || defined(_M_X64)
-#include <emmintrin.h>
-#endif
-
+#include "citor/detail/cpu_relax.h"
 #include "citor/detail/dispatch_dynamic.h"
 #include "citor/detail/dispatch_static.h"
 #include "citor/detail/futex_park.h"
@@ -52,19 +49,6 @@ struct SpinPolicy {
 inline constexpr SpinPolicy kSpinAfterBulkJob{
     .maxIters = CITOR_SPIN_AFTER_BULK_JOB_MAX_ITERS,
     .maxCycles = CITOR_SPIN_AFTER_BULK_JOB_MAX_CYCLES};
-
-// Insert a single PAUSE / YIELD hint to back off without de-scheduling.
-//
-// `_mm_pause` on x86-64 is the spin-loop hint of choice (P0514R4); it lets
-// the CPU drop hyper-thread issue slots without yielding the scheduler
-// quantum. Non-x86 builds fall through to a compiler barrier.
-inline void cpuRelax() noexcept {
-#if defined(__x86_64__) || defined(_M_X64)
-  _mm_pause();
-#else
-  std::atomic_signal_fence(std::memory_order_acq_rel);
-#endif
-}
 
 // Read the current TSC for spin-budget bookkeeping. Returns 0 on platforms
 // without a TSC; the caller's loop falls through to the iteration bound.

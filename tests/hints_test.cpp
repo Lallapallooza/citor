@@ -21,6 +21,7 @@ using citor::kCacheLine;
 using citor::makeStage;
 using citor::Priority;
 using citor::Stage;
+using citor::StealPolicy;
 
 // 16-byte FunctionRef invariant (compile-time).
 static_assert(sizeof(FunctionRef<void(std::size_t, std::size_t)>) == 16,
@@ -79,7 +80,8 @@ TEST(ParallelHints,
   using HintsT = citor::HintsDefaults;
   EXPECT_EQ(HintsT::balance, Balance::DynamicChunked);
   EXPECT_EQ(HintsT::determinism, Determinism::FixedBlockOrder);
-  EXPECT_EQ(HintsT::affinity, Affinity::CcdLocal);
+  EXPECT_EQ(HintsT::affinity, Affinity::PerCluster);
+  EXPECT_EQ(HintsT::stealPolicy, StealPolicy::ClusterLocal);
   EXPECT_EQ(HintsT::priority, Priority::Throughput);
   EXPECT_TRUE(HintsT::cancellationChecks);
 }
@@ -89,7 +91,8 @@ TEST(ParallelHints, RuntimeHintsStructHasEveryDocumentedDefaultValue) {
   const Hints h{};
   EXPECT_EQ(h.balance, Balance::StaticUniform);
   EXPECT_EQ(h.determinism, Determinism::FixedBlockOrder);
-  EXPECT_EQ(h.affinity, Affinity::CcdLocal);
+  EXPECT_EQ(h.affinity, Affinity::PerCluster);
+  EXPECT_EQ(h.stealPolicy, StealPolicy::ClusterLocal);
   EXPECT_EQ(h.priority, Priority::Throughput);
   EXPECT_TRUE(h.cancellationChecks);
 }

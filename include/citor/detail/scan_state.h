@@ -141,6 +141,59 @@ struct ScanState {
   /// advance.
   std::uint64_t epochBase = 0;
 
+  /// Borrowed pointer to the pool's per-slot CCD index array.
+  ///
+  /// Set when the call enables CCD-aware asymmetric chunk partitioning;
+  /// nullptr otherwise. Used by `slotRange` to give larger chunks to slots on
+  /// the producer's CCD and smaller chunks to slots on a different CCD,
+  /// reducing the cross-CCD coherence volume on Pass-2 writes.
+  const std::uint32_t *ccdOfSlot = nullptr;
+
+  /// CCD identity of the producer (slot 0). When asymmetric partitioning is
+  /// enabled, slots whose `ccdOfSlot[s] == producerCcd` are the
+  /// "producer-CCD" slots and receive a larger share of `n`.
+  std::uint32_t producerCcd = UINT32_MAX;
+
+  /// Numerator (out of 16) of `n` allocated to the producer-CCD slot group as
+  /// a whole. The cross-CCD slot group receives `(16 - asymmetricNum) / 16`.
+  /// Used only when `ccdOfSlot != nullptr`. Shared evenly within each group.
+  /// The declarator default matches the pool's initial value so the field
+  /// stays in a consistent neutral state until the per-call setup overwrites
+  /// it.
+  std::uint32_t asymmetricNum = 8;
+
+  /// Number of slots on the producer's CCD. Precomputed by the caller to
+  /// avoid a per-`slotRange()` walk over `ccdOfSlot`.
+  std::uint32_t slotsOnProducerCcd = 0;
+
+  /// Probe-derived per-slot cluster id; `clusterIdOfSlot[s]` indexes a
+  /// `[0, numClusters)` cluster. Set when the pool's coherence probe
+  /// returns `numClusters >= 2` and the scan call opts into the
+  /// hierarchical algorithm. Nullptr when the call uses the
+  /// single-cluster reduce path.
+  const std::uint32_t *clusterIdOfSlot = nullptr;
+
+  /// Number of distinct clusters in this scan call. Zero when the
+  /// hierarchical path is disabled.
+  std::uint32_t numClusters = 0;
+
+  /// Per-cluster slot ranges precomputed by the caller. `clusterFirstSlot[c]`
+  /// is the lowest slot index in cluster `c`; `clusterSlotCount[c]` is the
+  /// count of slots in cluster `c`. The caller arranges that each cluster's
+  /// slots are contiguous in slot-index order, so cluster k's slots are
+  /// `[clusterFirstSlot[k], clusterFirstSlot[k] + clusterSlotCount[k])`.
+  /// Nullptr when the hierarchical path is disabled.
+  const std::uint32_t *clusterFirstSlot = nullptr;
+  const std::uint32_t *clusterSlotCount = nullptr;
+
+  /// Per-cluster total / exclusive prefix slots. Each lives on its own
+  /// cache line. `clusterTotals[k]` is written by cluster k's leader
+  /// after its local reduce; `clusterPrefixes[k]` is the cross-cluster
+  /// exclusive prefix the producer writes back. Both are sized
+  /// `numClusters`. Nullptr when the hierarchical path is disabled.
+  T *clusterTotals = nullptr;
+  T *clusterPrefixes = nullptr;
+
   /// Subscript a slot by index.
   ///
   /// The slot itself owns mutable atomics; the accessor is `const` because
@@ -153,23 +206,71 @@ struct ScanState {
     return doneSlots[idx];
   }
 
-  /// Compute a slot's contiguous row range over `[0, n)` using static
-  /// partitioning.
+  /// Compute a slot's contiguous row range over `[0, n)`.
   ///
-  /// The partition is `lo = (n * slot) / participants`, `hi = (n * (slot + 1))
-  /// / participants`, matching the chain / plex convention so the scan's chunk
-  /// identity is bit-stable across worker counts at fixed `n`.
+  /// Uniform mode (`ccdOfSlot == nullptr`): `lo = (n * slot) / participants`,
+  /// `hi = (n * (slot + 1)) / participants`, matching the chain / plex
+  /// convention so the scan's chunk identity is bit-stable across worker
+  /// counts at fixed `n`.
+  ///
+  /// Asymmetric mode (`ccdOfSlot != nullptr`): producer-CCD slots receive a
+  /// larger contiguous prefix of `n` (`asymmetricNum / 16`), cross-CCD slots
+  /// receive the trailing remainder. Within each group the chunks are
+  /// uniform. The producer-CCD slots take the prefix `[0, producerVolume)` so
+  /// chunk-id-order over slots is still left-to-right, preserving the
+  /// `slot=0` -> `chunk-id=0` invariant the seq-reduce relies on. Whether
+  /// this is enabled is decided per-call by `runScanParallel` based on
+  /// detected cross-CCD presence; it is opt-in to avoid regressing balanced
+  /// compute-bound bodies on single-CCD or homogeneous-CCD topologies.
   ///
   /// slot Worker slot index in `[0, participants)`.
   /// `(lo, hi)` pair denoting the slot's contiguous range over `[0, n)`.
   [[nodiscard]] std::pair<std::size_t, std::size_t>
   slotRange(std::uint32_t slot) const noexcept {
     __extension__ using u128 = unsigned __int128;
-    const std::size_t lo =
-        static_cast<std::size_t>((static_cast<u128>(n) * slot) / participants);
-    const std::size_t hi = static_cast<std::size_t>(
-        (static_cast<u128>(n) * (slot + 1U)) / participants);
-    return {lo, hi};
+    if (ccdOfSlot == nullptr) {
+      const std::size_t lo = static_cast<std::size_t>(
+          (static_cast<u128>(n) * slot) / participants);
+      const std::size_t hi = static_cast<std::size_t>(
+          (static_cast<u128>(n) * (slot + 1U)) / participants);
+      return {lo, hi};
+    }
+    // Producer-CCD slot group covers the prefix `[0, producerVolume)`;
+    // cross-CCD group covers `[producerVolume, n)`.
+    const std::size_t producerVolume =
+        static_cast<std::size_t>((static_cast<u128>(n) * asymmetricNum) / 16U);
+    const std::uint32_t numProducer = slotsOnProducerCcd;
+    const std::uint32_t numCross = participants - slotsOnProducerCcd;
+    // Index of `slot` within its CCD group (0-based, in slot-index order).
+    std::uint32_t indexInGroup = 0;
+    const bool isProducerCcd = (ccdOfSlot[slot] == producerCcd);
+    for (std::uint32_t s = 0; s < slot; ++s) {
+      if ((ccdOfSlot[s] == producerCcd) == isProducerCcd) {
+        ++indexInGroup;
+      }
+    }
+    if (isProducerCcd && numProducer > 0U) {
+      const std::size_t lo = static_cast<std::size_t>(
+          (static_cast<u128>(producerVolume) * indexInGroup) / numProducer);
+      const std::size_t hi = static_cast<std::size_t>(
+          (static_cast<u128>(producerVolume) * (indexInGroup + 1U)) /
+          numProducer);
+      return {lo, hi};
+    }
+    if (numCross > 0U) {
+      const std::size_t crossVolume = n - producerVolume;
+      const std::size_t lo =
+          producerVolume +
+          static_cast<std::size_t>(
+              (static_cast<u128>(crossVolume) * indexInGroup) / numCross);
+      const std::size_t hi =
+          producerVolume +
+          static_cast<std::size_t>(
+              (static_cast<u128>(crossVolume) * (indexInGroup + 1U)) /
+              numCross);
+      return {lo, hi};
+    }
+    return {0U, 0U};
   }
 };
 

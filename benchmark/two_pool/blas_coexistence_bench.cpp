@@ -57,7 +57,8 @@ namespace {
 /// conservative: the bench never wants the primary call to silently degrade
 /// into producer-only inline execution.
 struct PrimaryForHints : citor::HintsDefaults {
-  static constexpr citor::Affinity affinity = citor::Affinity::CcdLocal;
+  static constexpr citor::StealPolicy stealPolicy =
+      citor::StealPolicy::ClusterLocal;
   static constexpr bool cancellationChecks = false;
 };
 

@@ -123,7 +123,8 @@ struct AlwaysFalse : std::false_type {};
 ///        primitive's `HintsT` template parameter has no default, so the
 ///        helper templates need a concrete type.
 struct DefaultRecursiveSpawnHints {
-  static constexpr ::citor::Affinity affinity = ::citor::Affinity::CcdLocal;
+  static constexpr ::citor::StealPolicy stealPolicy =
+      ::citor::StealPolicy::ClusterLocal;
 };
 
 /// Recursively spawn |body| twice and wait for both children.
