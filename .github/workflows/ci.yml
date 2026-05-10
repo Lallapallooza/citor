@@ -13,6 +13,7 @@ concurrency:
 jobs:
   build-and-test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -31,17 +32,23 @@ jobs:
             sudo apt-get install -y clang-18 clang-tidy-18 lld-18 ninja-build
             echo "CC=clang-18"  >> "$GITHUB_ENV"
             echo "CXX=clang++-18" >> "$GITHUB_ENV"
+            # The clang-18 cell runs clang-tidy as part of the build via
+            # `CMAKE_CXX_CLANG_TIDY`; one configure+build covers both. The
+            # gcc-14 cell skips tidy because tidy is compiler-agnostic and
+            # a second run would not surface new diagnostics.
+            echo "CITOR_CMAKE_EXTRA=-DCITOR_ENABLE_CLANG_TIDY=ON" >> "$GITHUB_ENV"
           else
             sudo apt-get install -y gcc-14 g++-14 ninja-build
             echo "CC=gcc-14"  >> "$GITHUB_ENV"
             echo "CXX=g++-14" >> "$GITHUB_ENV"
+            echo "CITOR_CMAKE_EXTRA=" >> "$GITHUB_ENV"
           fi
 
       - name: CPM source cache
         uses: actions/cache@v4
         with:
           path: ~/.cache/CPM
-          key: cpm-${{ runner.os }}-${{ hashFiles('cmake/CPM.cmake', '**/CMakeLists.txt') }}
+          key: cpm-${{ runner.os }}-${{ hashFiles('cmake/CPM.cmake', 'cmake/GTestDep.cmake') }}
           restore-keys: |
             cpm-${{ runner.os }}-
 
@@ -58,16 +65,125 @@ jobs:
           cmake -S . -B build -G Ninja \
             -DCITOR_BUILD_BENCHMARK=OFF \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            $CITOR_CMAKE_EXTRA
 
       - name: Build
         run: cmake --build build -j
 
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build --output-on-failure -j
+
+  asan-ubsan:
+    name: asan+ubsan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CC: clang-18
+      CXX: clang++-18
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18 ninja-build llvm-18
+
+      - name: CPM source cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/CPM
+          key: cpm-${{ runner.os }}-${{ hashFiles('cmake/CPM.cmake', 'cmake/GTestDep.cmake') }}
+          restore-keys: |
+            cpm-${{ runner.os }}-
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: asan-ubsan-ci
+          max-size: 500M
+
+      - name: Configure
+        env:
+          CPM_SOURCE_CACHE: ${{ github.workspace }}/.cache/CPM
+        # `RelWithDebInfo` keeps DWARF for sanitizer stack frames while
+        # leaving optimisation on. `-fno-sanitize-recover=all` makes every
+        # finding fail the test rather than printing and continuing.
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCITOR_BUILD_BENCHMARK=OFF \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Test
+        env:
+          # `detect_leaks=0` because the lazily-initialised `PoolGroup` arenas
+          # outlive `main()` on purpose; LSan flags them as leaked otherwise.
+          ASAN_OPTIONS: "halt_on_error=1:abort_on_error=0:detect_leaks=0"
+          UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
+        run: ctest --test-dir build --output-on-failure -j
+
+  tsan-smoke:
+    name: tsan (smoke)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CC: clang-18
+      CXX: clang++-18
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18 ninja-build llvm-18
+
+      - name: CPM source cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/CPM
+          key: cpm-${{ runner.os }}-${{ hashFiles('cmake/CPM.cmake', 'cmake/GTestDep.cmake') }}
+          restore-keys: |
+            cpm-${{ runner.os }}-
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: tsan-ci
+          max-size: 500M
+
+      - name: Configure
+        env:
+          CPM_SOURCE_CACHE: ${{ github.workspace }}/.cache/CPM
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCITOR_BUILD_BENCHMARK=OFF \
+            -DCITOR_BUILD_WITH_SANITIZER=ON \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Build
+        run: cmake --build build -j
+
+      # Curated subset that exercises the pool's concurrency surfaces under
+      # TSan without picking up the long-running stress, fuzz, and
+      # cross-run-determinism tests whose worst-case slowdown under TSan
+      # exceeds the per-test timeout.
+      - name: Test
+        run: |
+          ctest --test-dir build --output-on-failure -j \
+            -R '(parallel_for_cpo|parallel_for_partition|parallel_for_tsan|parallel_reduce_cpo|parallel_chain_basic|parallel_chain_cpo|inclusive_scan_cpo|fork_join_spawn_sync|run_plex_cpo|submit_detached_dispatch|cancellation_token)_test$'
 
   pre-commit:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -77,7 +193,8 @@ jobs:
 
   version-sync:
     runs-on: ubuntu-24.04
-    needs: [build-and-test, pre-commit, clang-tidy]
+    timeout-minutes: 5
+    needs: [build-and-test, pre-commit]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -94,37 +211,3 @@ jobs:
           # does not match the project version. `--yes` skips the interactive
           # tag-confirmation prompt that fails with EOFError on CI runners.
           cz bump --files-only --dry-run --increment PATCH --yes
-
-  clang-tidy:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install clang-18 + clang-tidy-18
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang-18 clang-tidy-18 lld-18 ninja-build
-          echo "CC=clang-18"  >> "$GITHUB_ENV"
-          echo "CXX=clang++-18" >> "$GITHUB_ENV"
-      - name: CPM source cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/CPM
-          key: cpm-${{ runner.os }}-${{ hashFiles('cmake/CPM.cmake', '**/CMakeLists.txt') }}
-          restore-keys: |
-            cpm-${{ runner.os }}-
-      - name: ccache
-        uses: hendrikmuhs/ccache-action@v1.2
-        with:
-          key: clang-tidy-ci
-          max-size: 500M
-      - name: Configure with CITOR_ENABLE_CLANG_TIDY=ON
-        env:
-          CPM_SOURCE_CACHE: ${{ github.workspace }}/.cache/CPM
-        run: |
-          cmake -S . -B build -G Ninja \
-            -DCITOR_BUILD_BENCHMARK=OFF \
-            -DCITOR_ENABLE_CLANG_TIDY=ON \
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-      - name: Build (clang-tidy runs per TU)
-        run: cmake --build build -j
