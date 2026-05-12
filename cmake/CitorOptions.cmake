@@ -6,11 +6,20 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 endif()
 
 option(CITOR_BUILD_TESTS "Build the GTest suite" ${CITOR_IS_TOP_LEVEL})
+
+# The comparative bench fetches peer pools (oneTBB, Taskflow, Eigen, ...)
+# that are wired only for Linux toolchains. Default the toggle off on
+# Windows so a default configure does not pull deps that will not build.
+set(_citor_bench_default ${CITOR_IS_TOP_LEVEL})
+if(WIN32)
+    set(_citor_bench_default OFF)
+endif()
 option(
     CITOR_BUILD_BENCHMARK
     "Build the comparative bench"
-    ${CITOR_IS_TOP_LEVEL}
+    ${_citor_bench_default}
 )
+unset(_citor_bench_default)
 option(CITOR_BUILD_WITH_SANITIZER "Compile and link with -fsanitize=thread" OFF)
 option(CITOR_USE_AVX2 "Add -mavx2 -mfma to the public INTERFACE target" ON)
 option(
