@@ -12,9 +12,76 @@
 #ifdef __linux__
 #include <pthread.h>
 #include <sched.h>
+#elif defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
 #endif
 
 namespace citor::detail {
+
+#if defined(_WIN32)
+
+/// Walk every `SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX` record for
+/// `rel` and pass each to `f`. Returns `true` only when the entire
+/// buffer was walked. Centralises the probe-size / allocate / fetch /
+/// variable-stride scan that `RelationProcessorCore` and `RelationCache` share.
+template <class F>
+inline bool walkLogicalProcessorInfoEx(LOGICAL_PROCESSOR_RELATIONSHIP rel,
+                                       F &&f) {
+  DWORD length = 0;
+  // First call is expected to fail with ERROR_INSUFFICIENT_BUFFER and set the
+  // required size in `length`. Any other failure shape (rel not supported,
+  // truncated query) means we cannot probe topology and the caller should fall
+  // back.
+  if (::GetLogicalProcessorInformationEx(rel, nullptr, &length) != FALSE) {
+    return false;
+  }
+  if (::GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+    return false;
+  }
+  std::vector<unsigned char> buffer(length);
+  if (::GetLogicalProcessorInformationEx(
+          rel,
+          reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(
+              buffer.data()),
+          &length) == FALSE) {
+    return false;
+  }
+  unsigned char *p = buffer.data();
+  unsigned char *const end = p + length;
+  while (p < end) {
+    auto *info = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(p);
+    if (info->Size == 0U || p + info->Size > end) {
+      return false;
+    }
+    f(*info);
+    p += info->Size;
+  }
+  return true;
+}
+
+/// Lift a `GROUP_AFFINITY` into the flat logical-CPU-id space. Single
+/// processor group only; multi-group hosts (>64 logical CPUs) require
+/// `SetThreadGroupAffinity`, which the pool does not yet emit.
+inline std::vector<std::uint32_t>
+expandGroupAffinity(const GROUP_AFFINITY &ga) {
+  std::vector<std::uint32_t> result;
+  KAFFINITY mask = ga.Mask;
+  const std::uint32_t base = static_cast<std::uint32_t>(ga.Group) * 64U;
+  for (std::uint32_t bit = 0; mask != 0U; ++bit, mask >>= 1) {
+    if ((mask & 1U) != 0U) {
+      result.push_back(base + bit);
+    }
+  }
+  return result;
+}
+
+#endif // _WIN32
 
 /// Logical view of the host's CPU topology used for affinity decisions.
 ///
@@ -156,6 +223,212 @@ inline std::vector<std::uint32_t> readCpuList(const std::string &path) {
   return result;
 }
 
+#if defined(_WIN32)
+/// Windows-side topology probe. Uses `GetLogicalProcessorInformationEx` for
+/// SMT-sibling discovery (`RelationProcessorCore`), shared-L3 groups
+/// (`RelationCache` filtered to `Level == 3`), and cache sizes; uses
+/// `GetProcessAffinityMask` for the allowed-CPU set. Falls back to a single
+/// synthetic CCD covering every allowed CPU when the OS rejects the query
+/// (e.g. inside a container that masked off the API).
+inline Topology detectTopologyWindows() {
+  Topology topo;
+  topo.logicalCount = std::thread::hardware_concurrency();
+  if (topo.logicalCount == 0U) {
+    topo.logicalCount = 1U;
+  }
+  topo.ccdOfCpu.assign(topo.logicalCount, 0U);
+
+  std::vector<std::uint32_t> allowed;
+  allowed.reserve(topo.logicalCount);
+  {
+    DWORD_PTR procMask = 0;
+    DWORD_PTR sysMask = 0;
+    if (::GetProcessAffinityMask(::GetCurrentProcess(), &procMask, &sysMask) !=
+        FALSE) {
+      const std::uint32_t bits =
+          static_cast<std::uint32_t>(sizeof(DWORD_PTR) * 8U);
+      const std::uint32_t scanLimit =
+          topo.logicalCount < bits ? topo.logicalCount : bits;
+      for (std::uint32_t cpu = 0; cpu < scanLimit; ++cpu) {
+        if ((procMask & (static_cast<DWORD_PTR>(1) << cpu)) != 0U) {
+          allowed.push_back(cpu);
+        }
+      }
+    }
+  }
+  if (allowed.empty()) {
+    allowed.reserve(topo.logicalCount);
+    for (std::uint32_t cpu = 0; cpu < topo.logicalCount; ++cpu) {
+      allowed.push_back(cpu);
+    }
+  }
+
+  // Build a CPU -> SMT-sibling list and pick one CPU per physical core.
+  // `RelationProcessorCore` records have `GroupMask[0].Mask` set to the
+  // logical-CPU bitset of the physical core's siblings.
+  std::vector<std::vector<std::uint32_t>> smtSiblings(topo.logicalCount);
+  (void)walkLogicalProcessorInfoEx(
+      RelationProcessorCore,
+      [&](const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX &info) {
+        if (info.Relationship != RelationProcessorCore) {
+          return;
+        }
+        const auto &core = info.Processor;
+        if (core.GroupCount == 0U) {
+          return;
+        }
+        const std::vector<std::uint32_t> cpus =
+            expandGroupAffinity(core.GroupMask[0]);
+        for (const std::uint32_t cpu : cpus) {
+          if (cpu < smtSiblings.size()) {
+            smtSiblings[cpu] = cpus;
+          }
+        }
+      });
+
+  std::vector<bool> consumed(topo.logicalCount, false);
+  for (const std::uint32_t cpu : allowed) {
+    if (cpu >= consumed.size() || consumed[cpu]) {
+      continue;
+    }
+    consumed[cpu] = true;
+    topo.physicalCores.push_back(cpu);
+    if (cpu < smtSiblings.size()) {
+      for (const std::uint32_t sib : smtSiblings[cpu]) {
+        if (sib < consumed.size()) {
+          consumed[sib] = true;
+        }
+      }
+    }
+  }
+  if (topo.physicalCores.empty()) {
+    topo.physicalCores = allowed;
+  }
+  topo.physicalCount = static_cast<std::uint32_t>(topo.physicalCores.size());
+
+  // Per-CPU L3 shared-CPU list + L3 size from `RelationCache` filtered to
+  // `Level == 3`. Per-core L2 sampled the same way at `Level == 2`. Caches
+  // whose `GroupCount > 1` (split across processor groups) are skipped;
+  // pools spanning multiple groups would need `SetThreadGroupAffinity`.
+  std::vector<std::vector<std::uint32_t>> l3SharedByCpu(topo.logicalCount);
+  std::vector<std::uint64_t> l3SizeKibByCpu(topo.logicalCount, 0U);
+  std::vector<std::uint64_t> l2SizeKibByCpu(topo.logicalCount, 0U);
+  (void)walkLogicalProcessorInfoEx(
+      RelationCache, [&](const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX &info) {
+        if (info.Relationship != RelationCache) {
+          return;
+        }
+        const auto &cache = info.Cache;
+        if (cache.Level != 2 && cache.Level != 3) {
+          return;
+        }
+        if (cache.GroupCount == 0U) {
+          return;
+        }
+        const std::vector<std::uint32_t> cpus =
+            expandGroupAffinity(cache.GroupMasks[0]);
+        const std::uint64_t sizeKib =
+            static_cast<std::uint64_t>(cache.CacheSize) / 1024U;
+        if (cache.Level == 3) {
+          for (const std::uint32_t cpu : cpus) {
+            if (cpu < l3SharedByCpu.size()) {
+              l3SharedByCpu[cpu] = cpus;
+              l3SizeKibByCpu[cpu] = sizeKib;
+            }
+          }
+        } else { // Level == 2
+          for (const std::uint32_t cpu : cpus) {
+            if (cpu < l2SizeKibByCpu.size()) {
+              l2SizeKibByCpu[cpu] = sizeKib;
+            }
+          }
+        }
+      });
+
+  // Group physical cores by shared L3.
+  std::vector<bool> assigned(topo.logicalCount, false);
+  for (const std::uint32_t cpu : topo.physicalCores) {
+    if (cpu < assigned.size() && assigned[cpu]) {
+      continue;
+    }
+    std::vector<std::uint32_t> shared = cpu < l3SharedByCpu.size()
+                                            ? l3SharedByCpu[cpu]
+                                            : std::vector<std::uint32_t>{};
+    if (shared.empty()) {
+      shared.push_back(cpu);
+    }
+    std::vector<std::uint32_t> physicalInGroup;
+    physicalInGroup.reserve(shared.size());
+    for (const std::uint32_t sharedCpu : shared) {
+      const auto it = std::find(topo.physicalCores.begin(),
+                                topo.physicalCores.end(), sharedCpu);
+      if (it != topo.physicalCores.end()) {
+        physicalInGroup.push_back(sharedCpu);
+        if (sharedCpu < assigned.size()) {
+          assigned[sharedCpu] = true;
+        }
+      }
+    }
+    if (physicalInGroup.empty()) {
+      physicalInGroup.push_back(cpu);
+      if (cpu < assigned.size()) {
+        assigned[cpu] = true;
+      }
+    }
+    const auto ccdIndex = static_cast<std::uint32_t>(topo.ccdGroups.size());
+    for (const std::uint32_t physCpu : physicalInGroup) {
+      if (physCpu < topo.ccdOfCpu.size()) {
+        topo.ccdOfCpu[physCpu] = ccdIndex;
+      }
+    }
+    topo.ccdGroups.push_back(std::move(physicalInGroup));
+  }
+  topo.ccdCount = static_cast<std::uint32_t>(topo.ccdGroups.size());
+
+  // Per-CCD L3 size from the per-CPU map.
+  topo.l3KibOfCcd.assign(topo.ccdGroups.size(), 0U);
+  for (std::size_t ccd = 0; ccd < topo.ccdGroups.size(); ++ccd) {
+    if (topo.ccdGroups[ccd].empty()) {
+      continue;
+    }
+    const std::uint32_t rep = topo.ccdGroups[ccd].front();
+    if (rep < l3SizeKibByCpu.size()) {
+      topo.l3KibOfCcd[ccd] = l3SizeKibByCpu[rep];
+    }
+  }
+  if (!topo.physicalCores.empty()) {
+    const std::uint32_t first = topo.physicalCores.front();
+    if (first < l2SizeKibByCpu.size()) {
+      topo.l2KibPerCore = l2SizeKibByCpu[first];
+    }
+  }
+  std::uint64_t bestKib = 0U;
+  std::uint32_t bestIdx = 0;
+  for (std::size_t ccd = 0; ccd < topo.l3KibOfCcd.size(); ++ccd) {
+    if (topo.l3KibOfCcd[ccd] > bestKib) {
+      bestKib = topo.l3KibOfCcd[ccd];
+      bestIdx = static_cast<std::uint32_t>(ccd);
+    }
+  }
+  topo.preferredCcd = bestIdx;
+
+  // Mirror the Linux reorder so each CCD's members appear in descending CPU
+  // id order; `reserveProducerCpuFirst` rotates the producer to the front
+  // later.
+  std::vector<std::uint32_t> reordered;
+  reordered.reserve(topo.physicalCores.size());
+  for (const auto &group : topo.ccdGroups) {
+    for (std::size_t i = group.size(); i > 0U; --i) {
+      reordered.push_back(group[i - 1U]);
+    }
+  }
+  if (reordered.size() == topo.physicalCores.size()) {
+    topo.physicalCores = std::move(reordered);
+  }
+  return topo;
+}
+#endif // _WIN32
+
 /// Probe the host's CPU topology via sysfs and the process affinity mask.
 ///
 /// The detection sequence:
@@ -173,6 +446,9 @@ inline std::vector<std::uint32_t> readCpuList(const std::string &path) {
 ///
 /// Populated `Topology`; never throws even if sysfs is unavailable.
 inline Topology detectTopology() {
+#if defined(_WIN32)
+  return detectTopologyWindows();
+#else
   Topology topo;
   topo.logicalCount = std::thread::hardware_concurrency();
   if (topo.logicalCount == 0) {
@@ -337,6 +613,7 @@ inline Topology detectTopology() {
     topo.physicalCores = std::move(reordered);
   }
   return topo;
+#endif // _WIN32
 }
 
 /// Enumerate the CPU ids belonging to each CCD (or shared-L3 cluster).
@@ -397,6 +674,13 @@ inline void bindAffinityOnce(std::uint32_t cpuId) noexcept {
   CPU_ZERO(&set);
   CPU_SET(static_cast<std::size_t>(cpuId), &set);
   (void)pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+#elif defined(_WIN32)
+  // Single-CPU mask within the current processor group. Hosts with >64
+  // logical CPUs would need `SetThreadGroupAffinity`; pools that large are
+  // out of the supported envelope. Failure (e.g. CPU outside the process
+  // affinity mask) is intentionally non-fatal.
+  const DWORD_PTR mask = static_cast<DWORD_PTR>(1) << (cpuId & 63U);
+  (void)::SetThreadAffinityMask(::GetCurrentThread(), mask);
 #else
   (void)cpuId;
 #endif
