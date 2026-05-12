@@ -14,6 +14,14 @@
 #ifdef __linux__
 #include <pthread.h>
 #include <sched.h>
+#elif defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
 #endif
 
 #include "citor/detail/cpu_relax.h"
@@ -95,15 +103,25 @@ struct CoherenceProbe {
 /// Pins the calling thread to `|cpu|` for the duration of one probe round.
 /// Failures from `pthread_setaffinity_np` are ignored; the probe degrades
 /// to whatever scheduling the kernel chooses.
-[[gnu::always_inline]] inline void coherenceProbePin(int cpu) noexcept {
+inline void coherenceProbePin(int cpu) noexcept {
   cpu_set_t set;
   CPU_ZERO(&set);
   CPU_SET(static_cast<std::size_t>(cpu), &set);
   (void)pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
 }
+#elif defined(_WIN32)
+/// Windows peer: pin `|cpu|` via `SetThreadAffinityMask`. Failures
+/// degrade the probe to whatever scheduling Windows chooses. Single
+/// processor group only (64 logical CPUs).
+inline void coherenceProbePin(int cpu) noexcept {
+  const DWORD_PTR mask = static_cast<DWORD_PTR>(1)
+                         << (static_cast<std::uint32_t>(cpu) & 63U);
+  (void)::SetThreadAffinityMask(::GetCurrentThread(), mask);
+}
 #else
-/// No-op fallback on non-Linux platforms; the probe runs unpinned.
-[[gnu::always_inline]] inline void coherenceProbePin(int /*cpu*/) noexcept {}
+/// No-op fallback on platforms with no first-class affinity API; the
+/// probe runs unpinned.
+inline void coherenceProbePin(int /*cpu*/) noexcept {}
 #endif
 
 /// Single-pair atomic-CAS ping-pong. Pins one helper thread to `cpuB`,
@@ -125,6 +143,13 @@ inline double pingPongLatencyNs(int cpuA, int cpuB,
   CPU_ZERO(&savedSet);
   const bool savedOk =
       pthread_getaffinity_np(pthread_self(), sizeof(savedSet), &savedSet) == 0;
+#elif defined(_WIN32)
+  // Windows has no read-only affinity accessor; round-trip
+  // `SetThreadAffinityMask(thread, ~0)` to capture the caller's mask.
+  // The brief all-CPUs window is closed by the next pin call.
+  const DWORD_PTR savedSet = ::SetThreadAffinityMask(
+      ::GetCurrentThread(), static_cast<DWORD_PTR>(~DWORD_PTR{0}));
+  const bool savedOk = (savedSet != 0U);
 #endif
 
   std::thread helper([&, cpuB] {
@@ -177,6 +202,10 @@ inline double pingPongLatencyNs(int cpuA, int cpuB,
 #ifdef __linux__
   if (savedOk) {
     (void)pthread_setaffinity_np(pthread_self(), sizeof(savedSet), &savedSet);
+  }
+#elif defined(_WIN32)
+  if (savedOk) {
+    (void)::SetThreadAffinityMask(::GetCurrentThread(), savedSet);
   }
 #endif
 
@@ -249,6 +278,12 @@ probeLatencyMatrix(const std::vector<std::uint32_t> &cpus,
   CPU_ZERO(&savedSet);
   const bool savedOk =
       pthread_getaffinity_np(pthread_self(), sizeof(savedSet), &savedSet) == 0;
+#elif defined(_WIN32)
+  // See `pingPongLatencyNs` for the all-CPUs round-trip used to capture
+  // the caller's affinity on Windows.
+  const DWORD_PTR savedSet = ::SetThreadAffinityMask(
+      ::GetCurrentThread(), static_cast<DWORD_PTR>(~DWORD_PTR{0}));
+  const bool savedOk = (savedSet != 0U);
 #endif
 
   const auto schedule = roundRobinPairs(n);
@@ -281,6 +316,10 @@ probeLatencyMatrix(const std::vector<std::uint32_t> &cpus,
 #ifdef __linux__
   if (savedOk) {
     (void)pthread_setaffinity_np(pthread_self(), sizeof(savedSet), &savedSet);
+  }
+#elif defined(_WIN32)
+  if (savedOk) {
+    (void)::SetThreadAffinityMask(::GetCurrentThread(), savedSet);
   }
 #endif
 
