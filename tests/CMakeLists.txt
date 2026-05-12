@@ -100,6 +100,22 @@ if(CITOR_BUILD_WITH_SANITIZER)
     list(APPEND _citor_test_extra_sources tsan_default_options.cpp)
 endif()
 
+# Linux-only tests: they probe sysfs / sched_getaffinity, drive
+# pthread_getaffinity_np against the pool's auto-pin, or fork() through
+# test_support_subprocess.h. Exclude on platforms without those interfaces
+# so the Windows build can still compile + run the remaining suite.
+set(_citor_tests_linux_only
+    regression_auto_pin_test
+    regression_cross_pool_dispatch_test
+    regression_detached_lifecycle_test
+    thread_pool_auto_pin_test
+    thread_pool_construction_test
+    thread_pool_idle_test
+)
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    list(REMOVE_ITEM _citor_tests ${_citor_tests_linux_only})
+endif()
+
 foreach(_t IN LISTS _citor_tests)
     add_executable(${_t} ${_t}.cpp ${_citor_test_extra_sources})
     target_link_libraries(${_t} PRIVATE citor::citor GTest::gtest_main)
