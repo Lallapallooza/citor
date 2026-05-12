@@ -3,6 +3,10 @@
 #include <atomic>
 #include <cstdint>
 
+#if defined(_M_X64) && defined(_MSC_VER)
+#include <intrin.h>
+#endif
+
 #include "citor/detail/cpu_relax.h"
 #include "citor/detail/dispatch_dynamic.h"
 #include "citor/detail/dispatch_static.h"
@@ -52,7 +56,11 @@ inline constexpr SpinPolicy kSpinAfterBulkJob{
 inline std::uint64_t readTsc() noexcept {
 #if defined(__x86_64__) || defined(_M_X64)
   unsigned int aux = 0;
+#if defined(_M_X64) && defined(_MSC_VER)
+  return __rdtscp(&aux);
+#else
   return __builtin_ia32_rdtscp(&aux);
+#endif
 #else
   return 0ULL;
 #endif

@@ -2,7 +2,7 @@
 //
 // citor -- header-only C++20 thread pool
 // version: 0.1.0
-// commit:  3b6ea2d9c23aa5d1a0ec006eef454dda27dab2e7
+// commit:  1221b56bcfe73da189c21ca05eea1f8da41f05a8
 // generated: 2026-05-17
 //
 // GENERATED FILE -- DO NOT EDIT.
@@ -5648,6 +5648,9 @@ template <class FOp>
 // ===== citor/detail/worker_loop.h =====
 
 
+#if defined(_M_X64) && defined(_MSC_VER)
+#endif
+
 
 namespace citor::detail {
 
@@ -5689,7 +5692,11 @@ inline constexpr SpinPolicy kSpinAfterBulkJob{
 inline std::uint64_t readTsc() noexcept {
 #if defined(__x86_64__) || defined(_M_X64)
   unsigned int aux = 0;
+#if defined(_M_X64) && defined(_MSC_VER)
+  return __rdtscp(&aux);
+#else
   return __builtin_ia32_rdtscp(&aux);
+#endif
 #else
   return 0ULL;
 #endif
@@ -6446,7 +6453,9 @@ private:
     if (effective <= 1) {
       return;
     }
+#ifdef __linux__
     m_workerThreads.resize(effective - 1);
+#endif
     m_workerSpawnArgs.reserve(effective - 1);
     for (std::size_t i = 1; i < effective; ++i) {
       auto &arg = m_workerSpawnArgs.emplace_back();
@@ -8549,10 +8558,14 @@ private:
 
 #ifndef __linux__
   /// `std::thread` entry used by the non-Linux fallback path; mirrors
-  /// `workerEntry`.
+  /// `workerEntry`. Pins the worker to its slot's reserved CPU when one is
+  /// recorded (Windows path resolves real CPU ids via `detectTopology`).
   static void workerEntryStdThread(ThreadPool *self,
                                    std::size_t workerIndex) noexcept {
     auto &state = *(self->m_workers.get() + workerIndex);
+    if (state.cpuId != UINT32_MAX) {
+      detail::bindAffinityOnce(state.cpuId);
+    }
     auto &ctx = tlsContext();
     ctx.slot = workerIndex;
     ctx.insidePoolWorker = true;
@@ -11146,8 +11159,9 @@ private:
   /// `1 / 2^32` per bucket, irrelevant for victim selection. |n| must be
   /// non-zero.
   static std::uint32_t fastRange32(std::uint64_t x, std::uint32_t n) noexcept {
-    __extension__ using u128 = unsigned __int128;
-    return static_cast<std::uint32_t>((static_cast<u128>(x >> 32) * n) >> 32);
+    // `(x >> 32)` fits in 32 bits and `n` is 32 bits, so the product fits in
+    // 64 bits exactly; no 128-bit intermediate needed.
+    return static_cast<std::uint32_t>(((x >> 32) * n) >> 32);
   }
 
   /// Common job-publish/join helper used by the reduce paths. Builds a
@@ -11653,7 +11667,7 @@ private:
         if (m_coldStampedMask != 0U) [[unlikely]] {
           std::uint64_t scan = m_coldStampedMask;
           while (scan != 0U) {
-            const auto bit = static_cast<unsigned>(__builtin_ctzll(scan));
+            const auto bit = static_cast<unsigned>(detail::ctzll(scan));
             scan &= scan - 1U;
             auto *w = workersBaseForPublish + bit;
             while ((w->mailbox.load(std::memory_order_acquire) &
@@ -11704,7 +11718,7 @@ private:
       for (std::uint32_t r = 0; r < kPreWakeProbeRounds; ++r) {
         std::uint64_t scan = pendingProbe;
         while (scan != 0U) {
-          const auto bit = static_cast<unsigned>(__builtin_ctzll(scan));
+          const auto bit = static_cast<unsigned>(detail::ctzll(scan));
           scan &= scan - 1U;
           if (((workersBase + bit)->mailbox.load(std::memory_order_acquire) &
                ~detail::PoolControl::kAckedBit) == doneSentinel) {
@@ -11843,7 +11857,7 @@ private:
         }
         std::uint64_t scan = pending;
         while (scan != 0U) {
-          const auto bit = static_cast<unsigned>(__builtin_ctzll(scan));
+          const auto bit = static_cast<unsigned>(detail::ctzll(scan));
           scan &= scan - 1U;
           if ((workersBase + bit)->cpuId == producerCpuU) {
             return true;
@@ -11875,7 +11889,7 @@ private:
         // fall back to PAUSE-spin for slower arrivals.
         constexpr std::uint32_t kTightProbeIters = 8U;
         while (pending != 0U) {
-          const auto bit = static_cast<unsigned>(__builtin_ctzll(pending));
+          const auto bit = static_cast<unsigned>(detail::ctzll(pending));
           auto &w = *(workersBase + bit);
           bool tightDone = false;
           for (std::uint32_t i = 0; i < kTightProbeIters; ++i) {

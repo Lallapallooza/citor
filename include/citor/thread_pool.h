@@ -492,7 +492,9 @@ private:
     if (effective <= 1) {
       return;
     }
+#ifdef __linux__
     m_workerThreads.resize(effective - 1);
+#endif
     m_workerSpawnArgs.reserve(effective - 1);
     for (std::size_t i = 1; i < effective; ++i) {
       auto &arg = m_workerSpawnArgs.emplace_back();
@@ -2595,10 +2597,14 @@ private:
 
 #ifndef __linux__
   /// `std::thread` entry used by the non-Linux fallback path; mirrors
-  /// `workerEntry`.
+  /// `workerEntry`. Pins the worker to its slot's reserved CPU when one is
+  /// recorded (Windows path resolves real CPU ids via `detectTopology`).
   static void workerEntryStdThread(ThreadPool *self,
                                    std::size_t workerIndex) noexcept {
     auto &state = *(self->m_workers.get() + workerIndex);
+    if (state.cpuId != UINT32_MAX) {
+      detail::bindAffinityOnce(state.cpuId);
+    }
     auto &ctx = tlsContext();
     ctx.slot = workerIndex;
     ctx.insidePoolWorker = true;
@@ -5184,16 +5190,12 @@ private:
     return s;
   }
 
-  /// Reduce a 64-bit RNG draw to `[0, n)` via multiply-high (Lemire 2018).
-  /// Replaces `xorshiftNext(rng) % n` in the steal hot path. For
-  /// non-power-of-two |n| integer modulo compiles to `idiv` on x86, which
-  /// has long latency; the multiply-high reduction is one 64x64->128
-  /// multiply, three shifts, and no division. The bias is bounded by
-  /// `1 / 2^32` per bucket, irrelevant for victim selection. |n| must be
-  /// non-zero.
+  /// Reduce a 64-bit RNG draw to `[0, n)` via multiply-high (Lemire 2018),
+  /// replacing `xorshiftNext(rng) % n` in the steal hot path so the
+  /// non-power-of-two case avoids `idiv`. Bias is bounded by `1 / 2^32`
+  /// per bucket, irrelevant for victim selection. |n| must be non-zero.
   static std::uint32_t fastRange32(std::uint64_t x, std::uint32_t n) noexcept {
-    __extension__ using u128 = unsigned __int128;
-    return static_cast<std::uint32_t>((static_cast<u128>(x >> 32) * n) >> 32);
+    return static_cast<std::uint32_t>(((x >> 32) * n) >> 32);
   }
 
   /// Common job-publish/join helper used by the reduce paths. Builds a
@@ -5699,7 +5701,7 @@ private:
         if (m_coldStampedMask != 0U) [[unlikely]] {
           std::uint64_t scan = m_coldStampedMask;
           while (scan != 0U) {
-            const auto bit = static_cast<unsigned>(__builtin_ctzll(scan));
+            const auto bit = static_cast<unsigned>(detail::ctzll(scan));
             scan &= scan - 1U;
             auto *w = workersBaseForPublish + bit;
             while ((w->mailbox.load(std::memory_order_acquire) &
@@ -5750,7 +5752,7 @@ private:
       for (std::uint32_t r = 0; r < kPreWakeProbeRounds; ++r) {
         std::uint64_t scan = pendingProbe;
         while (scan != 0U) {
-          const auto bit = static_cast<unsigned>(__builtin_ctzll(scan));
+          const auto bit = static_cast<unsigned>(detail::ctzll(scan));
           scan &= scan - 1U;
           if (((workersBase + bit)->mailbox.load(std::memory_order_acquire) &
                ~detail::PoolControl::kAckedBit) == doneSentinel) {
@@ -5889,7 +5891,7 @@ private:
         }
         std::uint64_t scan = pending;
         while (scan != 0U) {
-          const auto bit = static_cast<unsigned>(__builtin_ctzll(scan));
+          const auto bit = static_cast<unsigned>(detail::ctzll(scan));
           scan &= scan - 1U;
           if ((workersBase + bit)->cpuId == producerCpuU) {
             return true;
@@ -5921,7 +5923,7 @@ private:
         // fall back to PAUSE-spin for slower arrivals.
         constexpr std::uint32_t kTightProbeIters = 8U;
         while (pending != 0U) {
-          const auto bit = static_cast<unsigned>(__builtin_ctzll(pending));
+          const auto bit = static_cast<unsigned>(detail::ctzll(pending));
           auto &w = *(workersBase + bit);
           bool tightDone = false;
           for (std::uint32_t i = 0; i < kTightProbeIters; ++i) {
