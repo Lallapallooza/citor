@@ -33,6 +33,7 @@
 
 #include "citor/always_assert.h"
 
+#include "aligned_alloc.h"
 #include "bench_format.h"
 #include "bench_registry.h"
 #include "competitor_traits.h"
@@ -47,19 +48,15 @@ constexpr std::size_t kTimesteps = 200;
 
 /// 64-byte aligned `double[]` deleter; pairs with `std::unique_ptr`.
 struct AlignedDoubleDeleter {
-  void operator()(double *p) const noexcept {
-    if (p != nullptr) {
-      std::free(p);
-    }
-  }
+  void operator()(double *p) const noexcept { alignedFree(p); }
 };
 
 using AlignedDoubleBuffer = std::unique_ptr<double, AlignedDoubleDeleter>;
 
 AlignedDoubleBuffer allocateAlignedDoubles(std::size_t count) {
-  void *raw = nullptr;
   const std::size_t bytes = ((count * sizeof(double) + 63U) / 64U) * 64U;
-  if (::posix_memalign(&raw, 64U, bytes) != 0) {
+  void *raw = alignedAlloc(bytes, 64U);
+  if (raw == nullptr) {
     std::abort();
   }
   return AlignedDoubleBuffer{static_cast<double *>(raw)};

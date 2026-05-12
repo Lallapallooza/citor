@@ -16,10 +16,9 @@
 #include <utility>
 #include <vector>
 
-#include <unistd.h>
-
 #if defined(__linux__)
 #include <sys/utsname.h>
+#include <unistd.h>
 #endif
 
 #include "bench_format.h"

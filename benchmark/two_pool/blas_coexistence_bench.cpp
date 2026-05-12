@@ -40,6 +40,7 @@
 #include "citor/hints.h"
 #include "citor/thread_pool.h"
 
+#include "../harness/aligned_alloc.h"
 #include "../harness/bench_format.h"
 #include "../harness/bench_registry.h"
 #include "../harness/cycle_clock.h"
@@ -109,18 +110,14 @@ constexpr std::size_t kPrimaryRange = 16384;
 
 /// 64-byte aligned `float[]` deleter; pairs with `std::unique_ptr`.
 struct AlignedFloatDeleter {
-  void operator()(float *p) const noexcept {
-    if (p != nullptr) {
-      std::free(p);
-    }
-  }
+  void operator()(float *p) const noexcept { alignedFree(p); }
 };
 using AlignedFloatBuffer = std::unique_ptr<float[], AlignedFloatDeleter>;
 
 [[nodiscard]] AlignedFloatBuffer allocateAlignedFloats(std::size_t count) {
-  void *raw = nullptr;
   const std::size_t bytes = ((count * sizeof(float) + 63U) / 64U) * 64U;
-  if (::posix_memalign(&raw, 64U, bytes) != 0) {
+  void *raw = alignedAlloc(bytes, 64U);
+  if (raw == nullptr) {
     std::abort();
   }
   return AlignedFloatBuffer{static_cast<float *>(raw)};

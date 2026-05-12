@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 
+#include "aligned_alloc.h"
 #include "bench_format.h"
 #include "bench_registry.h"
 #include "competitor_traits.h"
@@ -45,20 +46,16 @@ constexpr std::size_t kWarmupIterations = 5;
 /// 64-byte aligned float-buffer deleter for the matmul buffers; pairs with a
 /// `std::unique_ptr` so the `BenchRow` owner does not leak on early return.
 struct AlignedFloatDeleter {
-  void operator()(float *p) const noexcept {
-    if (p != nullptr) {
-      std::free(p);
-    }
-  }
+  void operator()(float *p) const noexcept { alignedFree(p); }
 };
 
 using AlignedFloatBuffer = std::unique_ptr<float, AlignedFloatDeleter>;
 
 /// Allocate an aligned float buffer of `count` elements; aborts on failure.
 AlignedFloatBuffer allocateAlignedFloats(std::size_t count) {
-  void *raw = nullptr;
   const std::size_t bytes = ((count * sizeof(float) + 63U) / 64U) * 64U;
-  if (::posix_memalign(&raw, 64U, bytes) != 0) {
+  void *raw = alignedAlloc(bytes, 64U);
+  if (raw == nullptr) {
     std::abort();
   }
   return AlignedFloatBuffer{static_cast<float *>(raw)};

@@ -1,9 +1,12 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <ctime>
 
-#if defined(__x86_64__)
+#if defined(_M_X64) && defined(_MSC_VER)
+#include <intrin.h>
+#elif defined(__x86_64__)
 #include <x86intrin.h>
 #endif
 
@@ -27,7 +30,7 @@ namespace citor::bench {
 ///
 /// The TSC cycle stamp, with prior loads fenced.
 [[nodiscard]] inline std::uint64_t readCyclesStart() noexcept {
-#if defined(__x86_64__)
+#if defined(__x86_64__) || (defined(_M_X64) && defined(_MSC_VER))
   // `lfence` flushes the load buffer so any pending memory ops settle before
   // the `rdtsc` cycle stamp is taken. Using `rdtsc` (rather than `rdtscp`) on
   // the opening half matches the documented `lfence; rdtsc; ...; rdtscp;
@@ -53,7 +56,7 @@ namespace citor::bench {
 ///
 /// The TSC cycle stamp, with subsequent loads/stores fenced.
 [[nodiscard]] inline std::uint64_t readCyclesEnd() noexcept {
-#if defined(__x86_64__)
+#if defined(__x86_64__) || (defined(_M_X64) && defined(_MSC_VER))
   unsigned int aux = 0;
   const std::uint64_t tsc = __rdtscp(&aux);
   _mm_lfence();
@@ -124,9 +127,9 @@ inline int openPerfCyclesCounter() noexcept {
 ///         time on the calling host.
 [[nodiscard]] inline CyclesPerNanosecond calibrateCyclesPerNs() noexcept {
   CyclesPerNanosecond result;
-#if !defined(__x86_64__)
-  return result;
-#else
+#if defined(__x86_64__)
+  // `CLOCK_MONOTONIC_RAW` skips NTP slew so the 10 ms calibration window
+  // below is repeatable across runs.
   struct timespec ts0{};
   struct timespec ts1{};
   clock_gettime(CLOCK_MONOTONIC_RAW, &ts0);
@@ -147,6 +150,27 @@ inline int openPerfCyclesCounter() noexcept {
     result.value =
         static_cast<double>(cyc1 - cyc0) / static_cast<double>(wallNs);
   }
+  return result;
+#elif defined(_M_X64) && defined(_MSC_VER)
+  // `clock_gettime` is unavailable on MSVC; `steady_clock` maps to
+  // `QueryPerformanceCounter`, whose resolution is well below the 10 ms
+  // calibration window below.
+  const auto wallStart = std::chrono::steady_clock::now();
+  const std::uint64_t cyc0 = readCyclesStart();
+  std::chrono::steady_clock::time_point wallNow;
+  do {
+    wallNow = std::chrono::steady_clock::now();
+  } while ((wallNow - wallStart) < std::chrono::milliseconds(10));
+  const std::uint64_t cyc1 = readCyclesEnd();
+  const std::uint64_t wallNs = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(wallNow - wallStart)
+          .count());
+  if (wallNs > 0) {
+    result.value =
+        static_cast<double>(cyc1 - cyc0) / static_cast<double>(wallNs);
+  }
+  return result;
+#else
   return result;
 #endif
 }

@@ -39,6 +39,7 @@
 #include "citor/hints.h"
 #include "citor/thread_pool.h"
 
+#include "aligned_alloc.h"
 #include "bench_format.h"
 #include "bench_registry.h"
 #include "competitor_traits.h"
@@ -65,19 +66,15 @@ constexpr std::size_t kWarmupIterations = 2;
 constexpr std::size_t kSeqCutoff = 64;
 
 struct AlignedFloatDeleter {
-  void operator()(float *p) const noexcept {
-    if (p != nullptr) {
-      std::free(p);
-    }
-  }
+  void operator()(float *p) const noexcept { alignedFree(p); }
 };
 
 using AlignedFloatBuffer = std::unique_ptr<float, AlignedFloatDeleter>;
 
 AlignedFloatBuffer allocateAlignedFloats(std::size_t count) {
-  void *raw = nullptr;
   const std::size_t bytes = ((count * sizeof(float) + 63U) / 64U) * 64U;
-  if (::posix_memalign(&raw, 64U, bytes) != 0) {
+  void *raw = alignedAlloc(bytes, 64U);
+  if (raw == nullptr) {
     std::abort();
   }
   return AlignedFloatBuffer{static_cast<float *>(raw)};

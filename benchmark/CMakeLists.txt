@@ -83,10 +83,12 @@ if(riften_deque_ADDED AND NOT TARGET riften_deque)
     )
 endif()
 
+# Newer pin than the rest of the harness: the older tag named the RNG header
+# with literal `*` characters, which NTFS rejects on Windows checkout.
 cpmaddpackage(
     NAME riften_threadpool
     GITHUB_REPOSITORY ConorWilliams/Threadpool
-    GIT_TAG ea1a1f4d5804643b48dcd352196bbe45016c5022
+    GIT_TAG a757265d75c189ad0fd0e429c166efb6281f2770
     DOWNLOAD_ONLY YES
 )
 if(riften_threadpool_ADDED AND NOT TARGET riften_threadpool)
@@ -226,19 +228,25 @@ cpmaddpackage(
 # `LF_NO_HWLOC` and `LF_USE_BOOST_ATOMIC` are not invoked here because the
 # DOWNLOAD_ONLY path bypasses libfork's CMake entirely; hwloc is only consulted
 # in libfork's CMake (not in the headers), so omitting that machinery is safe.
-cpmaddpackage(
-    NAME libfork
-    GITHUB_REPOSITORY ConorWilliams/libfork
-    GIT_TAG v3.8.0
-    DOWNLOAD_ONLY YES
-)
-if(libfork_ADDED AND NOT TARGET libfork_headers)
-    add_library(libfork_headers INTERFACE)
-    target_include_directories(
-        libfork_headers
-        SYSTEM
-        INTERFACE ${libfork_SOURCE_DIR}/include
+# libfork's public API leans on C++23 multidimensional subscript
+# (`obj[fn, args...]`). MSVC advertises the feature via
+# `__cpp_multidimensional_subscript` but fails overload resolution on
+# libfork's call sites with C2676, so skip libfork on MSVC.
+if(NOT MSVC)
+    cpmaddpackage(
+        NAME libfork
+        GITHUB_REPOSITORY ConorWilliams/libfork
+        GIT_TAG v3.8.0
+        DOWNLOAD_ONLY YES
     )
+    if(libfork_ADDED AND NOT TARGET libfork_headers)
+        add_library(libfork_headers INTERFACE)
+        target_include_directories(
+            libfork_headers
+            SYSTEM
+            INTERFACE ${libfork_SOURCE_DIR}/include
+        )
+    endif()
 endif()
 
 # TooManyCooks (tzcnt) -- header-only C++20 coroutine work-stealing /
@@ -263,7 +271,11 @@ if(TooManyCooks_ADDED AND NOT TARGET tmc_headers)
 endif()
 
 find_package(OpenMP QUIET)
-if(OpenMP_CXX_FOUND)
+# The libomp coexistence cells call Intel/LLVM `kmp_*` extensions
+# (e.g. `kmp_set_blocktime`), which MSVC's `vcomp140.dll` does not
+# export. GCC + libgomp and Clang + libomp on Linux do, so the
+# competitor builds there. Skip the OpenMP competitor on MSVC.
+if(OpenMP_CXX_FOUND AND NOT MSVC)
     add_library(parallel_bench_openmp INTERFACE)
     target_link_libraries(parallel_bench_openmp INTERFACE OpenMP::OpenMP_CXX)
 endif()
@@ -298,12 +310,23 @@ set(_citor_bench_sources
     parallel_for/affinity_sweep_bench.cpp
     parallel_for/balance_sweep_bench.cpp
     parallel_for/cold_path_bench.cpp
-    parallel_for/cross_ccd_parallel_for_bench.cpp
     parallel_for/empty_fanout_bench.cpp
     parallel_for/granularity_bench.cpp
     parallel_for/matmul_bench.cpp
     parallel_for/parallel_for_cold_dispatch_bench.cpp
     parallel_for/pareto_body_bench.cpp
+)
+if(NOT WIN32)
+    list(
+        APPEND _citor_bench_sources
+        # cross_ccd_parallel_for_bench moves the producer between CCDs via
+        # raw `pthread_setaffinity_np`. Linux-only by design; the rest of the
+        # parallel_for/* bench TUs are portable.
+        parallel_for/cross_ccd_parallel_for_bench.cpp
+    )
+endif()
+list(
+    APPEND _citor_bench_sources
     reduce/parallel_reduce_bench.cpp
     reduce/parallel_reduce_pareto_bench.cpp
     scan/scan_bench.cpp
@@ -438,13 +461,23 @@ if(TARGET libfork_headers)
     # libfork's API. The rest of the bench compiles at C++20 and would warn
     # heavily at the libfork headers; isolating the std=c++23 override on
     # this single TU keeps both the std and the warning surface contained.
-    set_source_files_properties(
-        harness/libfork_runners.cpp
-        PROPERTIES
-            COMPILE_OPTIONS
-                "-std=c++23;-Wno-c++23-extensions;-Wno-deprecated-declarations"
-            SKIP_LINTING ON
-    )
+    # MSVC uses `/std:c++latest` for C++23-track features and doesn't have
+    # equivalents for the libfork-extension warning silencers, so the
+    # MSVC branch sets only the standard switch.
+    if(MSVC)
+        set_source_files_properties(
+            harness/libfork_runners.cpp
+            PROPERTIES COMPILE_OPTIONS "/std:c++latest" SKIP_LINTING ON
+        )
+    else()
+        set_source_files_properties(
+            harness/libfork_runners.cpp
+            PROPERTIES
+                COMPILE_OPTIONS
+                    "-std=c++23;-Wno-c++23-extensions;-Wno-deprecated-declarations"
+                SKIP_LINTING ON
+        )
+    endif()
 endif()
 if(TARGET tmc_headers)
     target_link_libraries(parallel_bench PRIVATE tmc_headers)
