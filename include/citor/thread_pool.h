@@ -5699,6 +5699,40 @@ private:
     {
       auto *workersBaseForPublish = m_workers.get();
       auto *descRaw = static_cast<void *>(&desc);
+      // Drain pending cold-stamped acks before any publish (reuse or
+      // not). Overwriting a previously cold-collapsed worker's mailbox
+      // while it is still parked sends it down the plain-store ack
+      // branch on wake, which never sets `kAckedBit`; a later non-reuse
+      // publish would then spin here forever. Wake while waiting
+      // because the worker we need an ack from may already be parked;
+      // a pure cpuRelax spin would not resolve.
+      if (m_coldStampedMask != 0U) [[unlikely]] {
+        while (m_coldStampedMask != 0U) {
+          std::uint64_t scan = m_coldStampedMask;
+          std::uint64_t stillPending = 0U;
+          while (scan != 0U) {
+            const auto bit = static_cast<unsigned>(detail::ctzll(scan));
+            scan &= scan - 1U;
+            auto *w = workersBaseForPublish + bit;
+            if ((w->mailbox.load(std::memory_order_acquire) &
+                 detail::PoolControl::kAckedBit) == 0U) {
+              stillPending |= std::uint64_t{1} << bit;
+            }
+          }
+          if (stillPending == 0U) {
+            m_coldStampedMask = 0U;
+            break;
+          }
+          m_coldStampedMask = stillPending;
+          if (!lowLatencyActive) {
+            const std::uint32_t nextFutex =
+                m_control.futexWord.load(std::memory_order_relaxed) + 1U;
+            m_control.futexWord.store(nextFutex, std::memory_order_release);
+            (void)detail::futexWakePrivate(&m_control.futexWord, 2);
+          }
+          detail::cpuRelax();
+        }
+      }
       if (reuseSafe) {
         // Same-command reuse: workers already cached desc fields on the prior
         // full publish. Skip the mailboxDesc store entirely; just bump mailbox
@@ -5708,19 +5742,6 @@ private:
           w->mailbox.store(publishedMb, std::memory_order_release);
         }
       } else {
-        if (m_coldStampedMask != 0U) [[unlikely]] {
-          std::uint64_t scan = m_coldStampedMask;
-          while (scan != 0U) {
-            const auto bit = static_cast<unsigned>(detail::ctzll(scan));
-            scan &= scan - 1U;
-            auto *w = workersBaseForPublish + bit;
-            while ((w->mailbox.load(std::memory_order_acquire) &
-                    detail::PoolControl::kAckedBit) == 0U) {
-              detail::cpuRelax();
-            }
-          }
-          m_coldStampedMask = 0U;
-        }
         for (std::size_t slot = 1; slot < participantsLocal; ++slot) {
           auto *w = workersBaseForPublish + slot;
           if (w->mailboxDesc != descRaw) {
