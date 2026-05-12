@@ -2,7 +2,7 @@
 //
 // citor -- header-only C++20 thread pool
 // version: 0.1.0
-// commit:  b31487e2cb193f79d8afb14ac29aa5ba8d258129
+// commit:  9711238e4d1910911e6d53a8c5e9f022c537696c
 // generated: 2026-05-17
 //
 // GENERATED FILE -- DO NOT EDIT.
@@ -5834,9 +5834,14 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
     // CLEAR. The reuse bit (kReuseBit) is set by the producer when this
     // dispatch reuses cached params; the worker observes it and skips
     // reading desc fields, calling the typed runner's cached fn directly.
-    // We compare phase ignoring DONE.
-    const std::uint64_t mailboxPhase = mailbox & ~PoolControl::kDoneBit;
-    const std::uint64_t lastPhase = lastSeenMailbox & ~PoolControl::kDoneBit;
+    // We compare phase ignoring both DONE and ACKED. Neither bit is part
+    // of the dispatch identity: the producer never sets them on a new
+    // publish, and a stale kAckedBit carried over from a prior cold-
+    // collapse race must not mask a real phase change.
+    constexpr std::uint64_t kSeenPhaseMask =
+        ~(PoolControl::kDoneBit | PoolControl::kAckedBit);
+    const std::uint64_t mailboxPhase = mailbox & kSeenPhaseMask;
+    const std::uint64_t lastPhase = lastSeenMailbox & kSeenPhaseMask;
     if (mailboxPhase != lastPhase) {
       const bool reuse = (mailbox & PoolControl::kReuseBit) != 0U;
       void *raw =
@@ -5905,18 +5910,29 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
           lastSeenMailbox = doneAcked;
           mailbox = doneAcked;
         } else {
-          // CAS lost the race against the producer's cold-collapse
-          // self-stamp. Re-store `expected | kAckedBit` with release so the
-          // producer's next-dispatch publish can acquire-load it before
-          // reusing the prior dispatch's stack-frame address for a fresh
-          // `JobDescriptor`. Also update `lastSeenMailbox` so the phase
-          // compare on the next iteration does not re-enter this branch
-          // and re-read descriptor fields (which would race the producer's
-          // already-running next dispatch).
-          const std::uint64_t ackedMb = expected | PoolControl::kAckedBit;
-          self.mailbox.store(ackedMb, std::memory_order_release);
-          lastSeenMailbox = ackedMb;
-          mailbox = ackedMb;
+          // CAS lost the race against another writer (producer's
+          // cold-collapse self-stamp, a later dispatch's publish, or
+          // shutdown's `kShutdownBit` stamp). Use `fetch_or` so we set
+          // `kAckedBit` without clobbering any other bits the racing
+          // writer published. An unconditional store of `expected |
+          // kAckedBit` would re-write `expected` (the mailbox value AS
+          // OF the failed CAS) and clear any further bits a later
+          // writer added between the CAS and this store. The post-
+          // state we want is "whatever the writer published, plus our
+          // ack", which is what `fetch_or(kAckedBit)` produces.
+          (void)self.mailbox.fetch_or(PoolControl::kAckedBit,
+                                      std::memory_order_acq_rel);
+          // `lastSeenMailbox` must stay at the OLD dispatch's
+          // `doneAcked`, not advance to whatever the racing writer
+          // left in the slot. If a later dispatch overtook us, the
+          // next loop iteration loads `mailbox` and compares its phase
+          // (masking out done/acked bits) against `lastSeenMailbox`'s
+          // phase; an overtaking phase change fires the work path so
+          // the new dispatch is processed. Setting `lastSeenMailbox`
+          // to the overtaking value would mark the new phase as
+          // already seen and drop the next dispatch.
+          lastSeenMailbox = doneAcked;
+          mailbox = self.mailbox.load(std::memory_order_acquire);
         }
       } else {
         self.mailbox.store(doneVal, std::memory_order_release);

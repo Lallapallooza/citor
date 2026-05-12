@@ -94,6 +94,7 @@ set(_citor_tests
     thread_pool_low_latency_scope_test
     thread_pool_tls_test
     thread_pool_tsan_stress_test
+    worker_mailbox_protocol_test
 )
 
 set(_citor_test_extra_sources)
