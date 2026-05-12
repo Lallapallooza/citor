@@ -2,7 +2,7 @@
 //
 // citor -- header-only C++20 thread pool
 // version: 0.1.0
-// commit:  daefcd4789d001c7abd698fc09bd31f8e98f8e99
+// commit:  9f57b9f111528c23e7803f6c051267c88e151d77
 // generated: 2026-05-17
 //
 // GENERATED FILE -- DO NOT EDIT.
@@ -11829,37 +11829,39 @@ private:
     }
 
     if (!lowLatencyActive && !preWakeAllDone) {
-      // Hot-cadence skip: workers' spin-then-park budget is bounded by
-      // `kSpinAfterBulkJob.maxCycles` of TSC time. If the previous dispatch
-      // on this pool published within half that budget ago, no worker can
-      // have completed its spin window and parked since then -- all of them
-      // are still in the spin loop polling their mailbox lines, and the
-      // futex syscall is a guaranteed no-op (kernel finds zero waiters).
-      // The half-budget guard keeps a margin against worst-case dispatch
-      // latency variance pushing a worker past the parking gate before
-      // this branch fires.
-      const std::uint64_t nowTsc = detail::readTsc();
-      const std::uint64_t prevTsc = m_recentDispatchTsc;
-      const std::uint64_t hotWindow =
-          detail::kSpinAfterBulkJob.maxCycles / 2ULL;
-      const bool hotCadence =
-          prevTsc != 0ULL && nowTsc > prevTsc && (nowTsc - prevTsc) < hotWindow;
-      if (!hotCadence) {
-        // Single-writer load/store on `futexWord`: under `m_dispatchMutex`
-        // the dispatching producer is the only writer, so a non-atomic load
-        // + release store is sufficient to bump the parking token. Workers
-        // acquire `generation` (not `futexWord`) for descriptor visibility;
-        // the producer's lifetime contract serializes shutdown against
-        // active dispatch.
-        const std::uint32_t nextFutex =
-            m_control.futexWord.load(std::memory_order_relaxed) + 1U;
-        m_control.futexWord.store(nextFutex, std::memory_order_release);
-        // Chain-wake-2: producer wakes only the first two parked workers;
-        // each woken worker fires futex_wake(N=2) on its post-park branch
-        // (see `workerMainLoop`), doubling the chain at logarithmic depth.
-        (void)detail::futexWakePrivate(&m_control.futexWord, 2);
-      }
-      m_recentDispatchTsc = nowTsc;
+      // Always wake. The previous code skipped the wake when the
+      // previous dispatch on this pool published within half the spin
+      // budget ago, on the assumption that workers in that window
+      // cannot have completed their spin and parked. The assumption is
+      // wrong: `readTsc()` is the invariant wall-clock TSC, so a worker
+      // preempted by the OS scheduler during its spin loop accumulates
+      // TSC delta while it is not running. The worker resumes,
+      // observes the elapsed TSC exceeds the spin budget, and parks
+      // on its futex word. The producer's next dispatch under the
+      // hot cadence then skipped the wake; the producer hung forever
+      // in the join wait while every worker was parked. The wake is
+      // cheap on the uncontended path (one syscall when there are no
+      // waiters) and the savings the heuristic claimed are not worth
+      // the lost-wakeup risk on schedulers that preempt user threads
+      // more aggressively than Linux CFS does. The opt-in
+      // `LowLatencyGuard` already covers the genuinely-hot dispatch
+      // case: while it is held, workers spin forever (no parking)
+      // and this entire block is gated off by `!lowLatencyActive`.
+      //
+      // Single-writer load/store on `futexWord`: under `m_dispatchMutex`
+      // the dispatching producer is the only writer, so a non-atomic load
+      // + release store is sufficient to bump the parking token. Workers
+      // acquire `generation` (not `futexWord`) for descriptor visibility;
+      // the producer's lifetime contract serializes shutdown against
+      // active dispatch.
+      const std::uint32_t nextFutex =
+          m_control.futexWord.load(std::memory_order_relaxed) + 1U;
+      m_control.futexWord.store(nextFutex, std::memory_order_release);
+      // Chain-wake-2: producer wakes only the first two parked workers;
+      // each woken worker fires futex_wake(N=2) on its post-park branch
+      // (see `workerMainLoop`), doubling the chain at logarithmic depth.
+      (void)detail::futexWakePrivate(&m_control.futexWord, 2);
+      m_recentDispatchTsc = detail::readTsc();
     }
 
     // Producer participates as slot 0. Install the slot-0 TLS context once for
