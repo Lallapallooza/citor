@@ -7,7 +7,9 @@
 #include <memory>
 #include <utility>
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(_M_X64) && defined(_MSC_VER)
+#include <intrin.h>
+#elif defined(__x86_64__)
 #include <x86intrin.h>
 #endif
 

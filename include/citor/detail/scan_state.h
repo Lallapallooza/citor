@@ -6,6 +6,7 @@
 #include <exception>
 #include <utility>
 
+#include "citor/detail/cpu_relax.h"
 #include "citor/hints.h"
 
 namespace citor::detail {
@@ -232,18 +233,16 @@ struct ScanState {
   /// `(lo, hi)` pair denoting the slot's contiguous range over `[0, n)`.
   [[nodiscard]] std::pair<std::size_t, std::size_t>
   slotRange(std::uint32_t slot) const noexcept {
-    __extension__ using u128 = unsigned __int128;
     if (ccdOfSlot == nullptr) {
-      const auto lo = static_cast<std::size_t>((static_cast<u128>(n) * slot) /
-                                               participants);
-      const auto hi = static_cast<std::size_t>(
-          (static_cast<u128>(n) * (slot + 1U)) / participants);
+      const auto lo = static_cast<std::size_t>(mulDiv64(n, slot, participants));
+      const auto hi =
+          static_cast<std::size_t>(mulDiv64(n, slot + 1U, participants));
       return {lo, hi};
     }
     // Producer-CCD slot group covers the prefix `[0, producerVolume)`;
     // cross-CCD group covers `[producerVolume, n)`.
     const auto producerVolume =
-        static_cast<std::size_t>((static_cast<u128>(n) * asymmetricNum) / 16U);
+        static_cast<std::size_t>(mulDiv64(n, asymmetricNum, 16U));
     const std::uint32_t numProducer = slotsOnProducerCcd;
     const std::uint32_t numCross = participants - slotsOnProducerCcd;
     // Index of `slot` within its CCD group (0-based, in slot-index order).
@@ -256,23 +255,19 @@ struct ScanState {
     }
     if (isProducerCcd && numProducer > 0U) {
       const auto lo = static_cast<std::size_t>(
-          (static_cast<u128>(producerVolume) * indexInGroup) / numProducer);
+          mulDiv64(producerVolume, indexInGroup, numProducer));
       const auto hi = static_cast<std::size_t>(
-          (static_cast<u128>(producerVolume) * (indexInGroup + 1U)) /
-          numProducer);
+          mulDiv64(producerVolume, indexInGroup + 1U, numProducer));
       return {lo, hi};
     }
     if (numCross > 0U) {
       const std::size_t crossVolume = n - producerVolume;
       const std::size_t lo =
-          producerVolume +
-          static_cast<std::size_t>(
-              (static_cast<u128>(crossVolume) * indexInGroup) / numCross);
+          producerVolume + static_cast<std::size_t>(
+                               mulDiv64(crossVolume, indexInGroup, numCross));
       const std::size_t hi =
-          producerVolume +
-          static_cast<std::size_t>(
-              (static_cast<u128>(crossVolume) * (indexInGroup + 1U)) /
-              numCross);
+          producerVolume + static_cast<std::size_t>(mulDiv64(
+                               crossVolume, indexInGroup + 1U, numCross));
       return {lo, hi};
     }
     return {0U, 0U};
