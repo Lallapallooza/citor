@@ -9,6 +9,22 @@
 #include <unistd.h>
 
 #include <ctime>
+#elif defined(_WIN32)
+// `WaitOnAddress` / `WakeByAddress[Single|All]` model the same parking
+// protocol as Linux's `FUTEX_WAIT_PRIVATE`: the kernel reads `*addr` and
+// suspends iff it still equals the caller-supplied compare value. Available
+// since Windows 8. The symbols live in `api-ms-win-core-synch-l1-2-0.dll`
+// (linker resolves through `Synchronization.lib`).
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+
+#include <synchapi.h>
+#pragma comment(lib, "Synchronization.lib")
 #else
 #include <condition_variable> // IWYU pragma: keep
 #include <mutex>              // IWYU pragma: keep
@@ -63,14 +79,53 @@ inline long futexWakePrivate(std::atomic<std::uint32_t> *addr, int n) noexcept {
                  FUTEX_WAKE_PRIVATE, n, nullptr, nullptr, 0);
 }
 
+#elif defined(_WIN32)
+
+/// Windows peer of `FUTEX_WAIT_PRIVATE`. `WaitOnAddress` reads `*addr`,
+/// compares against `*expected`, and suspends only when they match;
+/// per-address wait queue, no process-global contention. Returns 0 on
+/// success (wake or mismatch), `-1` on failure. Caller re-checks the
+/// source-of-truth atomic after wake.
+inline long futexWaitPrivate(std::atomic<std::uint32_t> *addr,
+                             std::uint32_t expected,
+                             const void *timeout) noexcept {
+  (void)timeout;
+  std::uint32_t compare = expected;
+  const BOOL ok = ::WaitOnAddress(static_cast<volatile VOID *>(addr), &compare,
+                                  sizeof(std::uint32_t), INFINITE);
+  return ok ? 0 : -1;
+}
+
+/// Windows peer of `FUTEX_WAKE_PRIVATE`. `n >= kBroadcastThreshold`
+/// (shutdown's `INT_MAX`) routes to `WakeByAddressAll`; bounded `n`
+/// loops `WakeByAddressSingle` so the chain-wake-2 protocol does not
+/// degenerate into a broadcast at every hop. Caller must publish the
+/// source-of-truth state before invoking, so a freshly-parked waiter
+/// either observes the update or is woken.
+inline long futexWakePrivate(std::atomic<std::uint32_t> *addr, int n) noexcept {
+  // Treat INT_MAX (or any value exceeding the practical worker fan-out) as
+  // a broadcast; otherwise wake exactly `n` waiters to mirror Linux's
+  // `FUTEX_WAKE_PRIVATE` semantics.
+  constexpr int kBroadcastThreshold = 1024;
+  if (n >= kBroadcastThreshold) {
+    ::WakeByAddressAll(static_cast<PVOID>(addr));
+    return 0;
+  }
+  for (int i = 0; i < n; ++i) {
+    ::WakeByAddressSingle(static_cast<PVOID>(addr));
+  }
+  return 0;
+}
+
 #else
 
-/// Portable parking fallback used outside Linux.
+/// Portable parking fallback used outside Linux and Windows.
 ///
-/// The Linux build relies on raw futex syscalls; on macOS, Windows, and other
-/// targets we emulate the same wait/wake contract with a process-local
-/// `std::condition_variable`. The fallback does not promise sub-microsecond
-/// wakeup latency; it exists so the headers compile and tests run.
+/// The Linux build relies on raw futex syscalls; the Windows build uses
+/// `WaitOnAddress`. Every other target (macOS, BSDs, ...) emulates the same
+/// wait/wake contract with a process-local `std::condition_variable`. The
+/// fallback does not promise sub-microsecond wakeup latency; it exists so
+/// the headers compile and tests run.
 struct FutexFallbackState {
   /// Serialises the wait/wake handshake on the shared condition variable.
   std::mutex mtx;
@@ -78,8 +133,8 @@ struct FutexFallbackState {
   std::condition_variable cv;
 };
 
-/// Access the singleton fallback condvar shared by every pool on non-Linux
-/// hosts.
+/// Access the singleton fallback condvar shared by every pool on the
+/// non-Linux / non-Windows hosts.
 ///
 /// The state is process-global; pool wake protocols always re-check the
 /// source-of-truth atomic after returning from a wait, so spurious wakeups
@@ -91,11 +146,11 @@ inline FutexFallbackState &futexFallbackState() noexcept {
   return s;
 }
 
-/// Non-Linux fallback that mirrors the Linux `FUTEX_WAIT_PRIVATE` contract.
+/// Generic fallback that mirrors the Linux `FUTEX_WAIT_PRIVATE` contract.
 ///
 /// addr     Atomic word checked against |expected| before parking.
 /// expected Expected value; the function returns immediately when the load
-/// disagrees. timeout  Ignored on non-Linux fallback; the wait is effectively
+/// disagrees. timeout  Ignored on the fallback; the wait is effectively
 /// unbounded. Always zero; callers re-check the source-of-truth atomic after
 /// wake.
 inline long futexWaitPrivate(std::atomic<std::uint32_t> *addr,
@@ -111,7 +166,7 @@ inline long futexWaitPrivate(std::atomic<std::uint32_t> *addr,
   return 0;
 }
 
-/// Non-Linux fallback that mirrors the Linux `FUTEX_WAKE_PRIVATE` contract.
+/// Generic fallback that mirrors the Linux `FUTEX_WAKE_PRIVATE` contract.
 ///
 /// addr Atomic word identifying the wait queue (unused on the fallback).
 /// n    Hint for how many waiters to wake; the fallback always broadcasts.
