@@ -2,7 +2,7 @@
 //
 // citor -- header-only C++20 thread pool
 // version: 0.1.0
-// commit:  1221b56bcfe73da189c21ca05eea1f8da41f05a8
+// commit:  56629274a57ea1ea842c041207835c90a22c4802
 // generated: 2026-05-17
 //
 // GENERATED FILE -- DO NOT EDIT.
@@ -6639,6 +6639,16 @@ private:
 #ifdef __linux__
     if (m_workers != nullptr) {
       (void)mlock(m_workers.get(), sizeof(detail::WorkerState) * effective);
+    }
+#elif defined(_WIN32)
+    // Windows peer of `mlock`. `VirtualLock` ensures the page is resident
+    // in physical RAM so a worker that wakes mid-dispatch never pays a
+    // page-fault penalty observing its mailbox. The locked region is
+    // small (a few cache lines per worker); failures (e.g. process
+    // working-set quota too tight) are non-fatal.
+    if (m_workers != nullptr) {
+      (void)::VirtualLock(m_workers.get(),
+                          sizeof(detail::WorkerState) * effective);
     }
 #endif
   }

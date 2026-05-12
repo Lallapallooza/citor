@@ -679,6 +679,16 @@ private:
     if (m_workers != nullptr) {
       (void)mlock(m_workers.get(), sizeof(detail::WorkerState) * effective);
     }
+#elif defined(_WIN32)
+    // Windows peer of `mlock`. `VirtualLock` ensures the page is resident
+    // in physical RAM so a worker that wakes mid-dispatch never pays a
+    // page-fault penalty observing its mailbox. The locked region is
+    // small (a few cache lines per worker); failures (e.g. process
+    // working-set quota too tight) are non-fatal.
+    if (m_workers != nullptr) {
+      (void)::VirtualLock(m_workers.get(),
+                          sizeof(detail::WorkerState) * effective);
+    }
 #endif
   }
 
