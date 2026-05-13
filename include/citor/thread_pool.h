@@ -289,13 +289,19 @@ private:
   /// well when the destroyer happens to be the producer, so a subsequent
   /// pool ctor on the same thread sees a clean state.
   [[gnu::cold, gnu::noinline]] void autoPinRestoreIfOurs() const noexcept {
+    // Restoration goes through the pool-side `m_autoPinProducer` /
+    // `m_autoPinSaved` mirror so it lands on the producer regardless
+    // of which thread runs the destructor. The TLS cleanup below is
+    // the only step that must check ownership: under multi-pool LIFO
+    // a later pool may have stolen the TLS tag and owns it now.
+    auto &state = autoPinTls();
+    const bool weOwnTlsTag = state.pool == static_cast<const void *>(this);
 #ifdef __linux__
     if (m_autoPinActive.load(std::memory_order_acquire)) {
       (void)pthread_setaffinity_np(m_autoPinProducer, sizeof(m_autoPinSaved),
                                    &m_autoPinSaved);
     }
-    auto &state = autoPinTls();
-    if (state.pool == static_cast<const void *>(this)) {
+    if (weOwnTlsTag) {
       state.restorePending = false;
       state.pool = nullptr;
     }
@@ -945,14 +951,15 @@ public:
 #endif
   };
 
-  /// Per-thread depth counter for `LowLatencyGuard`. Lets `DispatchLease`
-  /// distinguish "this thread owns an active LL guard" from "some other
-  /// thread does". Only the owning thread can safely skip the dispatch
-  /// mutex, since the LL contract is single-producer per pool. Other
-  /// threads still take the mutex and serialize against the LL holder.
-  static std::uint32_t &lowLatencyOwnerDepthTls() noexcept {
-    static thread_local std::uint32_t s_depth = 0;
-    return s_depth;
+  /// Per-thread owner pointer for `LowLatencyGuard`, naming the pool
+  /// whose guard this thread holds. `DispatchLease`'s skip-gate fires
+  /// only when the calling thread owns LL on the SAME pool the
+  /// dispatch targets; the LL contract is single-producer per pool, so
+  /// a thread holding LL on pool A must still take pool B's gate.
+  /// Same-pool nesting is preserved through `hotSpinDepth`.
+  static ThreadPool *&lowLatencyOwnerPoolTls() noexcept {
+    static thread_local ThreadPool *s_pool = nullptr;
+    return s_pool;
   }
 
   // Scoped mode for latency-sensitive producer loops.
@@ -970,7 +977,8 @@ public:
     /// acknowledge the new epoch. The destructor restores the normal
     /// spin-then-park policy.
     explicit LowLatencyGuard(ThreadPool &pool) noexcept : m_pool(&pool) {
-      ++lowLatencyOwnerDepthTls();
+      m_prevOwnerPool = lowLatencyOwnerPoolTls();
+      lowLatencyOwnerPoolTls() = &pool;
       auto &control = m_pool->m_control;
       const std::uint64_t epoch =
           control.hotSpinEpoch.fetch_add(1U, std::memory_order_acq_rel) + 1U;
@@ -1014,7 +1022,7 @@ public:
     ~LowLatencyGuard() {
       if (m_pool != nullptr) {
         m_pool->m_control.hotSpinDepth.fetch_sub(1U, std::memory_order_acq_rel);
-        --lowLatencyOwnerDepthTls();
+        lowLatencyOwnerPoolTls() = m_prevOwnerPool;
       }
     }
 
@@ -1027,6 +1035,10 @@ public:
     /// Pool the guard engaged hot-spin mode on. Null when the guard was
     /// default-constructed.
     ThreadPool *m_pool = nullptr;
+    /// Owner pool the TLS named on the way in. Restored on the way out
+    /// so cross-pool nesting (outer guard on pool A, inner on pool B)
+    /// leaves the outer guard's owner identity intact.
+    ThreadPool *m_prevOwnerPool = nullptr;
   };
 
   // Destroy the pool: drain pending work, signal shutdown, wake every worker,
@@ -2586,7 +2598,11 @@ private:
   static void *workerEntry(void *raw) noexcept {
     auto *arg = static_cast<WorkerSpawnArg *>(raw);
     auto &self = *(arg->pool->m_workers.get() + arg->workerIndex);
-    if (self.cpuId != UINT32_MAX) {
+    // Mirror the pre-spawn `pthread_attr_setaffinity_np` gate: only bind
+    // when the user actually asked for pinning. Unconditional rebind
+    // silently defeats `Affinity::None`.
+    if (self.cpuId != UINT32_MAX &&
+        arg->pool->m_workerAffinity != Affinity::None) {
       detail::bindAffinityOnce(self.cpuId);
     }
     auto &ctx = tlsContext();
@@ -2612,7 +2628,8 @@ private:
   static void workerEntryStdThread(ThreadPool *self,
                                    std::size_t workerIndex) noexcept {
     auto &state = *(self->m_workers.get() + workerIndex);
-    if (state.cpuId != UINT32_MAX) {
+    // Same gate as the pthread trampoline: respect `Affinity::None`.
+    if (state.cpuId != UINT32_MAX && self->m_workerAffinity != Affinity::None) {
       detail::bindAffinityOnce(state.cpuId);
     }
     auto &ctx = tlsContext();
@@ -5509,7 +5526,7 @@ private:
       // documentation only; multi-producer benchmark / test code routinely
       // tripped the data race under TSAN.
       if (pool.m_control.hotSpinDepth.load(std::memory_order_acquire) != 0U &&
-          lowLatencyOwnerDepthTls() != 0U) {
+          lowLatencyOwnerPoolTls() == &pool) {
         m_skipped = true;
         return;
       }

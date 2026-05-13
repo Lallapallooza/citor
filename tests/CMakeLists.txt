@@ -76,6 +76,7 @@ set(_citor_tests
     regression_detached_lifecycle_test
     regression_fast_range_test
     regression_inline_fallback_test
+    regression_low_latency_pool_specific_test
     regression_partition_overflow_test
     regression_runtime_hints_test
     regression_tls_context_test
