@@ -39,6 +39,7 @@
 #include <exception>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -3685,6 +3686,45 @@ runCoherenceProbe(const std::vector<std::uint32_t> &cpus,
   return out;
 }
 
+/// Process-wide singleton cache for `runCoherenceProbe`.
+///
+/// The latency matrix depends only on the host hardware: a given `cpus`
+/// set translates to one specific subset of physical cores and one
+/// cache hierarchy. Repeated calls for the same `cpus` are pure
+/// duplicate work. Cost matters whenever a process constructs many
+/// pools (test suites, benchmark harnesses, PoolGroup arenas).
+///
+/// Key is the sorted-unique `cpus` vector so the cache hits regardless
+/// of caller input order.
+inline CoherenceProbe
+cachedCoherenceProbe(const std::vector<std::uint32_t> &cpus,
+                     const std::vector<std::vector<std::uint32_t>> &sysfsPrior,
+                     std::uint32_t roundTrips = 1024U) {
+  std::vector<std::uint32_t> key = cpus;
+  std::sort(key.begin(), key.end());
+  key.erase(std::unique(key.begin(), key.end()), key.end());
+
+  static std::mutex cacheMutex;
+  static std::map<std::vector<std::uint32_t>, CoherenceProbe> cache;
+
+  {
+    const std::lock_guard<std::mutex> guard(cacheMutex);
+    const auto hit = cache.find(key);
+    if (hit != cache.end()) {
+      return hit->second;
+    }
+  }
+
+  // Run the probe outside the lock so a concurrent caller probing a
+  // different key is not blocked. A duplicate-probe race for the same
+  // key is harmless: the second insertion is dropped, and we return the
+  // first inserter's copy so identical pools see identical numbers.
+  CoherenceProbe fresh = runCoherenceProbe(cpus, sysfsPrior, roundTrips);
+
+  const std::lock_guard<std::mutex> guard(cacheMutex);
+  return cache.emplace(std::move(key), std::move(fresh)).first->second;
+}
+
 } // namespace citor::detail
 
 // ===== citor/detail/forkjoin_state.h =====
@@ -6864,11 +6904,14 @@ private:
     // tile-decoupled scans, ...) read this ratio to size their cross-CCD
     // share without any hardware-specific constants in the engine.
     //
-    // Skipped on single-CCD topologies (the probe would be a no-op),
-    // skipped on `PoolKind::Arena` (the parent `PoolGroup` is responsible
-    // for any cross-arena cost model -- per-arena probes would be both
-    // wasted work and biased by the arena's narrower CPU set).
-    if (m_kind == PoolKind::Standalone && m_topology.ccdCount > 1U) {
+    // Activation gate: `effective > 2U`. The previous `ccdCount > 1`
+    // gate excluded hybrid Intel parts with a single L3 (Alder Lake-P,
+    // Lunar Lake) where the P/E cluster split is visible only through
+    // the probe's latency matrix. `effective > 2` keeps the probe off
+    // single-worker pools (where there are no pairs to measure) and
+    // off arenas (PoolGroup owns the cross-arena cost model and per-
+    // arena probes would be biased by the arena's narrower CPU set).
+    if (m_kind == PoolKind::Standalone && effective > 2U) {
       // Build the flat CPU list the probe should walk: producer CPU plus
       // every worker's pinned CPU. Skip CPUs we could not pin (UINT32_MAX
       // sentinel from `initWorkers` on a permission-restricted host) so
@@ -6883,11 +6926,12 @@ private:
       }
       // 1024 round-trips per pair amortises ping-pong jitter; the probe
       // runs in N-1 disjoint-pair-parallel rounds so wall time scales
-      // with (cpus - 1) * single-pair-probe-time. On a single-CCD probe
-      // the histogram is unimodal and `clusterByLatency` falls back to
-      // the sysfs prior.
+      // with (cpus - 1) * single-pair-probe-time. The cached variant
+      // returns an existing matrix for identical `probeCpus` sets so
+      // test suites and bench harnesses that build many pools pay the
+      // probe cost once.
       m_coherenceProbe =
-          detail::runCoherenceProbe(probeCpus, m_topology.ccdGroups);
+          detail::cachedCoherenceProbe(probeCpus, m_topology.ccdGroups);
     }
     // Pre-resolve the parallelScan-specific topology fields. Inputs are all
     // pool-immutable post-ctor (slot CCDs, cpu ids, probe cluster ids and

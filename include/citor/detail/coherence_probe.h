@@ -6,6 +6,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <map>
+#include <mutex>
 #include <numeric>
 #include <thread>
 #include <utility>
@@ -622,6 +624,40 @@ runCoherenceProbe(const std::vector<std::uint32_t> &cpus,
     out.maxCrossOverIntraRatio = maxCross / maxIntra;
   }
   return out;
+}
+
+/// Process-wide cache for `runCoherenceProbe`, keyed on the
+/// sorted-unique `cpus` vector. The latency matrix depends only on the
+/// host hardware, so repeated probes for the same set are duplicate
+/// work; test suites, bench harnesses, and `PoolGroup` arenas reuse a
+/// single matrix per process.
+inline CoherenceProbe
+cachedCoherenceProbe(const std::vector<std::uint32_t> &cpus,
+                     const std::vector<std::vector<std::uint32_t>> &sysfsPrior,
+                     std::uint32_t roundTrips = 1024U) {
+  std::vector<std::uint32_t> key = cpus;
+  std::sort(key.begin(), key.end());
+  key.erase(std::unique(key.begin(), key.end()), key.end());
+
+  static std::mutex cacheMutex;
+  static std::map<std::vector<std::uint32_t>, CoherenceProbe> cache;
+
+  {
+    const std::lock_guard<std::mutex> guard(cacheMutex);
+    const auto hit = cache.find(key);
+    if (hit != cache.end()) {
+      return hit->second;
+    }
+  }
+
+  // Run the probe outside the lock so a concurrent caller probing a
+  // different key is not blocked. A duplicate-probe race for the same
+  // key is harmless: the second insertion is dropped, and we return the
+  // first inserter's copy so identical pools see identical numbers.
+  CoherenceProbe fresh = runCoherenceProbe(cpus, sysfsPrior, roundTrips);
+
+  const std::lock_guard<std::mutex> guard(cacheMutex);
+  return cache.emplace(std::move(key), std::move(fresh)).first->second;
 }
 
 } // namespace citor::detail

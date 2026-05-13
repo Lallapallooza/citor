@@ -644,11 +644,12 @@ private:
     // tile-decoupled scans, ...) read this ratio to size their cross-CCD
     // share without any hardware-specific constants in the engine.
     //
-    // Skipped on single-CCD topologies (the probe would be a no-op),
-    // skipped on `PoolKind::Arena` (the parent `PoolGroup` is responsible
-    // for any cross-arena cost model -- per-arena probes would be both
-    // wasted work and biased by the arena's narrower CPU set).
-    if (m_kind == PoolKind::Standalone && m_topology.ccdCount > 1U) {
+    // Gate the probe on `effective > 2`. The earlier `ccdCount > 1`
+    // gate hid hybrid single-L3 Intel parts whose P/E split is visible
+    // only through the latency matrix; the new gate still excludes
+    // single-worker pools (no pairs) and arenas (PoolGroup owns the
+    // cross-arena cost model).
+    if (m_kind == PoolKind::Standalone && effective > 2U) {
       // Build the flat CPU list the probe should walk: producer CPU plus
       // every worker's pinned CPU. Skip CPUs we could not pin (UINT32_MAX
       // sentinel from `initWorkers` on a permission-restricted host) so
@@ -663,11 +664,12 @@ private:
       }
       // 1024 round-trips per pair amortises ping-pong jitter; the probe
       // runs in N-1 disjoint-pair-parallel rounds so wall time scales
-      // with (cpus - 1) * single-pair-probe-time. On a single-CCD probe
-      // the histogram is unimodal and `clusterByLatency` falls back to
-      // the sysfs prior.
+      // with (cpus - 1) * single-pair-probe-time. The cached variant
+      // returns an existing matrix for identical `probeCpus` sets so
+      // test suites and bench harnesses that build many pools pay the
+      // probe cost once.
       m_coherenceProbe =
-          detail::runCoherenceProbe(probeCpus, m_topology.ccdGroups);
+          detail::cachedCoherenceProbe(probeCpus, m_topology.ccdGroups);
     }
     // Pre-resolve the parallelScan-specific topology fields. Inputs are all
     // pool-immutable post-ctor (slot CCDs, cpu ids, probe cluster ids and
