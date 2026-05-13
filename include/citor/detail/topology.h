@@ -420,15 +420,46 @@ inline Topology detectTopologyWindows() {
       topo.l2KibPerCore = l2SizeKibByCpu[first];
     }
   }
-  std::uint64_t bestKib = 0U;
-  std::uint32_t bestIdx = 0;
+  // Two-step `preferredCcd` pick: a largest-L3 CCD wider than 1.5x
+  // the next-largest wins outright (catches V-Cache at 3x without
+  // firing on uniform L3); otherwise pick the largest L3 CCD that
+  // does not contain the BSP, since both kernels bias DPC / IRQ /
+  // kthread placement onto the BSP's CCD. Fall back to the absolute
+  // largest L3 when only one CCD exists.
+  std::uint64_t largestKib = 0U;
+  std::uint64_t secondKib = 0U;
+  std::uint32_t largestIdx = 0;
   for (std::size_t ccd = 0; ccd < topo.l3KibOfCcd.size(); ++ccd) {
-    if (topo.l3KibOfCcd[ccd] > bestKib) {
-      bestKib = topo.l3KibOfCcd[ccd];
-      bestIdx = static_cast<std::uint32_t>(ccd);
+    const std::uint64_t k = topo.l3KibOfCcd[ccd];
+    if (k > largestKib) {
+      secondKib = largestKib;
+      largestKib = k;
+      largestIdx = static_cast<std::uint32_t>(ccd);
+    } else if (k > secondKib) {
+      secondKib = k;
     }
   }
-  topo.preferredCcd = bestIdx;
+  const bool asymmetricL3 =
+      secondKib == 0U || (largestKib * 2U > secondKib * 3U);
+  if (asymmetricL3) {
+    topo.preferredCcd = largestIdx;
+  } else {
+    const std::uint32_t bspCcd =
+        (!topo.ccdOfCpu.empty()) ? topo.ccdOfCpu[0] : UINT32_MAX;
+    std::uint64_t bestKib = 0U;
+    std::uint32_t bestIdx = UINT32_MAX;
+    for (std::size_t ccd = 0; ccd < topo.l3KibOfCcd.size(); ++ccd) {
+      if (static_cast<std::uint32_t>(ccd) == bspCcd) {
+        continue;
+      }
+      if (topo.l3KibOfCcd[ccd] > bestKib ||
+          (topo.l3KibOfCcd[ccd] == bestKib && bestIdx == UINT32_MAX)) {
+        bestKib = topo.l3KibOfCcd[ccd];
+        bestIdx = static_cast<std::uint32_t>(ccd);
+      }
+    }
+    topo.preferredCcd = bestIdx == UINT32_MAX ? largestIdx : bestIdx;
+  }
 
   // Reorder each CCD so SMT-capable cores appear first, descending CPU
   // id otherwise. Hybrid Intel parts expose E-cores at higher CPU ids;
@@ -634,15 +665,44 @@ inline Topology detectTopology() {
         "/sys/devices/system/cpu/cpu" +
         std::to_string(topo.physicalCores.front()) + "/cache/index2/size");
   }
-  std::uint64_t bestKib = 0U;
-  std::uint32_t bestIdx = 0;
+  // Two-step CCD pick: a largest-L3 CCD wider than 1.5x the next wins
+  // outright (V-Cache); otherwise pick the largest non-BSP CCD, since
+  // IRQ / kthread placement biases toward CPU 0's CCD. Fall back to
+  // absolute largest when only one CCD exists.
+  std::uint64_t largestKib = 0U;
+  std::uint64_t secondKib = 0U;
+  std::uint32_t largestIdx = 0;
   for (std::size_t ccd = 0; ccd < topo.l3KibOfCcd.size(); ++ccd) {
-    if (topo.l3KibOfCcd[ccd] > bestKib) {
-      bestKib = topo.l3KibOfCcd[ccd];
-      bestIdx = static_cast<std::uint32_t>(ccd);
+    const std::uint64_t k = topo.l3KibOfCcd[ccd];
+    if (k > largestKib) {
+      secondKib = largestKib;
+      largestKib = k;
+      largestIdx = static_cast<std::uint32_t>(ccd);
+    } else if (k > secondKib) {
+      secondKib = k;
     }
   }
-  topo.preferredCcd = bestIdx;
+  const bool asymmetricL3 =
+      secondKib == 0U || (largestKib * 2U > secondKib * 3U);
+  if (asymmetricL3) {
+    topo.preferredCcd = largestIdx;
+  } else {
+    const std::uint32_t bspCcd =
+        (!topo.ccdOfCpu.empty()) ? topo.ccdOfCpu[0] : UINT32_MAX;
+    std::uint64_t bestKib = 0U;
+    std::uint32_t bestIdx = UINT32_MAX;
+    for (std::size_t ccd = 0; ccd < topo.l3KibOfCcd.size(); ++ccd) {
+      if (static_cast<std::uint32_t>(ccd) == bspCcd) {
+        continue;
+      }
+      if (topo.l3KibOfCcd[ccd] > bestKib ||
+          (topo.l3KibOfCcd[ccd] == bestKib && bestIdx == UINT32_MAX)) {
+        bestKib = topo.l3KibOfCcd[ccd];
+        bestIdx = static_cast<std::uint32_t>(ccd);
+      }
+    }
+    topo.preferredCcd = bestIdx == UINT32_MAX ? largestIdx : bestIdx;
+  }
 
   // Reorder each CCD so SMT-capable cores appear first, descending CPU
   // id otherwise. Hybrid Intel parts expose E-cores at higher CPU ids;
