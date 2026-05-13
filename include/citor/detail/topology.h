@@ -133,6 +133,12 @@ struct Topology {
 
   /// Number of distinct CCDs (or shared-L3 groups).
   std::uint32_t ccdCount = 0;
+
+  /// SMT sibling of each logical CPU id, or `UINT32_MAX` when the core
+  /// is single-threaded or the OS did not report siblings. SMT4 silicon
+  /// records the first non-self entry deterministically. The placement
+  /// rule reads this to route slot 1 onto the producer's SMT sibling.
+  std::vector<std::uint32_t> smtSiblingOfCpu;
 };
 
 /// Read a sysfs cache size string like "32768K" or "96M" and convert to KiB.
@@ -237,6 +243,7 @@ inline Topology detectTopologyWindows() {
     topo.logicalCount = 1U;
   }
   topo.ccdOfCpu.assign(topo.logicalCount, 0U);
+  topo.smtSiblingOfCpu.assign(topo.logicalCount, UINT32_MAX);
 
   std::vector<std::uint32_t> allowed;
   allowed.reserve(topo.logicalCount);
@@ -285,6 +292,17 @@ inline Topology detectTopologyWindows() {
           }
         }
       });
+  // Record the "other" sibling per CPU. On SMT4 silicon (>2 reported
+  // siblings) we pick the first non-self entry deterministically.
+  for (std::uint32_t cpu = 0; cpu < topo.logicalCount; ++cpu) {
+    const auto &sibs = smtSiblings[cpu];
+    for (const std::uint32_t s : sibs) {
+      if (s != cpu) {
+        topo.smtSiblingOfCpu[cpu] = s;
+        break;
+      }
+    }
+  }
 
   std::vector<bool> consumed(topo.logicalCount, false);
   for (const std::uint32_t cpu : allowed) {
@@ -412,15 +430,31 @@ inline Topology detectTopologyWindows() {
   }
   topo.preferredCcd = bestIdx;
 
-  // Mirror the Linux reorder so each CCD's members appear in descending CPU
-  // id order; `reserveProducerCpuFirst` rotates the producer to the front
-  // later.
+  // Reorder each CCD so SMT-capable cores appear first, descending CPU
+  // id otherwise. Hybrid Intel parts expose E-cores at higher CPU ids;
+  // pure-descending order would place the producer on an E-core, where
+  // the slot-1 SMT-sibling routing rule has nothing to attach to. AMD
+  // parts have SMT on every core, so the bias is a no-op.
   std::vector<std::uint32_t> reordered;
   reordered.reserve(topo.physicalCores.size());
   for (const auto &group : topo.ccdGroups) {
+    std::vector<std::uint32_t> withSibling;
+    std::vector<std::uint32_t> withoutSibling;
+    withSibling.reserve(group.size());
+    withoutSibling.reserve(group.size());
     for (std::size_t i = group.size(); i > 0U; --i) {
-      reordered.push_back(group[i - 1U]);
+      const std::uint32_t cpu = group[i - 1U];
+      const bool hasSibling = cpu < topo.smtSiblingOfCpu.size() &&
+                              topo.smtSiblingOfCpu[cpu] != UINT32_MAX;
+      if (hasSibling) {
+        withSibling.push_back(cpu);
+      } else {
+        withoutSibling.push_back(cpu);
+      }
     }
+    reordered.insert(reordered.end(), withSibling.begin(), withSibling.end());
+    reordered.insert(reordered.end(), withoutSibling.begin(),
+                     withoutSibling.end());
   }
   if (reordered.size() == topo.physicalCores.size()) {
     topo.physicalCores = std::move(reordered);
@@ -455,6 +489,7 @@ inline Topology detectTopology() {
     topo.logicalCount = 1;
   }
   topo.ccdOfCpu.assign(topo.logicalCount, 0U);
+  topo.smtSiblingOfCpu.assign(topo.logicalCount, UINT32_MAX);
 
   std::vector<std::uint32_t> allowed;
   allowed.reserve(topo.logicalCount);
@@ -485,7 +520,9 @@ inline Topology detectTopology() {
     }
   }
 
-  // Pick one logical CPU per physical core (skip SMT siblings).
+  // Pick one logical CPU per physical core (skip SMT siblings). Record
+  // per-CPU sibling mapping while walking sysfs so callers can route
+  // slot 1 to the producer's SMT sibling without re-reading sysfs.
   std::vector<bool> consumed(topo.logicalCount, false);
   for (const std::uint32_t cpu : allowed) {
     if (cpu >= consumed.size() || consumed[cpu]) {
@@ -501,6 +538,20 @@ inline Topology detectTopology() {
     for (const std::uint32_t sib : siblings) {
       if (sib < consumed.size()) {
         consumed[sib] = true;
+      }
+    }
+    // Stamp both directions of each sibling pair on first sighting; the
+    // SMT4 fallback in `smtSiblingOfCpu`'s doc applies if a core reports
+    // more than two siblings.
+    for (const std::uint32_t sib : siblings) {
+      if (sib >= topo.smtSiblingOfCpu.size() || sib == cpu) {
+        continue;
+      }
+      if (topo.smtSiblingOfCpu[cpu] == UINT32_MAX) {
+        topo.smtSiblingOfCpu[cpu] = sib;
+      }
+      if (topo.smtSiblingOfCpu[sib] == UINT32_MAX) {
+        topo.smtSiblingOfCpu[sib] = cpu;
       }
     }
   }
@@ -593,21 +644,32 @@ inline Topology detectTopology() {
   }
   topo.preferredCcd = bestIdx;
 
-  // Reorder `physicalCores` so each CCD's members appear in descending CPU id
-  // order. The standalone-pool slot-0 CPU (the caller thread's current CPU) is
-  // later rotated to the front by `reserveProducerCpuFirst`; until that
-  // rotation, putting the highest-CPU member of each CCD first means
-  // slots 1..N-1 of the same-CCD subset land on the higher-numbered sibling
-  // pairs. On Linux those pairs typically have lighter IRQ steering than the
-  // BSP- adjacent siblings (CPU 0+16 / 1+17 are the conventional irqbalance
-  // defaults), so a hot-spinning worker on the high-CPU end of the CCD sees
-  // fewer SMT-cross-issue collisions from kthreads on its sibling.
+  // Reorder each CCD so SMT-capable cores appear first, descending CPU
+  // id otherwise. Hybrid Intel parts expose E-cores at higher CPU ids;
+  // pure-descending order would place the producer on an E-core, where
+  // the slot-1 SMT-sibling routing rule has nothing to attach to. The
+  // descending tail within each bucket preserves the irqbalance bias
+  // that puts kthreads on the low-numbered siblings.
   std::vector<std::uint32_t> reordered;
   reordered.reserve(topo.physicalCores.size());
   for (const auto &group : topo.ccdGroups) {
+    std::vector<std::uint32_t> withSibling;
+    std::vector<std::uint32_t> withoutSibling;
+    withSibling.reserve(group.size());
+    withoutSibling.reserve(group.size());
     for (std::size_t i = group.size(); i > 0U; --i) {
-      reordered.push_back(group[i - 1U]);
+      const std::uint32_t cpu = group[i - 1U];
+      const bool hasSibling = cpu < topo.smtSiblingOfCpu.size() &&
+                              topo.smtSiblingOfCpu[cpu] != UINT32_MAX;
+      if (hasSibling) {
+        withSibling.push_back(cpu);
+      } else {
+        withoutSibling.push_back(cpu);
+      }
     }
+    reordered.insert(reordered.end(), withSibling.begin(), withSibling.end());
+    reordered.insert(reordered.end(), withoutSibling.begin(),
+                     withoutSibling.end());
   }
   if (reordered.size() == topo.physicalCores.size()) {
     topo.physicalCores = std::move(reordered);
