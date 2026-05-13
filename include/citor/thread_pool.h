@@ -302,60 +302,60 @@ private:
 #endif
   }
 
-  /// Reorders `|cpuPins|` so the producer's reserved CPU sits at index 0.
-  /// Standalone pools default to CCD-local placement; the producer pin
-  /// follows `topo.preferredCcd` so workers and producer first-touch on
-  /// the same NUMA node. Returns the reordered pin list.
-  static std::vector<std::uint32_t>
-  reserveProducerCpuFirst(const std::vector<std::uint32_t> &cpuPins,
-                          PoolKind kind, const detail::Topology &topo) {
+  /// Producer-CCD-first reorder without SMT exceptions. Standalone
+  /// pools spawn workers on slot 0's CCD so the producer auto-pin
+  /// makes user buffers first-touch there; `preferredCcd` keeps the
+  /// choice deterministic on V-Cache parts. Arena pools skip the
+  /// reorder because `PoolGroup` already filtered the pin list.
+  std::vector<std::uint32_t>
+  reserveProducerCpuFirstCcdOnly(const std::vector<std::uint32_t> &cpuPins,
+                                 bool standalone) const {
     std::vector<std::uint32_t> pins = cpuPins;
-#ifdef __linux__
-    // Standalone pools default to CCD-local placement: workers spawn on the
-    // same CCD as slot 0, and the producer is auto-pinned to slot 0 at
-    // construction so user buffers first-touch on that CCD's NUMA node. Picking
-    // the CCD by `sched_getcpu()` was bimodal -- on V-Cache the kernel could
-    // schedule the constructor on the regular CCD (32 MiB L3) instead of the
-    // V-Cache CCD (96 MiB L3) and the workload would spill L3 to DRAM. Pick
-    // `topo.preferredCcd`
-    // (= largest L3, deterministic tie-break) instead, then keep that CCD's
-    // pins first while appending the rest in their detectTopology() order so
-    // pools larger than one CCD still span every available core.
-    if (kind != PoolKind::Standalone || pins.size() <= 1U) {
+    if (!standalone || pins.size() <= 1U) {
       return pins;
     }
-    const std::uint32_t targetCcd = topo.preferredCcd;
-    if (targetCcd >= topo.ccdGroups.size()) {
+    const std::uint32_t targetCcd = m_topology.preferredCcd;
+    if (targetCcd >= m_topology.ccdGroups.size()) {
       return pins;
     }
     std::vector<std::uint32_t> reordered;
     reordered.reserve(pins.size());
     for (const std::uint32_t cpu : pins) {
-      if (cpu < topo.ccdOfCpu.size() && topo.ccdOfCpu[cpu] == targetCcd) {
+      if (cpu < m_topology.ccdOfCpu.size() &&
+          m_topology.ccdOfCpu[cpu] == targetCcd) {
         reordered.push_back(cpu);
       }
     }
     for (const std::uint32_t cpu : pins) {
-      if (cpu >= topo.ccdOfCpu.size() || topo.ccdOfCpu[cpu] != targetCcd) {
+      if (cpu >= m_topology.ccdOfCpu.size() ||
+          m_topology.ccdOfCpu[cpu] != targetCcd) {
         reordered.push_back(cpu);
       }
     }
     if (reordered.size() == pins.size()) {
       pins = std::move(reordered);
     }
-#else
-    (void)kind;
-    (void)topo;
-#endif
     return pins;
   }
 
   /// Shared body for both constructors: spawn |participants| workers pinned to
-  /// |cpuPins|.
+  /// |cpuPins|. Placement of the participant pins is delegated to
+  /// `detail::reserveProducerCpuFirst`; the function handles the producer-CCD
+  /// reorder for standalone pools and applies the SMT-aware exceptions
+  /// (slot 1 = producer's SMT sibling at j=2, SMT-sibling overflow when
+  /// oversubscribed). The SMT-aware exceptions are gated on
+  /// `Affinity::PerCpuSmtPair`; every other `Affinity` value keeps the
+  /// distinct-physical-core layout the caller supplied.
   void initWorkers(std::size_t participants,
                    const std::vector<std::uint32_t> &cpuPins) {
-    const std::vector<std::uint32_t> participantPins =
-        reserveProducerCpuFirst(cpuPins, m_kind, m_topology);
+    const bool standalone = m_kind == PoolKind::Standalone;
+    std::vector<std::uint32_t> participantPins;
+    if (m_workerAffinity == Affinity::PerCpuSmtPair) {
+      participantPins = detail::reserveProducerCpuFirst(cpuPins, participants,
+                                                        standalone, m_topology);
+    } else {
+      participantPins = reserveProducerCpuFirstCcdOnly(cpuPins, standalone);
+    }
     std::size_t maxByTopology = participants;
     if (!participantPins.empty()) {
       maxByTopology = participantPins.size();

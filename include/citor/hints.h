@@ -57,6 +57,12 @@ enum class Affinity : std::uint8_t {
   /// any other CPU. Best for HPC / real-time use where determinism
   /// matters more than the kernel's ability to rebalance.
   PerCpu,
+  /// `PerCpu` with one amendment: at `participants == 2` slot 1 lands
+  /// on the producer's SMT sibling so the handshake stays L1-resident.
+  /// Latency win for dispatch-bound bodies; compute-bound bodies pay
+  /// peak-FP throughput when slot 0 and slot 1 share execution units.
+  /// Identical to `PerCpu` at `participants > 2`.
+  PerCpuSmtPair,
   /// Each worker pinned to its CCD's full logical-CPU set; the kernel
   /// may migrate the worker within its CCD but not across clusters.
   /// Preserves CCD-locality of caches while letting the kernel route
