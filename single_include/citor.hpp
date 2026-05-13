@@ -2,7 +2,7 @@
 //
 // citor -- header-only C++20 thread pool
 // version: 0.1.0
-// commit:  2dd9b8df626fbdd6d39d0e8c5260f855d3b1a4ac
+// commit:  c9415431323167647e55f3caaa74997597fe1934
 // generated: 2026-05-17
 //
 // GENERATED FILE -- DO NOT EDIT.
@@ -1652,6 +1652,110 @@ inline std::vector<std::vector<unsigned>> enumerateCcds() {
     result.push_back(std::move(all));
   }
   return result;
+}
+
+/// Reorders `|cpuPins|` so the producer's reserved CPU sits at index 0
+/// and downstream slots follow a workload-neutral physical-cores-first
+/// rule with two principled exceptions:
+///   * `participants == 2` (one worker): slot 1 lands on the producer's
+///     SMT sibling so the producer-worker ack stays L1-resident. Only
+///     one worker either way, so no compute throughput is sacrificed.
+///   * `participants > pins.size()` (oversubscribed): SMT siblings of
+///     pins are appended as overflow so the pool can serve `j >
+///     physicalCount` requests without silent truncation. Producer-CCD
+///     siblings come first so the early overflow slots stay on the
+///     same NUMA node.
+/// For every other case (`2 < j <= physicalCount`) the function
+/// preserves the caller-supplied distinct-physical-core layout, which
+/// is the compute-throughput-optimal pin set on every supported
+/// microarchitecture. Standalone pools also get a producer-CCD-first
+/// reorder so workers and the producer first-touch on the same NUMA
+/// node.
+///
+/// `|standalone|` is `true` for `PoolKind::Standalone` pools (apply
+/// producer-CCD reorder) and `false` for `PoolKind::Arena` pools (the
+/// `PoolGroup` already filtered `cpuPins` to the arena's CCD; skip the
+/// global-topology reorder so we don't shuffle CPUs out of the arena's
+/// scope).
+inline std::vector<std::uint32_t>
+reserveProducerCpuFirst(const std::vector<std::uint32_t> &cpuPins,
+                        std::size_t participants, bool standalone,
+                        const Topology &topo) {
+  std::vector<std::uint32_t> pins = cpuPins;
+  if (pins.size() <= 1U) {
+    return pins;
+  }
+  if (standalone) {
+    const std::uint32_t targetCcd = topo.preferredCcd;
+    if (targetCcd < topo.ccdGroups.size()) {
+      std::vector<std::uint32_t> reordered;
+      reordered.reserve(pins.size());
+      for (const std::uint32_t cpu : pins) {
+        if (cpu < topo.ccdOfCpu.size() && topo.ccdOfCpu[cpu] == targetCcd) {
+          reordered.push_back(cpu);
+        }
+      }
+      for (const std::uint32_t cpu : pins) {
+        if (cpu >= topo.ccdOfCpu.size() || topo.ccdOfCpu[cpu] != targetCcd) {
+          reordered.push_back(cpu);
+        }
+      }
+      if (reordered.size() == pins.size()) {
+        pins = std::move(reordered);
+      }
+    }
+  }
+
+  // Exception A: single-worker pool. Slot 1 = producer's SMT sibling.
+  if (participants == 2U && !topo.smtSiblingOfCpu.empty()) {
+    const std::uint32_t prodCpu = pins[0];
+    if (prodCpu < topo.smtSiblingOfCpu.size()) {
+      const std::uint32_t sib = topo.smtSiblingOfCpu[prodCpu];
+      if (sib != UINT32_MAX && sib != prodCpu) {
+        const auto sibIt = std::find(pins.begin(), pins.end(), sib);
+        if (sibIt == pins.end()) {
+          pins.insert(pins.begin() + 1, sib);
+        } else if (sibIt != pins.begin() + 1) {
+          std::iter_swap(pins.begin() + 1, sibIt);
+        }
+      }
+    }
+    return pins;
+  }
+
+  // Exception B: oversubscribed pool. Append SMT siblings as overflow,
+  // producer-CCD siblings first.
+  if (participants > pins.size() && !topo.smtSiblingOfCpu.empty()) {
+    const std::uint32_t targetCcd = topo.preferredCcd;
+    const std::size_t baseCount = pins.size();
+    for (std::size_t pass = 0; pass < 2U; ++pass) {
+      for (std::size_t i = 0; i < baseCount; ++i) {
+        const std::uint32_t cpu = pins[i];
+        if (cpu >= topo.smtSiblingOfCpu.size()) {
+          continue;
+        }
+        const std::uint32_t sib = topo.smtSiblingOfCpu[cpu];
+        if (sib == UINT32_MAX || sib == cpu) {
+          continue;
+        }
+        const bool preferredCcdMatch = sib < topo.ccdOfCpu.size() &&
+                                       targetCcd < topo.ccdGroups.size() &&
+                                       topo.ccdOfCpu[sib] == targetCcd;
+        if (pass == 0U && !preferredCcdMatch) {
+          continue;
+        }
+        if (pass == 1U && preferredCcdMatch) {
+          continue;
+        }
+        const bool already =
+            std::find(pins.begin(), pins.end(), sib) != pins.end();
+        if (!already) {
+          pins.push_back(sib);
+        }
+      }
+    }
+  }
+  return pins;
 }
 
 /// Pin the calling thread to a single CPU id.

@@ -79,6 +79,7 @@ set(_citor_tests
     regression_partition_overflow_test
     regression_runtime_hints_test
     regression_tls_context_test
+    reserve_producer_cpu_first_test
     run_plex_basic_test
     run_plex_cancellation_test
     run_plex_cpo_test
