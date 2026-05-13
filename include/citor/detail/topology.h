@@ -837,4 +837,15 @@ inline void bindAffinityOnce(std::uint32_t cpuId) noexcept {
 #endif
 }
 
+#if defined(_WIN32)
+/// Pin the calling thread to a single CPU and return the previous
+/// affinity mask. `SetThreadAffinityMask` returns the previous mask
+/// atomically with the new application, so one call covers save +
+/// apply. Returns 0 on failure (caller does not restore).
+inline DWORD_PTR pinCurrentThreadAndSave(std::uint32_t cpuId) noexcept {
+  const DWORD_PTR mask = static_cast<DWORD_PTR>(1) << (cpuId & 63U);
+  return ::SetThreadAffinityMask(::GetCurrentThread(), mask);
+}
+#endif
+
 } // namespace citor::detail

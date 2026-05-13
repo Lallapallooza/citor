@@ -2,7 +2,7 @@
 //
 // citor -- header-only C++20 thread pool
 // version: 0.1.0
-// commit:  555ccd519696fdef609958b037d5a767a7adf345
+// commit:  7c435b706ece22d4080aec8441394fade3dafc7c
 // generated: 2026-05-17
 //
 // GENERATED FILE -- DO NOT EDIT.
@@ -1796,6 +1796,18 @@ inline void bindAffinityOnce(std::uint32_t cpuId) noexcept {
   (void)cpuId;
 #endif
 }
+
+#if defined(_WIN32)
+/// Pin the calling thread to a single CPU and return the previous
+/// affinity mask. `SetThreadAffinityMask` returns the previous mask
+/// atomically with the new application, so one call covers the
+/// save+apply pair that on Linux costs `getaffinity + setaffinity`.
+/// Returns 0 on failure (caller treats as "no save, do not restore").
+inline DWORD_PTR pinCurrentThreadAndSave(std::uint32_t cpuId) noexcept {
+  const DWORD_PTR mask = static_cast<DWORD_PTR>(1) << (cpuId & 63U);
+  return ::SetThreadAffinityMask(::GetCurrentThread(), mask);
+}
+#endif
 
 } // namespace citor::detail
 
@@ -6412,6 +6424,12 @@ private:
     /// Producer's CPU affinity mask before auto-pin pinned it to slot 0's
     /// reserved CPU. Restored by the pool's destructor.
     cpu_set_t saved{};
+#elif defined(_WIN32)
+    /// Producer's affinity mask captured at auto-pin time; restored by
+    /// the pool destructor. Stored as the Windows-native `uintptr_t`
+    /// (DWORD_PTR) so the restore path can hand it straight to
+    /// `SetThreadAffinityMask`. Zero means "no save captured."
+    std::uintptr_t saved = 0U;
 #endif
     /// Stable identity tag for the pool that captured `saved`. Compared
     /// for equality only; never dereferenced.
@@ -6441,6 +6459,18 @@ private:
   /// `AutoPinState::saved` so the destructor can restore it from any
   /// thread.
   cpu_set_t m_autoPinSaved{};
+#elif defined(_WIN32)
+  /// True while this pool owns an active producer pin. Same role as the
+  /// Linux flag; destructor reads to decide whether to restore.
+  std::atomic<bool> m_autoPinActive{false};
+  /// Producer's Windows thread id at auto-pin time. Used by the
+  /// destructor to `OpenThread(THREAD_SET_LIMITED_INFORMATION, ...)`
+  /// when restore must run from a thread other than the producer.
+  /// Zero means "no producer captured."
+  std::uint32_t m_autoPinProducerTid = 0U;
+  /// Producer's pre-pin affinity mask mirrored from `AutoPinState::saved`
+  /// so the destructor can restore from any thread.
+  std::uintptr_t m_autoPinSaved = 0U;
 #endif
 
   /// First-call binder: detect whether the producer is already pinned
@@ -6495,6 +6525,59 @@ private:
       self->m_autoPinProducer = pthread_self();
       self->m_autoPinActive.store(true, std::memory_order_release);
     }
+#elif defined(_WIN32)
+    // Windows peer of the Linux auto-pin path. Same intent: on the first
+    // chunk-0 dispatch from this thread for this pool, pin the producer
+    // to slot 0's reserved CPU so the producer's slot-0 share runs
+    // L3-warm relative to background workers and back-to-back dispatches
+    // do not pay cross-CCD wake latency. Without this on Windows the
+    // matmul / reduce / pareto cells exhibit bimodal run-to-run variance:
+    // half the process invocations land the producer on a same-L3 CPU
+    // (fast mode), the other half on a different-L3 CPU (slow mode).
+    const std::uint32_t cpuId = producerCpu();
+    if (cpuId == UINT32_MAX) {
+      return;
+    }
+    auto &state = autoPinTls();
+    // `SetThreadAffinityMask(thread, ~0)` returns the previous mask and
+    // sets the mask to all-1s. We use the round-trip to capture the
+    // caller's affinity since Windows has no read-only accessor; if the
+    // thread was already pinned to a single CPU we restore the prior
+    // mask and let the existing pin stand, otherwise we apply our own.
+    HANDLE thisThread = ::GetCurrentThread();
+    const DWORD_PTR prevMask = ::SetThreadAffinityMask(
+        thisThread, static_cast<DWORD_PTR>(~DWORD_PTR{0}));
+    if (prevMask == 0U) {
+      // SetThreadAffinityMask failed (process affinity tighter than ~0).
+      // Bail without claiming the pool tag so the next call retries.
+      return;
+    }
+    // popcount(prevMask) <= 1 means "thread was already single-CPU
+    // pinned." Restore and leave the existing pin in place.
+    const bool wasPinned = (prevMask & (prevMask - 1U)) == 0U;
+    if (wasPinned) {
+      (void)::SetThreadAffinityMask(thisThread, prevMask);
+      state.pool = static_cast<const void *>(this);
+      return;
+    }
+    // Apply our pin to slot 0's CPU.
+    const DWORD_PTR newMask = static_cast<DWORD_PTR>(1) << (cpuId & 63U);
+    if (::SetThreadAffinityMask(thisThread, newMask) == 0U) {
+      (void)::SetThreadAffinityMask(thisThread, prevMask);
+      return;
+    }
+    if (!state.restorePending) {
+      state.saved = static_cast<std::uintptr_t>(prevMask);
+      state.restorePending = true;
+    }
+    state.pool = static_cast<const void *>(this);
+    // Mirror to pool-side so the destructor can restore even from a
+    // thread other than the producer.
+    auto *self = const_cast<ThreadPool *>(this);
+    self->m_autoPinSaved = state.saved;
+    self->m_autoPinProducerTid =
+        static_cast<std::uint32_t>(::GetCurrentThreadId());
+    self->m_autoPinActive.store(true, std::memory_order_release);
 #endif
   }
 
@@ -6558,6 +6641,26 @@ private:
                                    &m_autoPinSaved);
     }
     if (weOwnTlsTag) {
+      state.restorePending = false;
+      state.pool = nullptr;
+    }
+#elif defined(_WIN32)
+    if (m_autoPinActive.load(std::memory_order_acquire) &&
+        m_autoPinProducerTid != 0U && m_autoPinSaved != 0U) {
+      // Open the producer thread with `THREAD_SET_LIMITED_INFORMATION`,
+      // the documented minimum for `SetThreadAffinityMask`. If the
+      // thread is gone the restore is moot; Windows recycles TIDs after
+      // termination, so the OpenThread path is best-effort by
+      // construction.
+      HANDLE handle = ::OpenThread(THREAD_SET_LIMITED_INFORMATION, FALSE,
+                                   m_autoPinProducerTid);
+      if (handle != nullptr) {
+        (void)::SetThreadAffinityMask(handle,
+                                      static_cast<DWORD_PTR>(m_autoPinSaved));
+        ::CloseHandle(handle);
+      }
+    }
+    if (weOwnPin) {
       state.restorePending = false;
       state.pool = nullptr;
     }
@@ -7183,6 +7286,23 @@ public:
       if (pthread_setaffinity_np(pthread_self(), sizeof(set), &set) == 0) {
         m_restore = true;
       }
+#elif defined(_WIN32)
+      // Windows pin: single-CPU pin on slot 0's reserved CPU. Worker-CPU
+      // exclusion is irrelevant here because we pin to the producer's
+      // own reserved CPU; no worker is pinned there. The Linux logic's
+      // SMT-sibling exclusion is omitted because `Topology` does not
+      // retain the sibling table on Windows yet, and IRQ steering on
+      // Win11 rarely lands on a user thread's SMT sibling.
+      (void)topo;
+      (void)workerCpus;
+      (void)workerCpuCount;
+      if (cpuId == UINT32_MAX) {
+        return;
+      }
+      const DWORD_PTR saved = detail::pinCurrentThreadAndSave(cpuId);
+      if (saved != 0U) {
+        m_savedMask = static_cast<std::uintptr_t>(saved);
+      }
 #else
       (void)cpuId;
       (void)topo;
@@ -7195,6 +7315,14 @@ public:
 #ifdef __linux__
       if (m_restore) {
         (void)pthread_setaffinity_np(pthread_self(), sizeof(m_saved), &m_saved);
+      }
+#elif defined(_WIN32)
+      if (m_savedMask != 0U) {
+        // Restore on the same thread that constructed the guard. The
+        // guard is non-movable / non-copyable so the dtor runs on the
+        // producer; `GetCurrentThread()` is the producer's thread here.
+        (void)::SetThreadAffinityMask(::GetCurrentThread(),
+                                      static_cast<DWORD_PTR>(m_savedMask));
       }
 #endif
     }
@@ -7212,6 +7340,12 @@ public:
     /// True when the constructor successfully applied a new pin and the
     /// destructor must restore `m_saved`.
     bool m_restore = false;
+#elif defined(_WIN32)
+    /// Caller's affinity mask captured at construction; restored by the
+    /// destructor. Stored as the Windows-native `DWORD_PTR` so the
+    /// restore path can hand it straight to `SetThreadAffinityMask`.
+    /// Zero means "no save captured" (constructor failed or skipped).
+    std::uintptr_t m_savedMask = 0U;
 #endif
   };
 
