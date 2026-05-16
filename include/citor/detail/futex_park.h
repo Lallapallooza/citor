@@ -91,29 +91,37 @@ inline long futexWaitPrivate(std::atomic<std::uint32_t> *addr,
                              const void *timeout) noexcept {
   (void)timeout;
   std::uint32_t compare = expected;
-  const BOOL ok = ::WaitOnAddress(static_cast<volatile VOID *>(addr), &compare,
-                                  sizeof(std::uint32_t), INFINITE);
+  // Bounded 1 ms re-park instead of `INFINITE`: gives the worker a
+  // periodic chance to observe shutdown or a mailbox update that
+  // raced the wake. Caller re-parks when nothing is pending. Linux's
+  // `FUTEX_WAIT` is driven by the explicit wake and stays on
+  // `INFINITE`.
+  constexpr DWORD kWindowsParkTimeoutMs = 1U;
+  const BOOL ok =
+      ::WaitOnAddress(static_cast<volatile VOID *>(addr), &compare,
+                      sizeof(std::uint32_t), kWindowsParkTimeoutMs);
   return ok ? 0 : -1;
 }
 
-/// Windows peer of `FUTEX_WAKE_PRIVATE`. `n >= kBroadcastThreshold`
-/// (shutdown's `INT_MAX`) routes to `WakeByAddressAll`; bounded `n`
-/// loops `WakeByAddressSingle` so the chain-wake-2 protocol does not
-/// degenerate into a broadcast at every hop. Caller must publish the
-/// source-of-truth state before invoking, so a freshly-parked waiter
-/// either observes the update or is woken.
+/// Windows peer of `FUTEX_WAKE_PRIVATE`. `WakeByAddressAll` wakes every
+/// waiter parked on `addr`. Caller must publish the source-of-truth
+/// state before invoking, so a freshly-parked waiter either observes
+/// the update or is woken.
 inline long futexWakePrivate(std::atomic<std::uint32_t> *addr, int n) noexcept {
-  // Treat INT_MAX (or any value exceeding the practical worker fan-out) as
-  // a broadcast; otherwise wake exactly `n` waiters to mirror Linux's
-  // `FUTEX_WAKE_PRIVATE` semantics.
-  constexpr int kBroadcastThreshold = 1024;
-  if (n >= kBroadcastThreshold) {
-    ::WakeByAddressAll(static_cast<PVOID>(addr));
+  // Collapse any `n >= 2` request to a single `WakeByAddressAll`:
+  // `WakeByAddressSingle` has no batched variant, so an N-fold loop
+  // would issue N separate wakes. Broadcast wakes the queue in one
+  // call; spurious wakees re-park on their next mailbox check.
+  // `n == 1` still uses `WakeByAddressSingle` to avoid disturbing a
+  // second parked waiter.
+  if (n <= 0) {
     return 0;
   }
-  for (int i = 0; i < n; ++i) {
+  if (n == 1) {
     ::WakeByAddressSingle(static_cast<PVOID>(addr));
+    return 0;
   }
+  ::WakeByAddressAll(static_cast<PVOID>(addr));
   return 0;
 }
 

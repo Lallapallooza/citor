@@ -2,7 +2,7 @@
 //
 // citor -- header-only C++20 thread pool
 // version: 0.1.0
-// commit:  7c435b706ece22d4080aec8441394fade3dafc7c
+// commit:  23e9630dc553d8db956f257c2536746636dd9354
 // generated: 2026-05-17
 //
 // GENERATED FILE -- DO NOT EDIT.
@@ -1359,15 +1359,51 @@ inline Topology detectTopologyWindows() {
       topo.l2KibPerCore = l2SizeKibByCpu[first];
     }
   }
-  std::uint64_t bestKib = 0U;
-  std::uint32_t bestIdx = 0;
+  // Pick `preferredCcd` via a two-step heuristic:
+  //   1. If the largest-L3 CCD is more than 1.5x the next-largest, pick
+  //      it unconditionally. The big-cache CCD wins even with BSP-noise
+  //      tax. The 1.5x threshold catches 96/32 MiB Zen V-Cache parts
+  //      (3x) without triggering on uniform-L3 machines (1.0x).
+  //   2. Otherwise (uniform-L3 part) pick the largest L3 CCD that does
+  //      NOT contain CPU 0 (the BSP). Both kernels bias DPC / IRQ /
+  //      kthread placement onto the BSP CCD, so a producer pinned
+  //      there shares cache and pipeline resources with kernel work.
+  //   3. If only one CCD exists (or BSP-avoidance leaves us with
+  //      nothing), fall back to the absolute largest L3 CCD.
+  std::uint64_t largestKib = 0U;
+  std::uint64_t secondKib = 0U;
+  std::uint32_t largestIdx = 0;
   for (std::size_t ccd = 0; ccd < topo.l3KibOfCcd.size(); ++ccd) {
-    if (topo.l3KibOfCcd[ccd] > bestKib) {
-      bestKib = topo.l3KibOfCcd[ccd];
-      bestIdx = static_cast<std::uint32_t>(ccd);
+    const std::uint64_t k = topo.l3KibOfCcd[ccd];
+    if (k > largestKib) {
+      secondKib = largestKib;
+      largestKib = k;
+      largestIdx = static_cast<std::uint32_t>(ccd);
+    } else if (k > secondKib) {
+      secondKib = k;
     }
   }
-  topo.preferredCcd = bestIdx;
+  const bool asymmetricL3 =
+      secondKib == 0U || (largestKib * 2U > secondKib * 3U);
+  if (asymmetricL3) {
+    topo.preferredCcd = largestIdx;
+  } else {
+    const std::uint32_t bspCcd =
+        (!topo.ccdOfCpu.empty()) ? topo.ccdOfCpu[0] : UINT32_MAX;
+    std::uint64_t bestKib = 0U;
+    std::uint32_t bestIdx = UINT32_MAX;
+    for (std::size_t ccd = 0; ccd < topo.l3KibOfCcd.size(); ++ccd) {
+      if (static_cast<std::uint32_t>(ccd) == bspCcd) {
+        continue;
+      }
+      if (topo.l3KibOfCcd[ccd] > bestKib ||
+          (topo.l3KibOfCcd[ccd] == bestKib && bestIdx == UINT32_MAX)) {
+        bestKib = topo.l3KibOfCcd[ccd];
+        bestIdx = static_cast<std::uint32_t>(ccd);
+      }
+    }
+    topo.preferredCcd = bestIdx == UINT32_MAX ? largestIdx : bestIdx;
+  }
 
   // Mirror the Linux reorder: each CCD's members appear with SMT-capable
   // first, then descending CPU id within. Hybrid hosts (Alder Lake, Lunar
@@ -1575,15 +1611,44 @@ inline Topology detectTopology() {
         "/sys/devices/system/cpu/cpu" +
         std::to_string(topo.physicalCores.front()) + "/cache/index2/size");
   }
-  std::uint64_t bestKib = 0U;
-  std::uint32_t bestIdx = 0;
+  // Two-step CCD pick (see Windows-side comment for the rationale):
+  // largest L3 wins unconditionally when more than 1.5x next-largest
+  // (V-Cache); otherwise pick the largest non-BSP CCD; fall back to
+  // absolute largest if nothing else fits.
+  std::uint64_t largestKib = 0U;
+  std::uint64_t secondKib = 0U;
+  std::uint32_t largestIdx = 0;
   for (std::size_t ccd = 0; ccd < topo.l3KibOfCcd.size(); ++ccd) {
-    if (topo.l3KibOfCcd[ccd] > bestKib) {
-      bestKib = topo.l3KibOfCcd[ccd];
-      bestIdx = static_cast<std::uint32_t>(ccd);
+    const std::uint64_t k = topo.l3KibOfCcd[ccd];
+    if (k > largestKib) {
+      secondKib = largestKib;
+      largestKib = k;
+      largestIdx = static_cast<std::uint32_t>(ccd);
+    } else if (k > secondKib) {
+      secondKib = k;
     }
   }
-  topo.preferredCcd = bestIdx;
+  const bool asymmetricL3 =
+      secondKib == 0U || (largestKib * 2U > secondKib * 3U);
+  if (asymmetricL3) {
+    topo.preferredCcd = largestIdx;
+  } else {
+    const std::uint32_t bspCcd =
+        (!topo.ccdOfCpu.empty()) ? topo.ccdOfCpu[0] : UINT32_MAX;
+    std::uint64_t bestKib = 0U;
+    std::uint32_t bestIdx = UINT32_MAX;
+    for (std::size_t ccd = 0; ccd < topo.l3KibOfCcd.size(); ++ccd) {
+      if (static_cast<std::uint32_t>(ccd) == bspCcd) {
+        continue;
+      }
+      if (topo.l3KibOfCcd[ccd] > bestKib ||
+          (topo.l3KibOfCcd[ccd] == bestKib && bestIdx == UINT32_MAX)) {
+        bestKib = topo.l3KibOfCcd[ccd];
+        bestIdx = static_cast<std::uint32_t>(ccd);
+      }
+    }
+    topo.preferredCcd = bestIdx == UINT32_MAX ? largestIdx : bestIdx;
+  }
 
   // Reorder `physicalCores` so each CCD's members appear with SMT-capable
   // members first and then in descending CPU id order. Hybrid Intel parts
@@ -3937,35 +4002,49 @@ inline long futexWaitPrivate(std::atomic<std::uint32_t> *addr,
                              const void *timeout) noexcept {
   (void)timeout;
   std::uint32_t compare = expected;
+  // Bounded wait instead of INFINITE: Windows' scheduler demotes deeply
+  // parked threads (parked past a few ms) onto a slow-wake path that
+  // costs ~2-3 us to resume vs ~200 ns for a recently-parked thread. The
+  // 1 ms tick keeps the worker in the scheduler's fast-wake working set;
+  // the caller re-checks its source-of-truth atomic on every wake and
+  // re-parks immediately when no work is pending, so the periodic wake
+  // is bounded extra CPU, not a dispatch. Dispenso uses the same value
+  // on Windows (`DISPENSO_POLL_PERIOD_US = 1000`). Linux's
+  // `FUTEX_WAIT` does not exhibit the demotion behaviour; that branch
+  // stays on INFINITE.
+  constexpr DWORD kWindowsParkTimeoutMs = 1U;
   const BOOL ok = ::WaitOnAddress(static_cast<volatile VOID *>(addr), &compare,
-                                  sizeof(std::uint32_t), INFINITE);
+                                  sizeof(std::uint32_t), kWindowsParkTimeoutMs);
   return ok ? 0 : -1;
 }
 
 /// Windows wake primitive that mirrors `FUTEX_WAKE_PRIVATE`.
 ///
 /// `WakeByAddressAll` wakes every waiter parked on `addr` (matches the
-/// `n = INT_MAX` shutdown-broadcast shape). Bounded wake counts route to
-/// repeated `WakeByAddressSingle` so the chain-wake-2 protocol does not
-/// degenerate into a broadcast on Windows; broadcasting at every chain hop
-/// pulls every parked worker out of its park while only the first two are
-/// actually expected to claim work, which has shown up as a race in the
-/// stress suite. The waker side must publish the new state on `addr` (or
-/// whatever source-of-truth the waiter re-checks) before invoking this call,
-/// so a freshly-parked waiter is guaranteed to observe the update or be woken
-/// from the address.
+/// `n = INT_MAX` shutdown-broadcast shape). The waker side must publish
+/// the new state on `addr` (or whatever source-of-truth the waiter
+/// re-checks) before invoking this call, so a freshly-parked waiter is
+/// guaranteed to observe the update or be woken from the address.
 inline long futexWakePrivate(std::atomic<std::uint32_t> *addr, int n) noexcept {
-  // Treat INT_MAX (or any value exceeding the practical worker fan-out) as
-  // a broadcast; otherwise wake exactly `n` waiters to mirror Linux's
-  // `FUTEX_WAKE_PRIVATE` semantics.
-  constexpr int kBroadcastThreshold = 1024;
-  if (n >= kBroadcastThreshold) {
-    ::WakeByAddressAll(static_cast<PVOID>(addr));
+  // Collapse any `n >= 2` request to a single `WakeByAddressAll`.
+  // `WakeByAddressSingle` has no batched variant; looping it N times is
+  // N kernel transitions (~150-200 ns each on Win11), which at j=16
+  // dominates the dispatch budget. A single broadcast is one kernel
+  // transition regardless of waiter count; spurious wakees re-park
+  // immediately on their next mailbox check. Dispenso reaches the same
+  // conclusion (`thread_pool.cpp:wakeN`).
+  //
+  // `n == 1` still routes to `WakeByAddressSingle` because singular
+  // wake is identical cost when one is waiting and avoids disturbing
+  // a second parked worker.
+  if (n <= 0) {
     return 0;
   }
-  for (int i = 0; i < n; ++i) {
+  if (n == 1) {
     ::WakeByAddressSingle(static_cast<PVOID>(addr));
+    return 0;
   }
+  ::WakeByAddressAll(static_cast<PVOID>(addr));
   return 0;
 }
 
