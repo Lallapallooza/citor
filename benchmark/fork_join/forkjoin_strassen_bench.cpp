@@ -359,56 +359,18 @@ void strassenRec(Pool &pool, const Sub &c, const Sub &a, const Sub &b,
   const std::size_t childBudget = scratchBudget(half, depth + 1U);
 
   if (depth < kParallelDepth) {
-    // Parallel sub-product dispatch via recursiveSpawn2. The four groups
-    // are paired so each invocation spawns two independent leaves.
-    recursiveSpawn2(
-        pool,
-        [&](Pool &p) {
-          // Group 1: M1, M2.
-          recursiveSpawn2(
-              p,
-              [&](Pool &pp) {
-                strassenRec(pp, mBufs[0], t1A, t1B, childScratch, depth + 1U);
-              },
-              [&](Pool &pp) {
-                strassenRec(pp, mBufs[1], t2A, b11, childScratch + childBudget,
-                            depth + 1U);
-              });
-        },
-        [&](Pool &p) {
-          // Group 2: M3, M4.
-          recursiveSpawn2(
-              p,
-              [&](Pool &pp) {
-                strassenRec(pp, mBufs[2], a11, t3B,
-                            childScratch + (2U * childBudget), depth + 1U);
-              },
-              [&](Pool &pp) {
-                strassenRec(pp, mBufs[3], a22, t4B,
-                            childScratch + (3U * childBudget), depth + 1U);
-              });
-        });
-
-    recursiveSpawn2(
-        pool,
-        [&](Pool &p) {
-          // Group 3: M5, M6.
-          recursiveSpawn2(
-              p,
-              [&](Pool &pp) {
-                strassenRec(pp, mBufs[4], t5A, b22,
-                            childScratch + (4U * childBudget), depth + 1U);
-              },
-              [&](Pool &pp) {
-                strassenRec(pp, mBufs[5], t6A, t6B,
-                            childScratch + (5U * childBudget), depth + 1U);
-              });
-        },
-        [&](Pool &p) {
-          // Group 4: M7 alone (no sibling, runs in this branch directly).
-          strassenRec(p, mBufs[6], t7A, t7B, childScratch + (6U * childBudget),
-                      depth + 1U);
-        });
+    // Parallel sub-product dispatch via single 7-way fan-out so every
+    // pool exercises its native multi-child fork (citor::forkJoinAll,
+    // tbb::task_group, OpenMP taskgroup, dispenso::TaskSet) instead of
+    // nested 2-way pairs. The operand tables index parallel to mBufs
+    // and the per-product childScratch offsets, so the spawn body is a
+    // single indexed dispatch.
+    const std::array<Sub, 7> aOperands{t1A, t2A, a11, a22, t5A, t6A, t7A};
+    const std::array<Sub, 7> bOperands{t1B, b11, t3B, t4B, b22, t6B, t7B};
+    recursiveSpawnN(pool, 7U, [&](Pool &p, std::size_t i) {
+      strassenRec(p, mBufs[i], aOperands[i], bOperands[i],
+                  childScratch + (i * childBudget), depth + 1U);
+    });
   } else {
     // Serial sub-product dispatch. All seven mults reuse the same child
     // scratch slice, since they don't run concurrently. This keeps the

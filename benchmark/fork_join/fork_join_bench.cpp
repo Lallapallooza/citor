@@ -593,7 +593,11 @@ BenchTable buildFibTortureTable(std::size_t participants, int n,
 #ifdef CITOR_BENCH_HAS_LIBFORK
   table.rows.push_back(runLibforkFibFine(participants, n, /*cutoff=*/2, cal));
 #endif
-#ifdef CITOR_BENCH_HAS_TMC
+#if defined(CITOR_BENCH_HAS_TMC) && !defined(_WIN32)
+  // TMC heap-allocates one coroutine frame per recursion level; at
+  // n=30 / cutoff=2 the in-flight frames exhaust the Windows process
+  // heap and TMC re-throws `bad_alloc` through a `noexcept` boundary.
+  // glibc handles the same shape through per-thread arenas + overcommit.
   table.rows.push_back(runTmcFibFine(participants, n, /*cutoff=*/2, cal));
 #endif
   table.rows.push_back(measureSeqFibTorture(n, cal));
