@@ -370,9 +370,14 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
     // already does a single INT_MAX broadcast that's sequenced-after the
     // descriptor cleanup, and we don't want a parked worker waking on
     // shutdown to spawn an INT_MAX-equivalent chain.
+    //
+    // Skip when `participants <= 2`: slot 0 is the producer, so no
+    // other peer is parked to propagate to, and the syscall is dead
+    // weight on the cold-dispatch budget the producer's join observes.
     const std::uint64_t newPhase = mailbox & ~PoolControl::kDoneBit;
     const std::uint64_t oldPhase = lastSeenMailbox & ~PoolControl::kDoneBit;
-    if (newPhase != oldPhase && (mailbox & PoolControl::kShutdownBit) == 0) {
+    if (newPhase != oldPhase && (mailbox & PoolControl::kShutdownBit) == 0 &&
+        control.participants > 2U) {
       (void)futexWakePrivate(&control.futexWord, 2);
     }
   }

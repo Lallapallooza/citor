@@ -2,7 +2,7 @@
 //
 // citor -- header-only C++20 thread pool
 // version: 0.1.0
-// commit:  23e9630dc553d8db956f257c2536746636dd9354
+// commit:  aadb03eb6ace5391186b5c9a82c1b0f46b0f72a8
 // generated: 2026-05-17
 //
 // GENERATED FILE -- DO NOT EDIT.
@@ -6383,9 +6383,18 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
     // already does a single INT_MAX broadcast that's sequenced-after the
     // descriptor cleanup, and we don't want a parked worker waking on
     // shutdown to spawn an INT_MAX-equivalent chain.
+    //
+    // Skip when participants <= 2: at j=2 the only background worker is
+    // this one (slot 0 is the producer), so there is no other parked
+    // peer to propagate to. The `WakeByAddress*` / `FUTEX_WAKE` syscall
+    // would still fire and extend cold-dispatch latency observed by
+    // the producer's join wait. Cross-platform; the cost is most
+    // visible on Windows where the kernel transition is ~150-200 ns,
+    // but the wake is also pointless on Linux at j=2.
     const std::uint64_t newPhase = mailbox & ~PoolControl::kDoneBit;
     const std::uint64_t oldPhase = lastSeenMailbox & ~PoolControl::kDoneBit;
-    if (newPhase != oldPhase && (mailbox & PoolControl::kShutdownBit) == 0) {
+    if (newPhase != oldPhase && (mailbox & PoolControl::kShutdownBit) == 0 &&
+        control.participants > 2U) {
       (void)futexWakePrivate(&control.futexWord, 2);
     }
   }
