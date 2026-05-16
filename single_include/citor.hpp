@@ -2,7 +2,7 @@
 //
 // citor -- header-only C++20 thread pool
 // version: 0.1.0
-// commit:  aadb03eb6ace5391186b5c9a82c1b0f46b0f72a8
+// commit:  4d14151445d38d55f8f9056e14f4f4fd50e6873e
 // generated: 2026-05-17
 //
 // GENERATED FILE -- DO NOT EDIT.
@@ -11847,7 +11847,7 @@ private:
   void acquireDispatchGate(Priority priority) noexcept {
     if (priority == Priority::Latency) {
       m_latencyWaiting.fetch_add(1, std::memory_order_acq_rel);
-      m_dispatchMutex.lock();
+      dispatchGateLock();
       m_latencyWaiting.fetch_sub(1, std::memory_order_acq_rel);
       return;
     }
@@ -11859,11 +11859,11 @@ private:
       // our load and our `try_lock` wins because `lock()` blocks behind us
       // until we release; the recheck here covers the symmetric race.
       if (m_latencyWaiting.load(std::memory_order_acquire) == 0U &&
-          m_dispatchMutex.try_lock()) {
+          dispatchGateTryLock()) {
         if (m_latencyWaiting.load(std::memory_order_acquire) == 0U) {
           return;
         }
-        m_dispatchMutex.unlock();
+        dispatchGateUnlock();
       }
       m_throughputWaiting.fetch_add(1, std::memory_order_acq_rel);
       while (true) {
@@ -11874,12 +11874,12 @@ private:
         while (m_latencyWaiting.load(std::memory_order_acquire) != 0U) {
           std::this_thread::yield();
         }
-        m_dispatchMutex.lock();
+        dispatchGateLock();
         if (m_latencyWaiting.load(std::memory_order_acquire) != 0U) {
           // Latency caller registered while we were waiting on the lock;
           // release so its own `lock()` can succeed and retry from the wait
           // loop.
-          m_dispatchMutex.unlock();
+          dispatchGateUnlock();
           std::this_thread::yield();
           continue;
         }
@@ -11894,13 +11894,13 @@ private:
              m_throughputWaiting.load(std::memory_order_acquire) != 0U) {
         std::this_thread::yield();
       }
-      m_dispatchMutex.lock();
+      dispatchGateLock();
       if (m_latencyWaiting.load(std::memory_order_acquire) != 0U ||
           m_throughputWaiting.load(std::memory_order_acquire) != 0U) {
         // A higher-priority caller registered while we were waiting on the
         // lock; release so their own `lock()` can succeed and retry from the
         // wait loop.
-        m_dispatchMutex.unlock();
+        dispatchGateUnlock();
         std::this_thread::yield();
         continue;
       }
@@ -11912,7 +11912,111 @@ private:
   /// `acquireDispatchGate`. Pair with the matching acquire in `dispatchOne`'s
   /// scope; idempotent only when called once per acquire (no double-release
   /// defense; the call site guarantees the pairing).
-  void releaseDispatchGate() noexcept { m_dispatchMutex.unlock(); }
+  void releaseDispatchGate() noexcept { dispatchGateUnlock(); }
+
+  /// Dispatch-gate lock primitives.
+  ///
+  /// Linux: thin wrappers around `std::mutex`. glibc's pthread_mutex is
+  /// a futex pair (~10-15 ns uncontended) that sleeps in the kernel under
+  /// sustained contention.
+  ///
+  /// Windows: CAS fast path on `m_dispatchMutex` (~3-5 ns vs ~30-50 ns
+  /// for `std::mutex`'s SRWLock wrapper). On contention a brief PAUSE
+  /// spin absorbs short critical sections without a syscall; on
+  /// sustained contention the gate parks via `WaitOnAddress` so it
+  /// matches `std::mutex`'s "sleep, do not spin" floor.
+#if defined(_WIN32)
+  /// Lock-word `held` bit. Set while a thread owns the gate.
+  static constexpr std::uint32_t kHeldBit = 1U;
+  /// Lock-word `has-waiter-parked` bit. Set when at least one thread is
+  /// parked on the lock word via `WaitOnAddress`; lets the uncontended
+  /// unlock elide the `WakeByAddressSingle` syscall.
+  static constexpr std::uint32_t kHasWaiterBit = 2U;
+
+  /// CAS the lock word from free (0) to held (kHeldBit). Returns true on
+  /// success.
+  [[nodiscard, gnu::always_inline]] bool dispatchGateTryLock() noexcept {
+    std::uint32_t expected = 0U;
+    return m_dispatchMutex.compare_exchange_strong(expected, kHeldBit,
+                                                   std::memory_order_acquire,
+                                                   std::memory_order_relaxed);
+  }
+  /// Acquire the gate. CAS fast path then bounded PAUSE spin; on
+  /// sustained contention, set the has-waiter bit and park via
+  /// `WaitOnAddress`. Returns only when the gate is held.
+  void dispatchGateLock() noexcept {
+    if (dispatchGateTryLock()) {
+      return;
+    }
+    // Contended: brief PAUSE spin absorbs short hand-offs without a
+    // syscall, then park via WaitOnAddress so sustained contention
+    // does not burn CPU.
+    constexpr unsigned kSpinIters = 64U;
+    for (unsigned i = 0; i < kSpinIters; ++i) {
+      if (m_dispatchMutex.load(std::memory_order_relaxed) == 0U &&
+          dispatchGateTryLock()) {
+        return;
+      }
+      detail::cpuRelax();
+    }
+    // Set has-waiter, then acquire or park. Post-park acquire MUST set
+    // the has-waiter bit (acquire as `kHeldBit | kHasWaiterBit`, not
+    // `kHeldBit`). A thread coming out of WaitOnAddress cannot prove it
+    // was the only waiter; a sibling may have CAS'd has-waiter to 1 and
+    // parked on the same word concurrently. Acquiring without the bit
+    // lets the matching unlock observe `prev == kHeldBit` and skip
+    // `WakeByAddressSingle`, stranding the sibling. Pessimistically
+    // preserving the bit costs one redundant wake on unlock when there
+    // were no other waiters; missing a wake is a hang. Standard glibc-
+    // futex pattern.
+    for (;;) {
+      std::uint32_t cur = m_dispatchMutex.load(std::memory_order_relaxed);
+      if (cur == 0U) {
+        if (m_dispatchMutex.compare_exchange_weak(cur, kHeldBit | kHasWaiterBit,
+                                                  std::memory_order_acquire,
+                                                  std::memory_order_relaxed)) {
+          return;
+        }
+        continue;
+      }
+      if ((cur & kHasWaiterBit) == 0U) {
+        if (!m_dispatchMutex.compare_exchange_weak(cur, cur | kHasWaiterBit,
+                                                   std::memory_order_acq_rel,
+                                                   std::memory_order_relaxed)) {
+          continue;
+        }
+        cur |= kHasWaiterBit;
+      }
+      // Park on the lock word. If the holder unlocks and the word
+      // transitions away from `cur`, the kernel returns immediately.
+      (void)::WaitOnAddress(static_cast<volatile VOID *>(&m_dispatchMutex),
+                            &cur, sizeof(std::uint32_t), INFINITE);
+    }
+  }
+  /// Release the gate. Wakes one parked thread via `WakeByAddressSingle`
+  /// when the has-waiter bit was observed on the unlock; uncontended
+  /// release is one relaxed exchange and no syscall.
+  void dispatchGateUnlock() noexcept {
+    const std::uint32_t prev =
+        m_dispatchMutex.exchange(0U, std::memory_order_release);
+    if ((prev & kHasWaiterBit) != 0U) {
+      ::WakeByAddressSingle(static_cast<PVOID>(&m_dispatchMutex));
+    }
+  }
+#else
+  /// Try-lock peer on Linux: forwards to `std::mutex::try_lock`.
+  [[nodiscard, gnu::always_inline]] bool dispatchGateTryLock() noexcept {
+    return m_dispatchMutex.try_lock();
+  }
+  /// Lock peer on Linux: forwards to `std::mutex::lock`.
+  [[gnu::always_inline]] void dispatchGateLock() noexcept {
+    m_dispatchMutex.lock();
+  }
+  /// Unlock peer on Linux: forwards to `std::mutex::unlock`.
+  [[gnu::always_inline]] void dispatchGateUnlock() noexcept {
+    m_dispatchMutex.unlock();
+  }
+#endif
 
   /// Common publish / participate / join helper shared by every primitive.
   ///
@@ -12974,13 +13078,29 @@ private:
   /// for race freedom.
   std::exception_ptr m_detachedException;
 
-  /// Mutex serializing concurrent `dispatchOne` callers through the
-  /// priority gate. Held only for the duration of a single primitive's
+  /// Gate serialising concurrent `dispatchOne` callers through the
+  /// priority lanes. Held only for the duration of a single primitive's
   /// publish/participate/join cycle so concurrent producers from different
   /// threads do not interleave dispatches against the same worker pool.
-  /// Single-producer call sites pay one un-contended `lock`/`unlock` pair
-  /// on the dispatch hot path; the contention path is rare.
+  /// Single-producer call sites pay one uncontended lock/unlock pair on
+  /// the dispatch hot path.
+  ///
+  /// On Linux this is `std::mutex` directly: glibc's pthread_mutex is a
+  /// futex pair (~10-15 ns uncontended). On Windows `std::mutex` is an
+  /// `SRWLock` wrapper whose `try_lock` / `unlock` chain costs
+  /// ~30-50 ns even uncontended -- not visible at Linux's dispatch
+  /// budget but significant on Windows where the cold-dispatch budget
+  /// is ~1500-3000 ns of scheduler latency. The Windows branch
+  /// substitutes a futex-backed hybrid lock keyed on the same word the
+  /// gate helpers operate on; see `dispatchGate{Lock,TryLock,Unlock}`.
+#if defined(_WIN32)
+  /// Windows lock word (atomic). See `dispatchGateLock` for the bit
+  /// layout and the post-park has-waiter-preservation invariant.
+  std::atomic<std::uint32_t> m_dispatchMutex{0U};
+#else
+  /// Linux dispatch mutex (glibc futex pair).
   std::mutex m_dispatchMutex;
+#endif
 
   /// Pointer to the descriptor whose fields the workers' TLS caches are
   /// currently primed with. Updated under `m_dispatchMutex` on every full
