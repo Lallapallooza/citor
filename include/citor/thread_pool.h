@@ -6117,14 +6117,21 @@ private:
       const std::uint32_t producerCpuU =
           producerCpu < 0 ? UINT32_MAX
                           : static_cast<std::uint32_t>(producerCpu);
+#elif defined(_WIN32)
+      // `GetCurrentProcessorNumber` is the Windows peer of `sched_getcpu`:
+      // a single instruction read from the local APIC, no syscall.
+      // Cached once per join so the per-64-rounds collision probe does
+      // not pay the read each time.
+      const std::uint32_t producerCpuU =
+          static_cast<std::uint32_t>(::GetCurrentProcessorNumber());
 #endif
       const auto pendingPinnedToCurrentCpu = [workersBase
-#ifdef __linux__
+#if defined(__linux__) || defined(_WIN32)
                                               ,
                                               producerCpuU
 #endif
       ](std::uint64_t pending) noexcept {
-#ifdef __linux__
+#if defined(__linux__) || defined(_WIN32)
         if (producerCpuU == UINT32_MAX) {
           return false;
         }
