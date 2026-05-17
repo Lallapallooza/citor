@@ -93,18 +93,45 @@ These points are API contract, not implementation trivia.
 
 ## vs other thread pools
 
-All peers in this table are bench competitors. Numbers and per-cell wins live in [Performance shape](#performance-shape).
+All ten peers below appear in `benchmark/parallel_bench` (the two coroutine schedulers join the recursive fork-join workloads). Numbers and per-cell wins live in [Performance shape](#performance-shape).
 
-| capability                                            | citor | BS::thread_pool | oneTBB                   | Taskflow         | Eigen::ThreadPool | dispenso    | OpenMP     |
-|-------------------------------------------------------|:-----:|:---------------:|:------------------------:|:----------------:|:-----------------:|:-----------:|:----------:|
-| Recursive fork-join over per-worker work-stealing deques | yes (`forkJoin`) | no | yes (`task_group`) | yes (`Subflow`) | no | yes | tied tasks |
-| Multi-stage pipeline in one dispatch descriptor       | yes (`parallelChain`) | no | yes (`parallel_pipeline`) | yes (`Pipeline`) | no | no | no |
-| Workers persistent across N phases without wake/park  | yes (`runPlex`) | no | partial | partial | no | no | partial |
-| Per-CCD / shared-L3 arenas with TLS guard             | yes (`PoolGroup`) | no | task arenas, no L3 grouping | no | no | no | no |
-| Bit-identical reduce across worker counts             | yes (`Determinism::FixedBlockOrder`) | no | partial | no | no | no | no |
-| Sub-microsecond fan-out floor on Linux x86_64         | yes | no | yes | yes | no | yes | yes |
-| Header-only                                           | yes | yes | no | yes | yes | yes | compiler runtime |
-| Producer participates as slot 0 (no caller wake)      | yes | no | no | no | no | no | no |
+Cell legend: ✅ full, 🟡 partial or qualified, ❌ none. Capability columns:
+- **F-J**: recursive fork-join over per-worker work-stealing deques.
+- **Chain**: multi-stage pipeline in one dispatch descriptor.
+- **Plex**: workers persistent across N phases without wake/park.
+- **Arena**: per-CCD or shared-L3 arenas with TLS guard.
+- **Det**: bit-identical reduce across worker counts.
+- **<us**: sub-microsecond fan-out floor on Linux x86_64.
+- **Hdr**: header-only.
+- **P=0**: producer participates as slot 0 (no caller wake).
+
+| Pool                       | F-J | Chain | Plex | Arena | Det  | <us | Hdr  | P=0 |
+|----------------------------|:---:|:-----:|:----:|:-----:|:----:|:---:|:----:|:---:|
+| `citor`                    | ✅  | ✅    | ✅   | ✅    | ✅   | ✅  | ✅   | ✅  |
+| `BS::thread_pool`          | ❌  | ❌    | ❌   | ❌    | ❌   | ❌  | ✅   | ❌  |
+| `dp::thread_pool`          | ❌  | ❌    | ❌   | ❌    | ❌   | ❌  | ✅   | ❌  |
+| `task_thread_pool`         | ❌  | ❌    | ❌   | ❌    | ❌   | ❌  | ✅   | ❌  |
+| `riften::Thiefpool`        | ✅  | ❌    | ❌   | ❌    | ❌   | ✅  | ✅   | ❌  |
+| `oneTBB`                   | ✅  | ✅    | 🟡¹  | 🟡²   | 🟡³  | ✅  | ❌   | ❌  |
+| `Taskflow`                 | ✅  | ✅    | 🟡¹  | ❌    | ❌   | ✅  | ✅   | ❌  |
+| `Eigen::ThreadPool`        | ❌  | ❌    | ❌   | ❌    | ❌   | ❌  | ✅   | ❌  |
+| `Leopard`                  | ❌  | ❌    | ❌   | ❌    | ❌   | ❌  | ✅   | ❌  |
+| `dispenso`                 | ✅  | ❌    | ❌   | ❌    | ❌   | ✅  | ✅   | ❌  |
+| `OpenMP`                   | 🟡⁴ | ❌    | 🟡⁵  | ❌    | ❌   | ✅  | 🟡⁶  | ❌  |
+| `libfork` (coroutine)      | ✅  | ❌    | ❌   | ❌    | ❌   | ✅  | ✅   | ❌  |
+| `TooManyCooks` (coroutine) | ✅  | ❌    | ❌   | ❌    | ❌   | ✅  | ✅   | ❌  |
+
+¹ Worker team persists within a single `parallel_for` or pipeline region; consecutive regions still pay teardown plus wake on the next region. citor's `runPlex` keeps the same team live across N user-defined phases under one descriptor.
+
+² `tbb::task_arena` supports affinity, but the arena boundary is per-thread, not per-CCD or per-L3.
+
+³ `parallel_reduce` is deterministic only under `static_partitioner` plus an explicit grain size matching across runs; not the default.
+
+⁴ `#pragma omp task` is tied by default and has no per-worker Chase-Lev deque; the runtime uses a centralised queue with optional `untied`.
+
+⁵ libomp's `kmp_blocktime` keeps the team spinning between `parallel` regions, but the team is not a first-class N-phase contract; cross-region rendezvous goes through the OpenMP runtime.
+
+⁶ OpenMP is a compiler runtime plus a header, not header-only; consumers link `libomp` (clang) or `libgomp` (gcc).
 
 `citor` is a different shape from any single peer. For one-shot throughput fan-out over uniform ranges, `BS::thread_pool` and `OpenMP` are simpler. citor fits workloads that combine short phases, deterministic reductions, recursive irregular work, and CCD-aware locality in one library, behind a header-only INTERFACE target.
 
