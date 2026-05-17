@@ -21,6 +21,9 @@ jobs:
     name: ${{ matrix.compiler }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Need the diff base so the tidy gate can list changed files.
+          fetch-depth: 0
 
       - name: Install toolchain
         run: |
@@ -43,6 +46,65 @@ jobs:
             echo "CXX=g++-14" >> "$GITHUB_ENV"
             echo "CITOR_CMAKE_EXTRA=" >> "$GITHUB_ENV"
           fi
+
+      - name: Compute clang-tidy diff scope
+        if: ${{ startsWith(matrix.compiler, 'clang-') }}
+        run: |
+          # PR builds tidy only the .cpp/.h files changed in the PR; push
+          # builds tidy the diff from the previous main tip. The tidy
+          # wrapper (`scripts/clang-tidy-diff-gate.sh`) skips TUs not in
+          # this list, keeping the build's compile pass intact while
+          # shrinking tidy from "every TU" to "what changed". An empty list
+          # disables tidy for the run (no source files touched -> no
+          # findings to gate on); the special string `__ALL__` forces
+          # full-tree tidy on demand.
+          case "${{ github.event_name }}" in
+            pull_request)
+              base="${{ github.event.pull_request.base.sha }}"
+              head="${{ github.event.pull_request.head.sha }}"
+              ;;
+            push)
+              base="${{ github.event.before }}"
+              head="${{ github.sha }}"
+              # First push to a branch (no prior tip) -> tidy the full tree.
+              if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+                base=""
+              fi
+              ;;
+            *)
+              base=""
+              head=""
+              ;;
+          esac
+          if [ -z "$base" ]; then
+            echo "tidy scope: full tree (no diff base)"
+            echo "CITOR_TIDY_FILES=__ALL__" >> "$GITHUB_ENV"
+          else
+            # Any change under include/citor/ propagates through the
+            # header graph; gating the gate on a per-TU source-path match
+            # would silently skip every consumer. Fall back to full-tree
+            # tidy whenever a public header moved.
+            header_changes=$(git diff --name-only "$base" "$head" -- \
+              'include/citor/**.h')
+            if [ -n "$header_changes" ]; then
+              echo "tidy scope: full tree (headers changed)"
+              echo "$header_changes"
+              echo "CITOR_TIDY_FILES=__ALL__" >> "$GITHUB_ENV"
+            else
+              tu_changes=$(git diff --name-only "$base" "$head" -- \
+                'tests/**.cpp' 'benchmark/**.cpp' | tr '\n' ':')
+              if [ -z "$tu_changes" ]; then
+                echo "tidy scope: no C++ TUs changed; skipping tidy"
+                echo "CITOR_TIDY_FILES=" >> "$GITHUB_ENV"
+              else
+                echo "tidy scope (${base:0:8}..${head:0:8}):"
+                echo "$tu_changes" | tr ':' '\n'
+                echo "CITOR_TIDY_FILES=$tu_changes" >> "$GITHUB_ENV"
+              fi
+            fi
+          fi
+          echo "CITOR_CLANG_TIDY_BIN=clang-tidy-18" >> "$GITHUB_ENV"
+          echo "CITOR_REPO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
 
       - name: CPM source cache
         uses: actions/cache@v4
@@ -287,12 +349,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang-18
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Verify single_include is in sync with sources
-        run: python3 tools/amalgamate.py --check
       - name: Compile + run drop-in consumer with no build system
+        # Consumes the checked-in `single_include/citor.hpp` exactly as an
+        # end user would. The embedded commit SHA in the header drifts by
+        # one whenever a non-source commit lands (the amalgamate hook
+        # only fires on `include/citor/**.h` and `tools/amalgamate.py`),
+        # so the previously-wired `--check` step would fail on every
+        # docs/CI commit. The release pipeline owns the regen instead.
         run: |
           clang++-18 -std=c++20 -O2 -pthread -mavx2 -mfma -DCITOR_USE_AVX2 \
             -I single_include \

@@ -9,7 +9,19 @@ if(CITOR_ENABLE_CLANG_TIDY)
         NAMES clang-tidy clang-tidy-21 clang-tidy-20 clang-tidy-19 clang-tidy-18
         REQUIRED
     )
-    set(CMAKE_CXX_CLANG_TIDY "${CLANG_TIDY_EXE}")
+    # Route every TU's tidy invocation through a wrapper that consults the
+    # build-time `CITOR_TIDY_FILES` env var (newline- or colon-separated
+    # repo-relative source paths). The wrapper exits 0 for TUs not in the
+    # list, which lets CI run tidy only on changed files without splitting
+    # the build into a separate compile-then-tidy pass. When
+    # `CITOR_TIDY_FILES` is unset (the local-dev default), tidy runs on
+    # every TU. The wrapper picks the real clang-tidy via
+    # `CITOR_CLANG_TIDY_BIN` (defaults to the first `clang-tidy` on PATH)
+    # and the repo root via `CITOR_REPO_ROOT` (defaults to `git rev-parse`
+    # of the wrapper's cwd).
+    set(CMAKE_CXX_CLANG_TIDY
+        "${CMAKE_SOURCE_DIR}/scripts/clang-tidy-diff-gate.sh"
+    )
 endif()
 
 if(CITOR_IS_TOP_LEVEL)
