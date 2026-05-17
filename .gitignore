@@ -34,6 +34,19 @@ bench_out/
 *.perf
 *.data
 flamegraph*
+*.log
+*.dmp
+*.asm
+*.err
+PerfViewData*
+vtune*
+bench*.json
+perf.log.*
+stress.repro.*
+
+# Local diagnostic scratch (cdb captures, .spec/ design notes, dumpbin runs)
+diag-hang*/
+.spec/
 
 # Scratch
 scratch/
