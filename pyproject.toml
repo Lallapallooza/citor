@@ -34,6 +34,7 @@ version_files = [
     "README.md:requires=citor",
     "packaging/vcpkg/ports/citor/vcpkg.json:\"version\"",
     "packaging/conan/conanfile.py:^    version",
+    "packaging/test/consumer/conanfile.txt:^citor/",
 ]
 
 [tool.ruff]

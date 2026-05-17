@@ -93,16 +93,18 @@ These points are API contract, not implementation trivia.
 
 ## vs other thread pools
 
-| capability                                            | citor | BS::thread_pool | oneTBB         | Taskflow        | folly Executor | OpenMP   |
-|-------------------------------------------------------|:-----:|:---------------:|:--------------:|:---------------:|:--------------:|:--------:|
-| Recursive fork-join over per-worker work-stealing deques | yes | no | yes (`task_group`) | yes (`Subflow`) | no | tied tasks |
-| Multi-stage pipeline in **one** dispatch descriptor   | yes (`parallelChain`) | no | yes (`parallel_pipeline`) | yes (`Pipeline`) | no | no |
-| Workers persistent across N phases (no wake/park)     | yes (`runPlex`) | no | partial | partial | no | partial |
-| Per-CCD / shared-L3 arenas with TLS guard             | yes (`PoolGroup`) | no | task arenas (no L3 grouping) | no | no | no |
-| Bit-identical reduce across worker counts             | yes (`Determinism::FixedBlockOrder`) | no | partial | no | no | no |
-| Sub-microsecond fan-out floor on Linux x86_64         | yes | no | yes | yes | no | yes |
-| Header-only                                           | yes | yes | no | yes | no | runtime |
-| Producer participates as slot 0 (no caller wake)      | yes | no | no | no | no | no |
+All peers in this table are bench competitors. Numbers and per-cell wins live in [Performance shape](#performance-shape).
+
+| capability                                            | citor | BS::thread_pool | oneTBB                   | Taskflow         | Eigen::ThreadPool | dispenso    | OpenMP     |
+|-------------------------------------------------------|:-----:|:---------------:|:------------------------:|:----------------:|:-----------------:|:-----------:|:----------:|
+| Recursive fork-join over per-worker work-stealing deques | yes (`forkJoin`) | no | yes (`task_group`) | yes (`Subflow`) | no | yes | tied tasks |
+| Multi-stage pipeline in one dispatch descriptor       | yes (`parallelChain`) | no | yes (`parallel_pipeline`) | yes (`Pipeline`) | no | no | no |
+| Workers persistent across N phases without wake/park  | yes (`runPlex`) | no | partial | partial | no | no | partial |
+| Per-CCD / shared-L3 arenas with TLS guard             | yes (`PoolGroup`) | no | task arenas, no L3 grouping | no | no | no | no |
+| Bit-identical reduce across worker counts             | yes (`Determinism::FixedBlockOrder`) | no | partial | no | no | no | no |
+| Sub-microsecond fan-out floor on Linux x86_64         | yes | no | yes | yes | no | yes | yes |
+| Header-only                                           | yes | yes | no | yes | yes | yes | compiler runtime |
+| Producer participates as slot 0 (no caller wake)      | yes | no | no | no | no | no | no |
 
 `citor` is a different shape from any single peer. For one-shot throughput fan-out over uniform ranges, `BS::thread_pool` and `OpenMP` are simpler. citor fits workloads that combine short phases, deterministic reductions, recursive irregular work, and CCD-aware locality in one library, behind a header-only INTERFACE target.
 

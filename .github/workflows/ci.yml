@@ -76,6 +76,14 @@ jobs:
               head=""
               ;;
           esac
+          # `github.event.before` for a push is the previous tip. After a
+          # force-push it points at an orphaned commit; `git diff` against an
+          # unreachable SHA aborts the job. Drop the base in that case and
+          # fall through to the full-tree branch.
+          if [ -n "$base" ] && ! git cat-file -e "$base" 2>/dev/null; then
+            echo "tidy scope: full tree (base $base unreachable, likely force-pushed away)"
+            base=""
+          fi
           if [ -z "$base" ]; then
             echo "tidy scope: full tree (no diff base)"
             echo "CITOR_TIDY_FILES=__ALL__" >> "$GITHUB_ENV"
