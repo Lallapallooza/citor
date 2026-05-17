@@ -75,6 +75,7 @@ set(_citor_tests
     regression_descriptor_reuse_test
     regression_detached_lifecycle_test
     regression_fast_range_test
+    regression_fork_join_nested_token_stolen_task_test
     regression_inline_fallback_test
     regression_inline_reduce_midflight_cancel_test
     regression_low_latency_pool_specific_test

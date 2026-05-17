@@ -5297,17 +5297,18 @@ private:
                              std::uint32_t /*slot*/) noexcept {
     detail::ForkJoinState &state = *task.state;
 
-    // Honour cancellation by decrementing the counter without running the body
-    // so the join can observe `pendingTasks == 0`. The
-    // `state.token.stop_requested()` poll is gated at compile time: when the
-    // call site routed through the no-token overload the check folds away and
-    // the worker pays only the `forkJoinCancelled` acquire-load on the hot
-    // path.
+    // Honour cancellation by decrementing pending so the join can
+    // observe `pendingTasks == 0`. Always poll `state.token`: the
+    // caller's `HasToken` reflects the OUTER drain's instantiation,
+    // but a peer-stolen task may belong to a nested call whose state
+    // carries an owned token. The default sentinel resolves to a single
+    // null-pointer test, so the no-token hot path pays one branch.
     if (state.forkJoinCancelled.load(std::memory_order_acquire) != 0U ||
-        (HasToken && state.token.stop_requested())) [[unlikely]] {
+        state.token.stop_requested()) [[unlikely]] {
       state.pendingTasks.fetch_sub(1, std::memory_order_release);
       return;
     }
+    (void)HasToken;
 
     try {
       task.body();

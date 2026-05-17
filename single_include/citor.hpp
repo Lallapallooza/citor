@@ -2,7 +2,7 @@
 //
 // citor -- header-only C++20 thread pool
 // version: 0.1.0
-// commit:  84241150a18c19ff527c0ca287e5b9db44e84e4f
+// commit:  5c66eb7568b1ae56dcd9165fef037250b56aa9eb
 // generated: 2026-05-17
 //
 // GENERATED FILE -- DO NOT EDIT.
@@ -11681,16 +11681,23 @@ private:
     detail::ForkJoinState &state = *task.state;
 
     // Honour cancellation by decrementing the counter without running the body
-    // so the join can observe `pendingTasks == 0`. The
-    // `state.token.stop_requested()` poll is gated at compile time: when the
-    // call site routed through the no-token overload the check folds away and
-    // the worker pays only the `forkJoinCancelled` acquire-load on the hot
-    // path.
+    // so the join can observe `pendingTasks == 0`. The token poll consults
+    // `state.token`, the FOREIGN task's state token. The previous
+    // `HasToken &&` compile-time gate was unsafe for peer-stolen tasks:
+    // the caller's `HasToken` reflects the OUTER drain's template
+    // instantiation, but a stolen task may belong to a NESTED forkJoin call
+    // whose state carries its own owned token. Compiling the check out for
+    // the no-token outer drain let peers run stolen inner-token tasks past
+    // the inner call's `request_stop()`. `stop_requested()` on a default
+    // sentinel `state.token` is a single null-pointer test (no atomic
+    // load), so the no-token hot path pays at most one register-resident
+    // branch.
     if (state.forkJoinCancelled.load(std::memory_order_acquire) != 0U ||
-        (HasToken && state.token.stop_requested())) [[unlikely]] {
+        state.token.stop_requested()) [[unlikely]] {
       state.pendingTasks.fetch_sub(1, std::memory_order_release);
       return;
     }
+    (void)HasToken;
 
     try {
       task.body();
