@@ -55,14 +55,32 @@ def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+RE_IF = re.compile(r"^\s*#\s*if(?:def|ndef)?\b")
+RE_ENDIF = re.compile(r"^\s*#\s*endif\b")
+
+
 def parse_includes(source: str) -> tuple[list[str], list[str]]:
-    # Returns (project_relpaths, system_relpaths) in source order. Comments
-    # and string literals can shadow `#include` lines in pathological cases;
-    # the citor source style does not produce those, so a line-level regex is
-    # sufficient. If that ever changes, the comment-stripping pass goes here.
+    # Returns (project_relpaths, system_relpaths) in source order. Only
+    # includes at preprocessor depth 0 are hoisted to the amalgamated
+    # prologue. Includes nested inside `#if/#ifdef/#ifndef ... #endif`
+    # are platform-conditional (e.g. `<Windows.h>` guarded by `_WIN32`)
+    # and must stay in place so the consumer's preprocessor sees the
+    # guard. Comments and string literals can shadow `#include` lines in
+    # pathological cases; the citor source style does not produce those,
+    # so a line-level regex is sufficient. If that ever changes, the
+    # comment-stripping pass goes here.
     project: list[str] = []
     system: list[str] = []
+    depth = 0
     for line in source.splitlines():
+        if RE_IF.match(line):
+            depth += 1
+            continue
+        if RE_ENDIF.match(line):
+            depth = max(0, depth - 1)
+            continue
+        if depth > 0:
+            continue
         m = RE_PROJECT_INCLUDE.match(line)
         if m:
             project.append(m.group(1))
@@ -75,16 +93,28 @@ def parse_includes(source: str) -> tuple[list[str], list[str]]:
 
 
 def strip_lines(source: str) -> str:
-    # Removes `#pragma once`, project `#include "citor/..."`, and system
-    # `#include <...>` lines from a per-file body. The amalgamation emits each
-    # exactly once at the top of the output.
+    # Removes `#pragma once`, project `#include "citor/..."`, and
+    # unconditional system `#include <...>` lines from a per-file body.
+    # System includes inside preprocessor guards (Windows-only, Linux-only)
+    # are preserved so the consumer's preprocessor still evaluates the
+    # platform branch. The amalgamation prologue carries the merged
+    # depth-0 system includes exactly once.
     out: list[str] = []
+    depth = 0
     for line in source.splitlines():
+        if RE_IF.match(line):
+            depth += 1
+            out.append(line)
+            continue
+        if RE_ENDIF.match(line):
+            depth = max(0, depth - 1)
+            out.append(line)
+            continue
         if RE_PRAGMA_ONCE.match(line):
             continue
         if RE_PROJECT_INCLUDE.match(line):
             continue
-        if RE_SYSTEM_INCLUDE.match(line):
+        if depth == 0 and RE_SYSTEM_INCLUDE.match(line):
             continue
         out.append(line)
     return "\n".join(out).rstrip() + "\n"

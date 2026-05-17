@@ -2,7 +2,7 @@
 //
 // citor -- header-only C++20 thread pool
 // version: 0.1.0
-// commit:  b72768d9027046e84667b00b140cc871c6333a72
+// commit:  4e28c166231d593e92b1ec809894d1b3d257545e
 // generated: 2026-05-17
 //
 // GENERATED FILE -- DO NOT EDIT.
@@ -10,18 +10,6 @@
 // Modular sources live under `include/citor/`.
 
 #pragma once
-
-#include <Windows.h>
-#include <emmintrin.h>
-#include <intrin.h>
-#include <linux/futex.h>
-#include <pthread.h>
-#include <sched.h>
-#include <synchapi.h>
-#include <sys/mman.h>
-#include <sys/syscall.h>
-#include <unistd.h>
-#include <x86intrin.h>
 
 #include <algorithm>
 #include <array>
@@ -35,7 +23,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <ctime>
 #include <exception>
 #include <fstream>
 #include <functional>
@@ -93,7 +80,9 @@ namespace citor {
 
 
 #if defined(_M_X64) && defined(_MSC_VER)
+#include <intrin.h>
 #elif defined(__x86_64__)
+#include <x86intrin.h>
 #endif
 
 namespace citor {
@@ -934,6 +923,8 @@ static_assert(sizeof(FunctionRef<void(std::size_t, std::size_t)>) == 16,
 
 
 #ifdef __linux__
+#include <pthread.h>
+#include <sched.h>
 #elif defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -941,6 +932,7 @@ static_assert(sizeof(FunctionRef<void(std::size_t, std::size_t)>) == 16,
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <Windows.h>
 #endif
 
 namespace citor::detail {
@@ -2510,9 +2502,11 @@ inline constexpr detail::SubmitDetachedFn submitDetached{};
 
 
 #if defined(__x86_64__) || defined(_M_X64)
+#include <emmintrin.h>
 #endif
 
 #ifdef _MSC_VER
+#include <intrin.h>
 #endif
 
 namespace citor::detail {
@@ -3106,6 +3100,8 @@ private:
 
 
 #ifdef __linux__
+#include <pthread.h>
+#include <sched.h>
 #elif defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -3113,6 +3109,7 @@ private:
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <Windows.h>
 #endif
 
 
@@ -3862,7 +3859,11 @@ struct Task {
 
 
 #ifdef __linux__
+#include <linux/futex.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
+#include <ctime>
 #elif defined(_WIN32)
 // `WaitOnAddress` / `WakeByAddress[Single|All]` model the same parking
 // protocol as Linux's `FUTEX_WAIT_PRIVATE`: the kernel reads `*addr` and
@@ -3875,7 +3876,9 @@ struct Task {
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <Windows.h>
 
+#include <synchapi.h>
 #pragma comment(lib, "Synchronization.lib")
 #else
 #include <condition_variable> // IWYU pragma: keep
@@ -5942,6 +5945,7 @@ template <class FOp>
 
 
 #if defined(_M_X64) && defined(_MSC_VER)
+#include <intrin.h>
 #endif
 
 
@@ -6318,6 +6322,9 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
 
 
 #ifdef __linux__
+#include <pthread.h>
+#include <sched.h>
+#include <sys/mman.h>
 #endif
 
 
