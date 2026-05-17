@@ -11,13 +11,13 @@
 | Version | `0.1.0` |
 | Distribution | header-only |
 | CMake target | `citor::citor` (INTERFACE) |
-| Validated target | Linux x86_64 + AVX2 |
-| Compilers | GCC 14, Clang 18 (CI-backed) |
+| Validated target | Linux x86_64 + AVX2; Windows x86_64 best-effort |
+| Compilers | GCC 14, Clang 18 (CI). MSVC 2022 on Windows (manual). |
 | C++ standard | C++20 |
 | Runtime deps | `Threads::Threads` / pthread |
 | License | MIT |
 
-The name comes from Latin *cito* -- "swiftly, quickly".
+The name comes from Latin *cito* ("swiftly, quickly").
 
 ---
 
@@ -35,6 +35,7 @@ The name comes from Latin *cito* -- "swiftly, quickly".
   - [`parallelFor`](#parallelfor)
   - [`parallelReduce`](#parallelreduce)
   - [`parallelScan`](#parallelscan)
+  - [`inclusiveScan`](#inclusivescan)
   - [`parallelChain`](#parallelchain)
   - [`runPlex`](#runplex)
   - [`bulkForQueries`](#bulkforqueries)
@@ -56,7 +57,7 @@ The name comes from Latin *cito* -- "swiftly, quickly".
 
 ## What citor is
 
-`citor` exposes one pool type and eight primitives over it. The producer participates as slot 0 on every synchronous call -- small jobs stay on the producer with zero wake-up cost; large jobs fan out to workers and join in the same call.
+`citor` exposes one pool type and eight primitives over it. The producer participates as slot 0 on every synchronous call. Small jobs stay on the producer with zero wake-up cost; large jobs fan out to workers and join in the same call.
 
 ```cpp
 citor::ThreadPool pool(/*participants=*/8);
@@ -66,7 +67,8 @@ citor::ThreadPool pool(/*participants=*/8);
 |--------------------|--------------------------------------------------------------------|
 | `parallelFor`      | fan out a contiguous `[first, last)` loop                          |
 | `parallelReduce`   | map chunks and combine partials with a deterministic tree shape    |
-| `parallelScan`     | two-pass inclusive prefix scan over `[0, n)`                       |
+| `parallelScan`     | two-pass inclusive prefix scan with a user body over `[0, n)`      |
+| `inclusiveScan`    | buffer-to-buffer inclusive prefix sum; engine owns the inner loop  |
 | `parallelChain`    | run a multi-stage pipeline from one dispatch descriptor            |
 | `runPlex`          | keep workers live across repeated phases over the same partition  |
 | `bulkForQueries`   | run many independent query indices with variable per-query cost    |
@@ -80,14 +82,14 @@ These points are API contract, not implementation trivia.
 - **Header-only.** Including modular headers under `include/citor/` or the generated `single_include/citor.hpp` is enough; there is no library binary to link. Linked C++ runtime + `pthread` are the only runtime dependencies.
 - **CPU-bound and synchronous.** No `co_await` surface, no future, no I/O reactor. Bodies that block on I/O, sleeps, or external locks defeat the latency contract.
 - **`ThreadPool(participants)` is the total participant count, including the calling thread.** A pool of `8` runs the caller plus `7` background pthreads, subject to topology and affinity-mask clamping. Query the effective count with `pool.participants()`. `participants == 0` throws `std::invalid_argument`.
-- **Closure lifetime >= call lifetime.** Every primitive captures the body via a 16-byte non-owning `FunctionRef`. The callable must outlive the synchronous call. Captures in the producer's stack frame satisfy this naturally.
+- **Closure lifetime >= call lifetime.** Every primitive captures the body via a 16-byte non-owning `FunctionRef`. The callable must outlive the synchronous call. Captures in the producer's stack frame satisfy this for free.
 - **Producer participates as slot 0.** Single-participant pools fall through to the inline path and never wake a worker.
 - **`PoolGroup::global()` is one arena per CCD.** Cross-arena synchronous calls fall through to inline on the caller (a TLS participant token enforces the rule); they never deadlock.
 - **`ThreadPool` is non-copyable, non-movable.** Workers hold interior pointers to per-instance state.
 - **Empty ranges are silent no-ops.** `parallelFor(0, 0, body)`, `parallelReduce(0, 0, init, ...)`, `parallelScan(0, ...)`, `runPlex(0, ...)`, `bulkForQueries(0, ...)` all return without invoking the body. Inverted ranges (`first > last`) collapse the same way.
 - **Concurrent producers are safe.** Two threads calling primitives on the same pool serialize through the dispatch lease. `Hints::priority` arbitrates: `Latency` jumps the queue, `Background` yields. Single-producer pools never see priority effects.
 - **Cancellation is cooperative.** A stop request is observed at primitive-defined boundaries, not by preempting a running body. Void-returning primitives early-return on stop; only `parallelReduce` throws (`cancelled_value_exception<T>` carrying the deterministic partial).
-- **Nested parallelism is safe everywhere.** `parallelFor` and `forkJoin` have first-class same-pool nested paths (children land on the calling worker's deque). Other synchronous primitives detect same-pool reentrancy and fall through to inline-on-caller -- safe, but the inner call is not parallel.
+- **Nested parallelism is safe everywhere.** `parallelFor` and `forkJoin` have first-class same-pool nested paths (children land on the calling worker's deque). Other synchronous primitives detect same-pool reentrancy and fall through to inline-on-caller; safe, but the inner call runs single-threaded.
 
 ## vs other thread pools
 
@@ -102,40 +104,66 @@ These points are API contract, not implementation trivia.
 | Header-only                                           | yes | yes | no | yes | no | runtime |
 | Producer participates as slot 0 (no caller wake)      | yes | no | no | no | no | no |
 
-`citor` is not aiming to replace any single peer; it's a different shape. If your workload is one-shot throughput fan-out over uniform ranges, `BS::thread_pool` and `OpenMP` are simpler. citor's surface earns its keep on workloads that combine **short phases**, **deterministic reductions**, **recursive irregular work**, and **CCD-aware locality** in the same library, behind a header-only INTERFACE target.
+`citor` is a different shape from any single peer. For one-shot throughput fan-out over uniform ranges, `BS::thread_pool` and `OpenMP` are simpler. citor fits workloads that combine short phases, deterministic reductions, recursive irregular work, and CCD-aware locality in one library, behind a header-only INTERFACE target.
 
 ## Performance shape
 
 Numbers age out on every microarchitecture and compiler bump. The shape is what's stable:
 
-- **Empty fan-out floor.** Hundreds of nanoseconds for a `parallelFor` call where the body has nothing to do; the pool reaches that floor by keeping the descriptor on the producer's stack and avoiding any allocation on the hot path.
-- **Single-CCD vs cross-CCD.** Within one CCD (16 cores on a Zen 5 chiplet), wake-up to first body invocation stays under a microsecond. Cross-CCD adds the inter-fabric latency once at the start; workers don't cross CCDs during a call.
-- **Persistent-worker amortisation.** `runPlex` collapses N phases into one dispatch; per-phase overhead drops from a futex round-trip to a user-space rendezvous spin (typically a few hundred nanoseconds depending on participant count and contention).
+- **Empty fan-out floor.** A `parallelFor` call where the body has nothing to do reaches a sub-microsecond floor: the descriptor lives on the producer's stack, the hot path makes no allocations, and a single-participant pool collapses to an inline loop.
+- **Single-CCD vs cross-CCD.** Within one CCD, wake-up to first body invocation stays in the sub-microsecond range. Cross-CCD pays the inter-fabric latency once at the start; workers stay on their CCD for the rest of the call.
+- **Persistent-worker amortisation.** `runPlex` collapses N phases into one dispatch. Per-phase overhead drops from a futex round-trip to a user-space rendezvous spin.
 - **Inline fallback.** When `n * estimatedItemNs * 1e-3 < minTaskUs * participants`, the pool runs the call inline on the producer with zero wake. Set `minTaskUs > 0` and a non-zero `estimatedItemNs` on hot paths where the dispatch floor matters.
 
-The charts below are from one run of `parallel_bench` on a 16-core Zen 5 CCD (governor=performance, boost off, ten peer pools). Lower is faster.
+Run `benchmark/parallel_bench` on your hardware for absolute numbers. The charts below summarize one run on a single Zen 5 CCD against the bundled peer pools, governor=performance, boost off. Lower is faster. Click any chart for the full SVG.
 
-**Cross-suite summary** -- per-peer survival of citor's speedup ratios across every (workload, peer) cell. The Y value at X=k is the fraction of cells where citor is at least k times faster than that peer; the dot at the parity line is each peer's win-rate.
+### Cross-suite summary
 
-[`docs/charts/overview.svg`](docs/charts/overview.svg)
+Per-peer survival of citor's speedup ratios across every (workload, peer) cell. The Y value at X=k is the fraction of cells where citor is at least k times faster than that peer; the dot at the parity line is each peer's win-rate.
 
-**Family scorecard** -- per-(family, peer) geomean speedup heatmap; cell colour is `log10(speedup)` on a diverging palette centred at parity. Marginal strips show the per-peer and per-family rollups.
+[![overview](docs/charts/overview.svg)](docs/charts/overview.svg)
 
-[`docs/charts/family_heatmap.svg`](docs/charts/family_heatmap.svg)
+### Family scorecard
 
-**Per-family geomean** drill-downs:
+Per-(family, peer) geomean speedup heatmap; cell colour is `log10(speedup)` on a diverging palette centred at parity. Marginal strips show the per-peer and per-family rollups.
 
-| family | what's measured | chart |
-|---|---|---|
-| empty fan-out | `parallelFor` dispatch floor with no body work | [`docs/charts/family_empty_geomean.svg`](docs/charts/family_empty_geomean.svg) |
-| chain dispatch | one descriptor publishing N stages vs N separate `parallelFor` calls | [`docs/charts/family_chain_geomean.svg`](docs/charts/family_chain_geomean.svg) |
-| plex transitions | `runPlex` per-phase rendezvous in user-space | [`docs/charts/family_plex_geomean.svg`](docs/charts/family_plex_geomean.svg) |
-| forkJoin recursion | cilksort + Fibonacci recursive shapes | [`docs/charts/family_forkjoin_geomean.svg`](docs/charts/family_forkjoin_geomean.svg) |
-| runPlex stencil | heat / Jacobi sweep over a stable partition | [`docs/charts/family_runplex_geomean.svg`](docs/charts/family_runplex_geomean.svg) |
-| reduce | deterministic sums (Kahan, integer plus, Pareto-distributed body) | [`docs/charts/family_reduce_geomean.svg`](docs/charts/family_reduce_geomean.svg) |
-| losses | workloads where citor's median is worse than the best peer | [`docs/charts/losses.svg`](docs/charts/losses.svg) |
+[![family heatmap](docs/charts/family_heatmap.svg)](docs/charts/family_heatmap.svg)
 
-`benchmark/parallel_bench` measures the actual numbers on your hardware against ten peer pools and exports JSON suitable for `tools.plot_bench`. See [Benchmarks](#benchmarks) for the recipe -- run it on your hardware before quoting any number.
+### Per-family geomeans
+
+`parallelFor` dispatch floor with no body work:
+
+[![empty fan-out](docs/charts/family_empty_geomean.svg)](docs/charts/family_empty_geomean.svg)
+
+`parallelFor` granularity sweep across body-cost decades (0 ns to 1 ms):
+
+[![granularity](docs/charts/family_granularity_geomean.svg)](docs/charts/family_granularity_geomean.svg)
+
+One descriptor publishing N stages vs N separate `parallelFor` calls:
+
+[![chain](docs/charts/family_chain_geomean.svg)](docs/charts/family_chain_geomean.svg)
+
+`runPlex` per-phase rendezvous in user-space (no wake/park between iterations):
+
+[![plex transitions](docs/charts/family_plex_geomean.svg)](docs/charts/family_plex_geomean.svg)
+
+Stencil sweep over a stable partition (Jacobi heat diffusion):
+
+[![runPlex stencil](docs/charts/family_runplex_geomean.svg)](docs/charts/family_runplex_geomean.svg)
+
+`forkJoin` recursive shapes (cilksort, Fibonacci, Strassen, knapsack, UTS, skynet):
+
+[![forkJoin](docs/charts/family_forkjoin_geomean.svg)](docs/charts/family_forkjoin_geomean.svg)
+
+Deterministic reductions (Kahan, integer plus, Pareto-distributed body cost):
+
+[![reduce](docs/charts/family_reduce_geomean.svg)](docs/charts/family_reduce_geomean.svg)
+
+Buffer-to-buffer `inclusiveScan` vs two-wave emulation (oneTBB uses its native `parallel_scan`):
+
+[![scan](docs/charts/family_scan_geomean.svg)](docs/charts/family_scan_geomean.svg)
+
+`benchmark/parallel_bench` measures absolute numbers on your hardware and exports JSON suitable for `tools.plot_bench`. See [Benchmarks](#benchmarks) for the recipe. Run it on your hardware before quoting any number.
 
 ## Install
 
@@ -173,14 +201,14 @@ CPMAddPackage("gh:Lallapallooza/citor#v0.1.0")
 target_link_libraries(my_app PRIVATE citor::citor)
 ```
 
-### 4. vcpkg (overlay port until upstream merge)
+### 4. vcpkg (overlay port)
 
 ```bash
 vcpkg install citor \
   --overlay-ports=path/to/citor/packaging/vcpkg/ports
 ```
 
-The overlay flag goes away once the microsoft/vcpkg PR is accepted; until then, point vcpkg at this repo's `packaging/vcpkg/ports/` directory.
+Point vcpkg at this repo's `packaging/vcpkg/ports/` directory.
 
 ### 5. Conan (Conan 2.x)
 
@@ -200,7 +228,7 @@ sudo cmake --install build
 ```
 
 ```cmake
-find_package(citor 0.1 REQUIRED)
+find_package(citor 0.1.0 REQUIRED)
 target_link_libraries(my_app PRIVATE citor::citor)
 ```
 
@@ -229,7 +257,7 @@ int main() {
 
 The producer is slot 0; with one participant the call collapses to an inline loop and never wakes a worker. The body lives on the producer's stack for the call.
 
-Both `pool.parallelFor(...)` and the free CPO `citor::parallelFor` are public surfaces -- see [Public API shape](#public-api-shape) for when each is the right spelling.
+Both `pool.parallelFor(...)` and the free CPO `citor::parallelFor` are public surfaces. See [Public API shape](#public-api-shape) for when each is the right spelling.
 
 ## Public API shape
 
@@ -258,7 +286,7 @@ citor::parallelFor.template operator()<citor::HintsDefaults>(
     [&](std::size_t lo, std::size_t hi) { /* ... */ });
 ```
 
-The shorter form `citor::parallelFor<citor::HintsDefaults>(pool, ...)` does NOT compile -- `parallelFor` is a value, not a template. Use the member surface in application code; reach for the CPO surface for generic executor adapters and tests that need `tag_invoke` dispatch.
+`parallelFor` is a CPO value, not a function template, so the explicit hint type goes through `.template operator()<...>(pool, ...)`. Use the member surface in application code; reach for the CPO surface for generic executor adapters and tests that need `tag_invoke` dispatch.
 
 ## ThreadPool lifecycle
 
@@ -278,7 +306,7 @@ Lifecycle points worth knowing:
 - `pool.bindProducerSlot()` returns an RAII guard pinning the caller to slot 0's CPU for a hot dispatch region.
 - `pool.lowLatencyScope()` returns an RAII guard that keeps workers from parking between short bursts of dispatches.
 - `pool.snapshotCounters()` reports worker counters always; pool-level counters require `CITOR_ENABLE_POOL_COUNTERS=ON` at build time.
-- `pool.lastDetachedException()` returns the first exception captured from a detached body. The destructor blocks on the in-flight counter but does **not** rethrow -- call this proactively to observe detached failures.
+- `pool.lastDetachedException()` returns the first exception captured from a detached body. The destructor blocks on the in-flight counter; callers observe captured exceptions by calling this proactively.
 - `pool.producerCpu()`, `pool.ccdCount()`, `pool.arenaIndex()`, and the static `ThreadPool::workerIndex()` / `ThreadPool::insidePoolWorker()` / `ThreadPool::currentArenaIndexHint()` expose topology and TLS state for libraries layering on top.
 
 Standalone pools auto-pin the producer to slot 0 on Linux when the affinity mask permits. This aligns first-touch allocation with the slot-0 CCD; the auto-pin is reverted by the destructor.
@@ -345,12 +373,12 @@ template <class HintsT, class T, class Map, class Combine>
 `map(lo, hi)` produces the partial value for one chunk; `combine(a, b)` combines two partials. The reduce engine internally forces `Balance::StaticUniform` regardless of `HintsT::balance` so chunk-id-to-rank mapping is stable; the combine runs as a chunk-id pairwise tree, so the result is bit-identical across worker counts when `Determinism::FixedBlockOrder` or `Determinism::KahanCompensated` is requested.
 
 **Determinism shapes** (selected on `HintsT::determinism`):
-- `Determinism::FixedBlockOrder` -- chunk-id pairwise tree combine.
-- `Determinism::KahanCompensated` -- Kahan/Neumaier compensated FP sum on top of the fixed-block tree.
+- `Determinism::FixedBlockOrder`: chunk-id pairwise tree combine.
+- `Determinism::KahanCompensated`: Kahan/Neumaier compensated FP sum on top of the fixed-block tree.
 
 The reduce-side hint presets (`KahanReduceHints`, `FixedBlockReduceHints`) wire the determinism field plus a `minTaskUs = 25.0` floor; they leave `balance` at its default since the engine overrides it anyway.
 
-**Cancellation**: a stopped token throws `cancelled_value_exception<T>` carrying the deterministic combine of the chunks that completed before the cancellation was observed. This is the **only** primitive that throws on cancellation -- void primitives early-return.
+**Cancellation**: a stopped token throws `cancelled_value_exception<T>` carrying the deterministic combine of the chunks that completed before the cancellation was observed. This is the **only** primitive that throws on cancellation; void primitives early-return.
 
 **Nesting**: invoked from inside another primitive on the same pool, the call falls through to inline-on-caller (single-threaded). For nested fan-out, fan out at the outer level and reduce serially per chunk.
 
@@ -365,7 +393,7 @@ template <class HintsT, class T, class BodyFn, class PrefixFn>
                              CancellationToken tok = {});
 ```
 
-The body has signature `T body(std::size_t chunkId, std::size_t lo, std::size_t hi, T initial, T *reserved)`. The trailing `reserved` parameter is **always `nullptr`** -- it exists only to keep the signature stable; the body owns its output buffer through capture. The body is invoked **twice per slot** when there are at least two participants:
+The body has signature `T body(std::size_t chunkId, std::size_t lo, std::size_t hi, T initial, T *reserved)`. The trailing `reserved` parameter is **always `nullptr`**; it keeps the signature stable while the body owns its output buffer through capture. The body is invoked **twice per slot** when there are at least two participants:
 
 - Pass 1 with `initial == identity`: compute and return the chunk's partial.
 - Pass 2 with `initial == exclusivePrefix[slot]`: write the per-element scan into the user's captured buffer; the return value is the chunk contribution.
@@ -373,6 +401,25 @@ The body has signature `T body(std::size_t chunkId, std::size_t lo, std::size_t 
 Distinguish passes via a simple atomic call counter (the canonical idiom; see the Cookbook). The producer computes chunk-level exclusive prefixes serially in `O(participants)` between the two passes. With `participants == 1` or `n` below the inline threshold, the call collapses to a single body invocation.
 
 **Nesting**: same-pool reentrancy falls through to inline-on-caller; the inner scan is single-threaded.
+
+### `inclusiveScan`
+
+Buffer-to-buffer inclusive prefix sum. Same shape as `parallelScan` but the engine owns the inner loop, so it can prefetch, NT-store, AVX-scan, and tune the per-tile size from the runtime-probed L2.
+
+```cpp
+template <class HintsT, class T, class PrefixFn>
+[[nodiscard]] T inclusiveScan(std::span<const T> in, std::span<T> out,
+                              T identity, PrefixFn &&prefix,
+                              CancellationToken tok = {});
+```
+
+`in` and `out` must have equal length; aliasing is well-formed (the engine reads `in[i]` before writing `out[i]`). Returns the inclusive total at the right edge: the same value Blelloch's two-pass scan produces.
+
+The tradeoff against `parallelScan`: `inclusiveScan` is restricted to plain memory-to-memory scans of trivially-relocatable types under a user-supplied associative combiner. Bodies that need to inspect side state, allocate, or otherwise reach beyond `[in, out)` keep using `parallelScan`.
+
+**When it pays.** On `int64 + plus`, `citor::inclusiveScan` is the leading row against every two-wave emulator (BS, dp, task, riften, Taskflow, Eigen, OpenMP, Leopard, dispenso) and against oneTBB's native `tbb::parallel_scan`. See `docs/charts/family_scan_geomean.svg` for the cross-peer geomean.
+
+**Nesting**: same-pool reentrancy falls through to inline-on-caller (single-pass serial scan).
 
 ### `parallelChain`
 
@@ -390,11 +437,11 @@ void parallelChainWithToken(std::size_t n, const CancellationToken &tok,
 The cancellation overload is named `parallelChainWithToken` because the variadic `Stages` pack would otherwise absorb the leading token argument.
 
 Each stage is built with one of the helpers from `<citor/chain.h>`:
-- `staticStage(name, fn)`         -- `BarrierKind::None` (no rendezvous after).
-- `globalStage(name, fn)`         -- `BarrierKind::Global` (rendezvous across all slots).
-- `reduceStage(name, fn)`         -- `BarrierKind::DeterministicReduce`.
-- `serialStage(name, fn)`         -- `BarrierKind::ProducerSerial` (rank 0 runs serially while others spin).
-- `makeStage<BarrierKind::X>(fn)` -- explicit barrier kind without a name; underlying type is `Stage<F, BarrierKind>`.
+- `staticStage(name, fn)`: `BarrierKind::None` (no rendezvous after).
+- `globalStage(name, fn)`: `BarrierKind::Global` (rendezvous across all slots).
+- `reduceStage(name, fn)`: `BarrierKind::DeterministicReduce`.
+- `serialStage(name, fn)`: `BarrierKind::ProducerSerial` (rank 0 runs serially while others spin).
+- `makeStage<BarrierKind::X>(fn)`: explicit barrier kind without a name; underlying type is `Stage<F, BarrierKind>`.
 
 The stage body signature is `void(stageIdx, slot, lo, hi)`. Empty stage packs and `n == 0` are no-ops.
 
@@ -416,7 +463,7 @@ void runPlex(std::size_t nPhases, std::size_t n, Phase &&phaseFn,
 
 `phaseFn(phaseIdx, slot, lo, hi)` is invoked exactly once per `(phase, slot)` pair, in stable phase-then-slot order.
 
-**When to use it**: iterative numeric kernels (Jacobi / Gauss-Seidel / stencil sweeps), simulation tick loops, cellular automata -- workloads where the same partition is reused across many phases. For one-shot fan-outs `parallelFor` is cheaper because `runPlex` keeps workers spinning between phases.
+**When to use it**: iterative numeric kernels (Jacobi, Gauss-Seidel, stencil sweeps), simulation tick loops, cellular automata. The same partition gets reused across many phases. For one-shot fan-outs `parallelFor` is cheaper because `runPlex` keeps workers spinning between phases.
 
 **Nesting**: same-pool reentrancy falls through to inline-on-caller; the inner phased loop is single-threaded. `runPlex` is meant to be the outermost driver.
 
@@ -430,7 +477,7 @@ void bulkForQueries(std::size_t q, QueryFn &&fn,
                     CancellationToken tok = {});
 ```
 
-**When to use it**: spatial-index lookups, batched key/value gets, KD-tree or BVH ray queries -- workloads where per-query depth varies and `Balance::DynamicChunked` (the default for `bulkForQueries`) amortises the skew. Use `parallelFor` when the per-item cost is uniform.
+**When to use it**: spatial-index lookups, batched key/value gets, KD-tree or BVH ray queries. Per-query depth varies and `Balance::DynamicChunked` (the default for `bulkForQueries`) amortises the skew. Use `parallelFor` when the per-item cost is uniform.
 
 **Nesting**: same-pool reentrancy falls through to inline-on-caller. If a single query body itself wants fan-out, prefer `forkJoin` inside it over another `bulkForQueries`.
 
@@ -461,7 +508,7 @@ template <class HintsT, class TaskFn>
 void submitDetached(TaskFn fn, CancellationToken tok = {});
 ```
 
-**Exception handling**: a throw from a detached body is captured into a per-pool slot and surfaced via `pool.lastDetachedException()`. The first throw latches; subsequent throws are silently dropped. The destructor blocks on the in-flight counter but does **not** rethrow -- a caller that cares must call `lastDetachedException()` proactively. The pool does not call `std::terminate` on a detached throw.
+**Exception handling**: a throw from a detached body is captured into a per-pool slot and surfaced via `pool.lastDetachedException()`. The first throw latches; subsequent throws are silently dropped. The destructor blocks on the in-flight counter; callers observe captured exceptions by calling `lastDetachedException()` proactively.
 
 **When to use it**: tear-down work whose completion is not on the caller's join path: log flushes, metrics writes, async finalisation. For anything the caller actually waits on, use a synchronous primitive.
 
@@ -487,7 +534,7 @@ Cross-arena calls (worker on `PoolGroup` arena A invokes a synchronous primitive
 
 ## Cookbook
 
-Each recipe is a real-world scenario, not a primitive demo. The "Why this primitive" line at the end of each tells you what citor does that a generic thread-pool API cannot. All snippets assume `citor::ThreadPool pool;` is in scope.
+Each recipe pairs a workload with the matching primitive. The "Why this primitive" line at the end names the citor-specific reason the call shape was the right pick. All snippets assume `citor::ThreadPool pool;` is in scope.
 
 ### Audio buffer per-sample gain (`parallelFor`)
 
@@ -506,7 +553,7 @@ void applyGain(citor::ThreadPool &pool, float *interleaved,
 }
 ```
 
-For tiled 2D workloads (image kernel over `(rowTile, colTile)`, spatial filter, batched per-row transform), nest two `parallelFor` calls -- same-pool nested calls push inner chunks onto the calling worker's deque so peers steal them, no central dispatch lock, no participant double-count, no flatten-into-1D index math:
+For tiled 2D workloads (image kernel over `(rowTile, colTile)`, spatial filter, batched per-row transform), nest two `parallelFor` calls. Same-pool nested calls push inner chunks onto the calling worker's deque so peers steal them, no central dispatch lock, no participant double-count, no flatten-into-1D index math:
 
 ```cpp
 pool.parallelFor<citor::HintsDefaults>(
@@ -610,7 +657,7 @@ std::size_t filterEvents(citor::ThreadPool &pool,
 }
 ```
 
-**Why this primitive.** Two-pass scan: pass 1 produces per-chunk totals, the producer prefixes them in `O(participants)`, pass 2 writes per-element offsets with the chunk's exclusive prefix as `initial`. Same shape covers stream compaction, CSV row-offset computation, and output-slot allocation in batched parsers.
+**Why this primitive.** Two-pass scan: pass 1 produces per-chunk totals, the producer prefixes them in `O(participants)`, pass 2 writes per-element offsets with the chunk's exclusive prefix as `initial`. The same idiom serves stream compaction, CSV row-offset computation, and output-slot allocation in batched parsers.
 
 ### ML inference preprocessing pipeline (`parallelChain`)
 
@@ -668,11 +715,11 @@ void simulateCloth(citor::ThreadPool &pool,
 }
 ```
 
-**Why this primitive.** A `parallelFor` loop with `substeps` iterations would wake and park workers `substeps` times. `runPlex` publishes one descriptor and keeps workers in user-space rendezvous between phases -- per-phase cost is a rendezvous spin, not a syscall. Same shape covers Jacobi solvers, Gauss-Seidel sweeps, Game of Life, fluid simulations, and any iterative kernel over a stable partition.
+**Why this primitive.** A `parallelFor` loop with `substeps` iterations would wake and park workers `substeps` times. `runPlex` publishes one descriptor and keeps workers in user-space rendezvous between phases. Per-phase cost is a rendezvous spin, not a syscall. Use it for Jacobi solvers, Gauss-Seidel sweeps, Game of Life, fluid simulations, and any iterative kernel over a stable partition.
 
 ### Game broad-phase collision queries (`bulkForQueries`)
 
-A physics engine has N moving bodies per frame and queries each against a BVH for potential collision pairs. Per-query cost varies wildly with traversal depth -- some bodies are in cluttered regions, others are alone in space.
+A physics engine has N moving bodies per frame and queries each against a BVH for potential collision pairs. Per-query cost depends on traversal depth: bodies in cluttered regions descend deeper than bodies alone in space.
 
 ```cpp
 void broadPhase(citor::ThreadPool &pool, const Bvh &bvh,
@@ -688,7 +735,7 @@ void broadPhase(citor::ThreadPool &pool, const Bvh &bvh,
 }
 ```
 
-**Why this primitive.** `parallelFor` is for uniform per-item cost; `bulkForQueries` defaults to `Balance::DynamicChunked` for variable per-query cost. A worker that finishes its block fast keeps pulling more, so a single deep-tree query doesn't stall the slowest leaf. Result must be keyed by query index (`hits[q]`), not chunk order: chunk dispatch order varies across worker counts. Same shape works for ray-batch intersection, spatial-hash lookups, KD-tree nearest-neighbor, and per-row sparse matrix-vector products.
+**Why this primitive.** `parallelFor` is for uniform per-item cost; `bulkForQueries` defaults to `Balance::DynamicChunked` for variable per-query cost. A worker that finishes its block fast keeps pulling more, so a single deep-tree query doesn't stall the slowest leaf. Result must be keyed by query index (`hits[q]`), not chunk order: chunk dispatch order varies across worker counts. Other workloads with the same shape: ray-batch intersection, spatial-hash lookups, KD-tree nearest-neighbor, per-row sparse matrix-vector products.
 
 ### BVH build by recursive partition (`forkJoin`)
 
@@ -718,7 +765,7 @@ void buildBvh(citor::ThreadPool &pool,
 }
 ```
 
-**Why this primitive.** Each worker has its own Chase-Lev deque. Each `forkJoin` level pushes children onto the calling worker's deque, runs one inline, and lets peers steal the rest. There is no central submission queue, so the steal protocol scales with participant count. `CcdLocalForkJoinHints` biases steal probes to same-CCD victims so transferred work stays L3-local. Same shape covers KD-tree builds, octree splits, parallel sorts (cilksort, mergesort), Strassen multiplication, and branch-and-bound search (pair with a `CancellationToken` to prune).
+**Why this primitive.** Each worker has its own Chase-Lev deque. Each `forkJoin` level pushes children onto the calling worker's deque, runs one inline, and lets peers steal the rest. There is no central submission queue, so the steal protocol scales with participant count. `CcdLocalForkJoinHints` biases steal probes to same-CCD victims so transferred work stays L3-local. The same recursive-fanout shape underpins KD-tree builds, octree splits, parallel sorts (cilksort, mergesort), Strassen multiplication, and branch-and-bound search (pair with a `CancellationToken` to prune).
 
 ### Post-frame metrics flush (`submitDetached`)
 
@@ -733,13 +780,13 @@ void flushMetricsAsync(citor::ThreadPool &pool, FrameMetrics m) {
 }
 
 // Periodically (or before pool teardown), observe any captured throw.
-// The destructor blocks on the in-flight counter but does NOT rethrow.
+// Captured exceptions are observed by calling lastDetachedException().
 if (auto eptr = pool.lastDetachedException()) {
   std::rethrow_exception(eptr);   // first throw only; later ones drop
 }
 ```
 
-**Why this primitive.** `submitDetached` is the only primitive that does not block the caller. The pool's destructor blocks on the detached counter, so the body can outlive the calling scope but cannot outlive the pool. Exceptions are captured and surfaced via `lastDetachedException()` instead of calling `std::terminate` -- the user picks when to observe them.
+**Why this primitive.** `submitDetached` is the only primitive that does not block the caller. The pool's destructor blocks on the detached counter, so the body can outlive the calling scope but cannot outlive the pool. Exceptions are captured and surfaced via `lastDetachedException()` instead of calling `std::terminate`; the user picks when to observe them.
 
 ### Per-CCD column-store aggregation (`PoolGroup`)
 
@@ -774,7 +821,7 @@ double aggregateByShard(const ColumnStore &store) {
 }
 ```
 
-**Why this primitive.** Workers in arena `i` are pinned to CCD `i`'s cores at construction; `arena(i).parallelReduce(...)` keeps memory traffic on that CCD's L3 instead of crossing the inter-CCD fabric. Cross-arena synchronous calls (worker on arena A submitting to arena B) fall through to inline-on-caller via the TLS participant token, so cross-arena work never enqueues onto a queue the caller doesn't service. Same shape applies to per-NUMA-node partition processing, per-CCD ML inference batch routing, and any large array transformation where partition locality matters.
+**Why this primitive.** Workers in arena `i` are pinned to CCD `i`'s cores at construction; `arena(i).parallelReduce(...)` keeps memory traffic on that CCD's L3 instead of crossing the inter-CCD fabric. Cross-arena synchronous calls (worker on arena A submitting to arena B) fall through to inline-on-caller via the TLS participant token, so cross-arena work never enqueues onto a queue the caller doesn't service. Per-NUMA-node partition processing, per-CCD ML inference batch routing, and large array transformations with partition locality follow the same model.
 
 ### Deadline-bounded chess search (cancellation + `Deadline`)
 
@@ -810,7 +857,7 @@ Move searchWithDeadline(citor::ThreadPool &pool, const Board &b,
 }
 ```
 
-**Why this combination.** Pass the same token to every primitive in the call tree; each polls at chunk boundaries and stops admitting new work. `Deadline` is also available (`citor::Deadline::fromMillis(50).expired()` is a few cycles via cached TSC), but `Deadline` does not stop a primitive by itself -- wire it through a watchdog that calls `tok.request_stop()` once `expired()`. For tokens statically known never to fire, `cancellationChecks = false` compiles out the per-chunk poll. Void primitives (like `parallelFor` here) early-return on stop -- they do **not** throw; only `parallelReduce` throws (`cancelled_value_exception<T>` carrying the deterministic partial).
+**Why this combination.** Pass the same token to every primitive in the call tree; each polls at chunk boundaries and stops admitting new work. `Deadline` (`citor::Deadline::fromMillis(50).expired()`) is a TSC-based check; wire it through a watchdog that calls `tok.request_stop()` once `expired()`. For tokens statically known never to fire, `cancellationChecks = false` compiles out the per-chunk poll. Void primitives early-return on stop; only `parallelReduce` throws `cancelled_value_exception<T>` carrying the deterministic partial.
 
 ---
 
@@ -897,14 +944,14 @@ pool.parallelFor<citor::HintsDefaults>(
       for (std::size_t i = lo; i < hi; ++i) { /* heavy work */ }
     },
     tok);
-// On a stop, parallelFor early-returns; it does NOT throw.
+// On a stop, parallelFor early-returns.
 
 killer.join();
 ```
 
 Cancellation behavior by primitive:
 
-- **`parallelFor`, `parallelChain`, `parallelChainWithToken`, `runPlex`, `bulkForQueries`, `submitDetached`**: void return; on a stopped token, the primitive early-returns without invoking further bodies. **No exception is thrown.**
+- **`parallelFor`, `parallelChain`, `parallelChainWithToken`, `runPlex`, `bulkForQueries`, `submitDetached`**: void return; on a stopped token, the primitive early-returns without invoking further bodies.
 - **`forkJoin`**: void return; cancellation clamps the outstanding-task count and returns normally. Tasks that haven't started simply don't run.
 - **`parallelReduce`**: throws `cancelled_value_exception<T>` carrying `partial_value`, the deterministic combine of the chunks that completed before the stop was observed.
 - **`parallelScan`**: returns `identity` on a pre-stopped token; mid-flight stops still complete the in-flight passes.
@@ -924,7 +971,7 @@ On x86_64, `Deadline` calibrates cycles per nanosecond once per process and uses
 
 ## PoolGroup and per-CCD arenas
 
-`PoolGroup::global()` lazily constructs one `ThreadPool` arena per CCD detected by sysfs. Each arena's `pool.kind()` is `PoolKind::Arena`. Cross-arena synchronous calls fall through to the inline path on the caller -- the TLS participant token guards against a worker on arena A submitting work to arena B and blocking on a queue arena A doesn't service.
+`PoolGroup::global()` lazily constructs one `ThreadPool` arena per CCD detected by sysfs. Each arena's `pool.kind()` is `PoolKind::Arena`. Cross-arena synchronous calls fall through to the inline path on the caller; the TLS participant token guards against a worker on arena A submitting work to arena B and blocking on a queue arena A doesn't service.
 
 ```cpp
 #include <citor/pool_group.h>
@@ -948,7 +995,7 @@ void localArenaPath() {
 
 `localArena()` returns `arena(0)` when the calling thread is not a `PoolGroup` worker (the producer or any user-spawned `std::thread`), so callers always get a valid arena to dispatch to.
 
-`PoolGroup::global()` is lazy, thread-safe by C++ function-local-static initialization, and intentionally never destroyed. Detached tasks submitted to a `PoolGroup::global()` arena will outlive most user objects -- if you need bounded worker lifetime, construct a stack `citor::PoolGroup group;` instead and let it go out of scope normally.
+`PoolGroup::global()` is lazy, thread-safe by C++ function-local-static initialization, and never destroyed; its lifetime matches the process. Detached tasks submitted to a `PoolGroup::global()` arena will outlive most user objects. For bounded worker lifetime, construct a stack `citor::PoolGroup group;` and let it go out of scope normally.
 
 ## Diagnostics and counters
 
@@ -971,13 +1018,13 @@ Use counters for regression tests, benchmark context, and diagnosing unexpected 
 | option                          | default      | effect |
 |---------------------------------|--------------|--------|
 | `CITOR_BUILD_TESTS`             | ON top-level | Build the GTest suite. |
-| `CITOR_BUILD_BENCHMARK`         | ON top-level | Build the comparative bench (fetches ten peer pools via CPM; first cold configure is 5-10 minutes). |
+| `CITOR_BUILD_BENCHMARK`         | ON top-level | Build the comparative bench (fetches peer pools via CPM; first cold configure is slow). |
 | `CITOR_USE_AVX2`                | ON           | Compile with `-mavx2 -mfma`, define `CITOR_USE_AVX2`. Auto-detected via `check_cxx_compiler_flag`. |
 | `CITOR_BUILD_WITH_SANITIZER`    | OFF          | Build with `-fsanitize=thread -fno-omit-frame-pointer`. |
 | `CITOR_ENABLE_POOL_COUNTERS`    | OFF          | Compile in pool-level diagnostic counters. Hot path pays no extra atomics when OFF. |
 | `CITOR_WORKER_STACK_KIB`        | `8192`       | Per-worker pthread stack size (KiB). |
 
-clang-tidy is not a build option -- it runs as a pre-commit hook (over staged files) and as a dedicated CI job (over the whole tree). When citor is consumed via `add_subdirectory(...)` or CPM, all of the above default to OFF -- the consumer gets the public INTERFACE target only.
+clang-tidy is not a build option. It runs as a pre-commit hook over staged files and as part of the clang-18 CI job over the diff. When citor is consumed via `add_subdirectory(...)` or CPM, all of the above default to OFF; the consumer gets the public INTERFACE target only.
 
 ### Build and test locally
 
@@ -1002,7 +1049,19 @@ cmake --build build --target check-format
 cmake --build build --target format
 ```
 
-Pre-commit hooks (install via `uv run pre-commit install`) cover trailing whitespace, end-of-file fixes, YAML, large files, mixed line endings, merge-conflict markers, `clang-format`, the `gersemi` CMake formatter, and `commitizen` on `commit-msg`. CI runs the same hooks plus a separate clang-tidy job over the whole tree.
+Install pre-commit hooks with `uv run pre-commit install`. CI runs the same set plus clang-tidy on the diffed translation units.
+
+| hook                       | scope                                              |
+|----------------------------|----------------------------------------------------|
+| `trailing-whitespace`      | every text file                                    |
+| `end-of-file-fixer`        | every text file                                    |
+| `check-yaml`               | YAML files                                         |
+| `check-added-large-files`  | every file (size guard)                            |
+| `mixed-line-ending`        | every text file                                    |
+| `check-merge-conflict`     | every text file                                    |
+| `clang-format`             | C / C++ sources                                    |
+| `gersemi`                  | CMake sources                                      |
+| `commitizen`               | commit message (commit-msg stage)                  |
 
 ### Single-header generation
 
@@ -1019,9 +1078,9 @@ Commitizen owns version bumps. `pyproject.toml` lists every file that must carry
 
 ## Benchmarks
 
-The bench harness measures dispatch latency and per-primitive throughput against ten peer pools (BS, dp, task, riften, oneTBB, Taskflow, Eigen, OpenMP, Leopard, dispenso); two coroutine schedulers (libfork, TooManyCooks) join the recursive fork-join workloads. Numbers are not embedded in this README -- they age out on the next compiler / microarchitecture bump.
+The bench harness measures dispatch latency and per-primitive throughput. Peer pools: BS, dp, task, riften, oneTBB, Taskflow, Eigen, OpenMP, Leopard, dispenso. Coroutine schedulers (libfork, TooManyCooks) join the recursive fork-join workloads. Numbers belong on your hardware; the harness exports JSON. They age out on the next compiler or microarchitecture bump.
 
-The full sweep fetches ten peer pools and runs roughly 94 workloads; wall-clock is 40-50 minutes on a 16-core CCD. Use `python -m tools.bench isolated` to run each cell in its own process so a competitor's segfault does not kill the whole run.
+A full sweep takes tens of minutes wall-clock on a single CCD. Use `python -m tools.bench isolated` to run each cell in its own process so a competitor's segfault does not kill the whole run.
 
 ```bash
 cmake -S . -B build -G Ninja \
@@ -1042,18 +1101,49 @@ python -m tools.plot_bench \
 python -m tools.bench run
 ```
 
-The harness probes host invariants (governor, turbo, SMT, ASLR, libomp blocktime) at startup and flags any failed gate in the table output and the JSON `context` block. For serious latency numbers, set the cpufreq governor to `performance`, disable boost, disable ASLR (`/proc/sys/kernel/randomize_va_space=0`), and pin process affinity. The benchmark tree includes workloads for parallel-for dispatch, granularity, matmul, Pareto-distributed bodies, reductions, scans, chains, runPlex heat / stencil sweeps, fork-join recursive workloads, bulk queries, differential comparisons, and two-pool OpenMP coexistence.
+The harness probes host invariants at startup (governor, turbo, SMT, ASLR, libomp blocktime) and flags any failed gate in the table output and the JSON `context` block. For serious latency numbers, set the cpufreq governor to `performance`, disable boost, disable ASLR (`/proc/sys/kernel/randomize_va_space=0`), and pin process affinity.
+
+Workload families in the bench tree:
+
+- `parallel_for/`: dispatch floor, granularity sweep, matmul, Pareto-distributed bodies, cold dispatch, balance / affinity sweeps.
+- `reduce/`: deterministic sums (Kahan, integer plus, Pareto body cost).
+- `scan/`: `parallelScan` and `inclusiveScan` against two-wave emulators and `tbb::parallel_scan`.
+- `chain/`: empty stages and Pareto-body stages.
+- `run_plex/`: phased transitions, heat stencil.
+- `fork_join/`: cilksort, Fibonacci (fine / coarse / torture), Strassen, knapsack, skynet, UTS, matmul DaC, mixed-detached, cross-CCD pool group.
+- `bulk_for_queries/`: variable-cost query batches.
+- `differential/`, `two_pool/`: cross-cell differential reductions and two-pool BLAS coexistence.
 
 ## Supported targets
 
-- **Validated and CI-backed**: Ubuntu 24.04, GCC 14, Clang 18, C++20, Linux x86_64.
-- **Packaging metadata**: vcpkg overlay marks `linux & x64`; the Conan recipe warns when `os != Linux` or `arch != x86_64`.
-- **Kernel**: Linux 6.x with `futex` and sysfs `cpu/cpuX/cache/index*` is the validated base.
+- **Linux x86_64 + AVX2 (CI)**: Ubuntu 24.04 with GCC 14 and Clang 18, C++20. Every push on `main` runs the GTest suite, ASan + UBSan, TSan smoke, clang-tidy, and pre-commit hooks via `.github/workflows/ci.yml`. The latency contract is validated only on this configuration.
+- **Windows x86_64 (best-effort)**: MSVC 2022 with `/std:c++20`. Build and tests pass locally; no CI coverage. The Windows port maps each Linux primitive to its Win32 counterpart:
+
+  | concern               | Win32 API                                              |
+  |-----------------------|--------------------------------------------------------|
+  | thread park           | `WaitOnAddress`                                        |
+  | thread wake (one)     | `WakeByAddressSingle`                                  |
+  | thread wake (all)     | `WakeByAddressAll`                                     |
+  | topology probe        | `GetLogicalProcessorInformationEx`                     |
+  | producer affinity     | `SetThreadAffinityMask`                                |
+  | locked pages          | `VirtualLock`                                          |
+
+  The dispatch gate is a hybrid CAS plus `WaitOnAddress` lock on the cold path. Treat Windows numbers as indicative.
+- **Packaging coverage in CI**:
+
+  | install path                       | CI job                       |
+  |------------------------------------|------------------------------|
+  | `cmake --install` + `find_package` | `packaging-cmake-install`    |
+  | Conan 2.x recipe                   | `packaging-conan`            |
+  | Single-header drop-in              | `packaging-single-header`    |
+  | CMake `FetchContent`               | `packaging-fetchcontent`     |
+  | CPM                                | `packaging-cpm`              |
+  | vcpkg overlay                      | not covered in CI |
+- **Kernel**: Linux 6.x with `futex` and sysfs `cpu/cpuX/cache/index*` for the CI configuration. Windows 8+ for the Windows port (`WaitOnAddress` lives in `Synchronization.lib`).
 - **AVX2**: auto-detected via `check_cxx_compiler_flag`; the pool builds without it but loses the AVX2-tuned code paths.
 
 Implementation notes for non-validated paths:
 
-- Linux uses raw futex parking and pthread affinity. Non-Linux compile fallbacks (`std::thread` + condition-variable parking) exist but are not the validated latency target.
 - x86_64 uses TSC-based deadline checks and `_mm_pause` for spin hints. Non-x86 collapses `Deadline` factories to the never-expires sentinel and uses a compiler-barrier spin hint.
 - AVX2/FMA flags are added by CMake when `CITOR_USE_AVX2=ON` and the compiler accepts them; the flag is an optimization toggle, not part of the support contract.
 
