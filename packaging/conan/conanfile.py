@@ -28,13 +28,20 @@ class CitorConan(ConanFile):
     package_type = "header-library"
     no_copy_source = True
 
-    exports_sources = (
-        "include/*",
-        "single_include/*",
-        "CMakeLists.txt",
-        "cmake/*",
-        "LICENSE",
-    )
+    # The recipe lives at `packaging/conan/conanfile.py`, two levels below
+    # the repo root. `exports_sources = "../include/*"` would silently strip
+    # the leading `../` so we stage the tree explicitly through
+    # `export_sources()` instead.
+    def export_sources(self):
+        src = Path(self.recipe_folder).resolve().parent.parent
+        copy(self, "*.h", str(src / "include"), str(Path(self.export_sources_folder) / "include"))
+        copy(
+            self,
+            "*.hpp",
+            str(src / "single_include"),
+            str(Path(self.export_sources_folder) / "single_include"),
+        )
+        copy(self, "LICENSE", str(src), str(self.export_sources_folder))
 
     def validate(self):
         if str(self.settings.os) != "Linux":

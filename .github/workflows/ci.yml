@@ -211,3 +211,65 @@ jobs:
           # does not match the project version. `--yes` skips the interactive
           # tag-confirmation prompt that fails with EOFError on CI runners.
           cz bump --files-only --dry-run --increment PATCH --yes
+
+  packaging-cmake-install:
+    name: packaging (cmake install + find_package)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CC: clang-18
+      CXX: clang++-18
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-18 lld-18 ninja-build
+      - name: Build + install citor
+        run: |
+          cmake -S . -B build-pkg -G Ninja \
+            -DCITOR_BUILD_TESTS=OFF \
+            -DCITOR_BUILD_BENCHMARK=OFF \
+            -DCMAKE_INSTALL_PREFIX=/tmp/citor-inst
+          cmake --build build-pkg -j
+          cmake --install build-pkg
+      - name: Build + run consumer against installed citor
+        run: |
+          cmake -S packaging/test/consumer -B /tmp/citor-consumer -G Ninja \
+            -DCMAKE_PREFIX_PATH=/tmp/citor-inst
+          cmake --build /tmp/citor-consumer -j
+          /tmp/citor-consumer/consumer
+
+  packaging-conan:
+    name: packaging (conan 2.x)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CC: clang-18
+      CXX: clang++-18
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-18 lld-18 ninja-build cmake
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install conan
+        run: pip install "conan>=2.0,<3.0"
+      - name: Configure conan profile
+        run: conan profile detect --force
+      - name: Create local citor package
+        run: |
+          VERSION=$(python -c "import tomllib;print(tomllib.loads(open('pyproject.toml').read())['tool']['commitizen']['version'])")
+          conan create packaging/conan --version "$VERSION"
+      - name: Build + run consumer against local conan package
+        run: |
+          mkdir -p /tmp/citor-conan-test
+          cp -r packaging/test/consumer/* /tmp/citor-conan-test/
+          cd /tmp/citor-conan-test
+          conan install . --build=missing -s compiler.cppstd=20
+          cmake --preset conan-release
+          cmake --build --preset conan-release
+          ./build/Release/consumer
