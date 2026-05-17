@@ -47,12 +47,33 @@ jobs:
         id: bump
         run: |
           set -o pipefail
-          if cz bump --yes --check-consistency 2>&1 | tee /tmp/cz.log; then
-            echo "bumped=true" >> "$GITHUB_OUTPUT"
-            echo "tag=v$(cz version --project)" >> "$GITHUB_OUTPUT"
-          else
-            echo "bumped=false" >> "$GITHUB_OUTPUT"
-          fi
+          # commitizen exit codes worth distinguishing:
+          #   0   = bumped successfully
+          #   3   = NO_COMMITS_FOUND (nothing bumpable since last tag, exit clean)
+          #   21  = NO_COMMITS_FOUND when no commits found between tags
+          # Anything else (consistency failure, IO failure, ...) MUST fail the
+          # job loudly. The previous shape `if cz bump ...; then ... else ...`
+          # silently swallowed every non-zero exit and quietly skipped the
+          # release; consistency drift between version_files and the source
+          # tree went unnoticed for multiple commits.
+          set +e
+          cz bump --yes --check-consistency 2>&1 | tee /tmp/cz.log
+          status=${PIPESTATUS[0]}
+          set -e
+          case "$status" in
+            0)
+              echo "bumped=true" >> "$GITHUB_OUTPUT"
+              echo "tag=v$(cz version --project)" >> "$GITHUB_OUTPUT"
+              ;;
+            3|21)
+              echo "no bumpable commits since last tag; exiting clean"
+              echo "bumped=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::cz bump failed with status $status (see log above)"
+              exit "$status"
+              ;;
+          esac
 
       - name: Regenerate amalgamation
         if: steps.bump.outputs.bumped == 'true'

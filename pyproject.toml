@@ -25,6 +25,7 @@ version_files = [
     "CMakeLists.txt:VERSION",
     "include/citor/version.h:CITOR_VERSION_STRING",
     "CITATION.cff:^version",
+    "README.md:^\\| Version \\|",
     "README.md:citor/v",
     "README.md:citor#v",
     "README.md:GIT_TAG",
