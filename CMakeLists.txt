@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(
     citor
-    VERSION 0.2.0
+    VERSION 0.2.1
     DESCRIPTION "Header-only C++20 thread pool for sub-microsecond dispatch"
     LANGUAGES CXX
 )
