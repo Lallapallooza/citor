@@ -2,7 +2,7 @@
 //
 // citor -- header-only C++20 thread pool
 // version: 0.1.0
-// commit:  dcf416857ac81eb51d1b96d94e31c1daac3fa732
+// commit:  d71131273b4c7694b7672b122bd756755827f833
 // generated: 2026-05-17
 //
 // GENERATED FILE -- DO NOT EDIT.
@@ -8214,15 +8214,15 @@ public:
         fillTaskBodies(closures, deferred,
                        std::make_index_sequence<kNTasks - 1>{});
         runForkJoinTypedTailNested<HasToken>(
-            deferred.data(), kNTasks - 1, std::get<kNTasks - 1>(closures),
-            std::move(tok), stealPolicyFromHints<HintsT>(),
+            deferred.data(), kNTasks - 1, std::get<kNTasks - 1>(closures), tok,
+            stealPolicyFromHints<HintsT>(),
             static_cast<std::uint32_t>(ctx.slot));
         return;
       }
       std::array<detail::Task, kNTasks> tasks{};
       fillTaskBodies(closures, tasks, std::index_sequence_for<TaskFns...>{});
       ensureProducerPinnedForChunkZero();
-      runForkJoinOuter<HasToken>(tasks.data(), kNTasks, std::move(tok),
+      runForkJoinOuter<HasToken>(tasks.data(), kNTasks, tok,
                                  stealPolicyFromHints<HintsT>());
     }
   }
