@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 //
 // citor -- header-only C++20 thread pool
-// version: 0.2.1
-// commit:  b2cbd4b7bf61ae64f2445153a80e59adbdf28c0d
+// version: 0.2.2
+// commit:  bc69de9fda08975def7e68ea6c2cb073b65c0726
 // generated: 2026-05-17
 //
 // GENERATED FILE -- DO NOT EDIT.
@@ -13173,4 +13173,4 @@ private:
 // `#define CITOR_VERSION_PATCH 0` lose the version literal a regex can pin
 // against.
 
-#define CITOR_VERSION_STRING "0.2.1"
+#define CITOR_VERSION_STRING "0.2.2"
