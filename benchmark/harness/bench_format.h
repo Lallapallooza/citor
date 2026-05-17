@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <iomanip>
 #include <ios>
+#include <iostream>
 #include <optional>
 #include <ostream>
 #include <random>
@@ -42,16 +43,26 @@ inline bool &rawSampleExportEnabled() {
   return enabled;
 }
 
+// Reports the row currently being measured. Each measure helper calls
+// `engineEnabled(name)` immediately before sampling; when it returns true we
+// emit a one-line stderr marker so the user can see which pool is on the
+// stopwatch right now. The marker carries no semantic effect.
+inline void announceRow(std::string_view name) {
+  std::cerr << "  ... " << name << "\n";
+}
+
 // Returns true when |name| should be measured. Empty filter list means "all
 // on"; otherwise true when at least one filter substring is contained in
 // |name|.
 inline bool engineEnabled(std::string_view name) {
   const auto &filters = engineFilters();
   if (filters.empty()) {
+    announceRow(name);
     return true;
   }
   for (const auto &filter : filters) {
     if (name.find(filter) != std::string_view::npos) {
+      announceRow(name);
       return true;
     }
   }

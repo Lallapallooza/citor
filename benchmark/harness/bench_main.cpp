@@ -301,6 +301,14 @@ int main(int argc, char **argv) {
 
   bool anyRan = false;
   bool firstCell = true;
+  std::size_t matched = 0;
+  for (const auto &reg : registry()) {
+    if (matchesFilters(reg.name, opts.filters)) {
+      ++matched;
+    }
+  }
+  const auto sweepStart = std::chrono::steady_clock::now();
+  std::size_t cellIdx = 0;
   // Tables are retained across cells only when --export is on, so the JSON
   // writer can emit one record per (workload, pool, rep). When --export is
   // off this vector stays empty and the cell-loop body's `BenchTable` lives
@@ -315,10 +323,43 @@ int main(int argc, char **argv) {
       std::this_thread::sleep_for(kInterCellCoolOff);
     }
     firstCell = false;
+    ++cellIdx;
+    const auto cellStart = std::chrono::steady_clock::now();
+    const auto elapsedSweep =
+        std::chrono::duration_cast<std::chrono::seconds>(cellStart - sweepStart)
+            .count();
+    std::cerr << "[" << cellIdx << "/" << matched << "] "
+              << "(+" << elapsedSweep << "s) starting: " << reg.name << "\n";
+    std::atomic<bool> cellDone{false};
+    // Heartbeat thread: every 5 s while the cell is in flight, print elapsed
+    // seconds for that cell so workloads without per-row engine reporting
+    // (fork-join, scan, reduce_pareto, ...) still surface a live signal.
+    std::thread heartbeat([&]() {
+      using namespace std::chrono_literals;
+      const auto start = std::chrono::steady_clock::now();
+      while (!cellDone.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(5s);
+        if (cellDone.load(std::memory_order_acquire)) {
+          break;
+        }
+        const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                                 std::chrono::steady_clock::now() - start)
+                                 .count();
+        std::cerr << "[" << cellIdx << "/" << matched << "] "
+                  << "still running: " << reg.name << " (" << elapsed << "s)\n";
+      }
+    });
     const std::uint64_t rssBeforeKb = readPeakRssKb();
     const RusageSample rusageBefore = readRusage();
     try {
       BenchTable table = reg.run(cal);
+      cellDone.store(true, std::memory_order_release);
+      heartbeat.join();
+      const auto cellSec = std::chrono::duration_cast<std::chrono::seconds>(
+                               std::chrono::steady_clock::now() - cellStart)
+                               .count();
+      std::cerr << "[" << cellIdx << "/" << matched << "] "
+                << "done in " << cellSec << "s: " << reg.name << "\n";
       // Drop sentinel rows that were skipped before measurement via
       // `engineEnabled` (populated from `--engine`).
       table.rows.erase(
@@ -332,6 +373,10 @@ int main(int argc, char **argv) {
         exportTables.push_back(std::move(table));
       }
     } catch (const std::exception &ex) {
+      cellDone.store(true, std::memory_order_release);
+      if (heartbeat.joinable()) {
+        heartbeat.join();
+      }
       // A workload may legitimately refuse to run (e.g. when the host's CPU
       // affinity mask collapses the pool to a single participant and the
       // workload would otherwise measure the inline-fallback path). Print a
