@@ -26,7 +26,7 @@ using citor_test_support::runInChildWithTimeout;
 // tests that this happens within a bounded time.
 TEST(RegressionCrossPoolDispatch,
      WorkerInOnePoolSubmittingSyncCallToAnotherPoolDoesNotDeadlock) {
-#if !defined(__linux__)
+#ifndef __linux__
   GTEST_SKIP();
 #else
   const ChildOutcome outcome = runInChildWithTimeout(

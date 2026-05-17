@@ -31,7 +31,7 @@ using citor_test_support::runInChildWithTimeout;
 // detached thread deadlocks inside ~ThreadPool and the flag never sets.
 TEST(RegressionDetachedLifecycle,
      DetachedTaskHoldingLastPoolRefDoesNotDeadlock) {
-#if !defined(__linux__)
+#ifndef __linux__
   GTEST_SKIP() << "subprocess timeout helper is Linux-only";
 #else
   const ChildOutcome outcome = runInChildWithTimeout(
@@ -74,7 +74,7 @@ TEST(RegressionDetachedLifecycle,
 // so the guard could hang forever.
 TEST(RegressionDetachedLifecycle,
      DetachedLowLatencyScopeDoesNotHangOnBusyWorkers) {
-#if !defined(__linux__)
+#ifndef __linux__
   GTEST_SKIP() << "subprocess timeout helper is Linux-only";
 #else
   const ChildOutcome outcome = runInChildWithTimeout(

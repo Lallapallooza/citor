@@ -21,7 +21,7 @@ constexpr std::size_t kSmokeProbeCpuCap = 4;
 std::vector<std::uint32_t> cappedPhysicalCores(const Topology &topo) noexcept {
   std::vector<std::uint32_t> cpus;
   cpus.reserve(kSmokeProbeCpuCap);
-  for (std::uint32_t cpu : topo.physicalCores) {
+  for (const std::uint32_t cpu : topo.physicalCores) {
     if (cpus.size() >= kSmokeProbeCpuCap) {
       break;
     }

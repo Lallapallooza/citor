@@ -191,14 +191,14 @@ void runOneFuzzIteration(FuzzState &state, int /*iterIdx*/) {
 // `thread_pool_tsan_stress_test`).
 TEST(ParallelPoolDeadlockFuzz,
      RandomizedPrimitiveSequencesNeverDeadlockOver10kIterations) {
-#if defined(__has_feature)
+#ifdef __has_feature
 #if __has_feature(thread_sanitizer)
   GTEST_SKIP()
       << "Pending LLVM issue 177529: TSan's reader-preferring metaslot mutex "
          "starves the producer's atomic.store on rendezvous primitives.";
 #endif
 #endif
-#if defined(__SANITIZE_THREAD__)
+#ifdef __SANITIZE_THREAD__
   GTEST_SKIP()
       << "Pending LLVM issue 177529: TSan's reader-preferring metaslot mutex "
          "starves the producer's atomic.store on rendezvous primitives.";

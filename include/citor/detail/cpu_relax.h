@@ -13,7 +13,7 @@
 #include <emmintrin.h>
 #endif
 
-#if defined(_MSC_VER)
+#ifdef _MSC_VER
 #include <intrin.h>
 #endif
 
@@ -51,7 +51,7 @@ inline unsigned ctzll(std::uint64_t x) noexcept {
 /// `slot < participants`, so `(n*slot)/participants <= n`.
 inline std::uint64_t mulDiv64(std::uint64_t a, std::uint64_t b,
                               std::uint64_t c) noexcept {
-#if defined(__SIZEOF_INT128__)
+#ifdef __SIZEOF_INT128__
   __extension__ using u128 = unsigned __int128;
   return static_cast<std::uint64_t>((static_cast<u128>(a) * b) / c);
 #elif defined(_M_X64) && defined(_MSC_VER)

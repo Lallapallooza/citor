@@ -1070,6 +1070,7 @@ public:
   /// a thread holding LL on pool A must still take pool B's gate.
   /// Same-pool nesting is preserved through `hotSpinDepth`.
   static ThreadPool *&lowLatencyOwnerPoolTls() noexcept {
+    // NOLINTNEXTLINE(misc-const-correctness)
     static thread_local ThreadPool *s_pool = nullptr;
     return s_pool;
   }
@@ -1893,21 +1894,18 @@ public:
   /// Subsequent throws drop. The cancellation flag is set as part of the
   /// first-exception capture path so the join finishes promptly.
   template <class HintsT, class... TaskFns>
-  // The `tok` parameter is moved into `runForkJoinOuter` / `runForkJoinNested`
-  // on the non-empty task path; the no-task branch returns immediately. Tidy
-  // sees only the no-task branch and suggests `const &`, but pass-by-value
-  // makes the move possible on the live path.
+  // Pass-by-value disambiguates against the no-token overload when the call
+  // site forwards a `CancellationToken` as the first argument.
   // NOLINTNEXTLINE(performance-unnecessary-value-param)
   void forkJoin(CancellationToken tok, TaskFns &&...fns) {
-    forkJoinImpl<HintsT, /*HasToken=*/true>(std::move(tok),
-                                            std::forward<TaskFns>(fns)...);
+    forkJoinImpl<HintsT, /*HasToken=*/true>(tok, std::forward<TaskFns>(fns)...);
   }
 
   /// Internal implementation shared by `forkJoin` and the no-token
   /// overload. `HasToken` is a compile-time tag that elides token reads
   /// when the caller did not pass a token.
   template <class HintsT, bool HasToken, class... TaskFns>
-  void forkJoinImpl(CancellationToken tok, TaskFns &&...fns) {
+  void forkJoinImpl(const CancellationToken &tok, TaskFns &&...fns) {
     constexpr std::size_t kNTasks = sizeof...(TaskFns);
     if constexpr (kNTasks == 0) {
       (void)tok;
@@ -2439,12 +2437,12 @@ public:
   /// Returns the inclusive total at the right edge:
   /// `prefix(prefix(... prefix(identity, in[0]) ...), in[n-1])`.
   template <class HintsT, class T, class PrefixFn>
-  [[nodiscard]] T inclusiveScan(std::span<const T> in, std::span<T> out,
-                                T identity, PrefixFn &&prefix,
-                                CancellationToken tok = CancellationToken{}) {
-    return runInclusiveScanLookback<HintsT, T>(in, out, std::move(identity),
-                                               std::forward<PrefixFn>(prefix),
-                                               std::move(tok));
+  [[nodiscard]] T
+  inclusiveScan(std::span<const T> in, std::span<T> out, T identity,
+                PrefixFn &&prefix,
+                const CancellationToken &tok = CancellationToken{}) {
+    return runInclusiveScanLookback<HintsT, T>(
+        in, out, std::move(identity), std::forward<PrefixFn>(prefix), tok);
   }
 
   // Friend overload routing the `citor::inclusiveScan` CPO to this pool.
@@ -2462,10 +2460,9 @@ public:
   friend T tag_invoke(const detail::InclusiveScanFn & /*cpo*/, ThreadPool &self,
                       std::span<const T> in, std::span<T> out, T identity,
                       PrefixFn &&prefix, HintsT /*hints*/,
-                      CancellationToken tok) {
-    return self.template inclusiveScan<HintsT>(in, out, std::move(identity),
-                                               std::forward<PrefixFn>(prefix),
-                                               std::move(tok));
+                      const CancellationToken &tok) {
+    return self.template inclusiveScan<HintsT>(
+        in, out, std::move(identity), std::forward<PrefixFn>(prefix), tok);
   }
 
   /// Submit |fn| for fire-and-forget execution; returns without joining.
@@ -4590,13 +4587,8 @@ private:
     const std::size_t nBytes = n * sizeof(T);
     const std::size_t perParticipantBytes =
         (nBytes + participants - 1U) / participants;
-    std::size_t tileBytes = perParticipantBytes;
-    if (tileBytes > l2Bytes) {
-      tileBytes = l2Bytes;
-    }
-    if (tileBytes < kMinTileBytes) {
-      tileBytes = kMinTileBytes;
-    }
+    std::size_t tileBytes = std::min(perParticipantBytes, l2Bytes);
+    tileBytes = std::max(tileBytes, kMinTileBytes);
     const std::size_t tileElems = tileBytes / sizeof(T);
     if (tileElems == 0U) {
       // T larger than the tile budget; fall through to a serial scan.
@@ -4731,6 +4723,7 @@ private:
           }
         } catch (...) {
           auto *eptr = new std::exception_ptr(std::current_exception());
+          // NOLINTNEXTLINE(misc-const-correctness)
           std::exception_ptr *expected = nullptr;
           if (!firstException.compare_exchange_strong(
                   expected, eptr, std::memory_order_release,
@@ -5396,8 +5389,9 @@ private:
   /// per-rank descriptor read.
   template <class HintsT, class Body>
   void dispatchReduceJobTyped(std::size_t first, std::size_t last, Body &body,
-                              CancellationToken tok, std::size_t participants,
-                              std::size_t chunk, std::size_t nChunks) {
+                              const CancellationToken &tok,
+                              std::size_t participants, std::size_t chunk,
+                              std::size_t nChunks) {
     constexpr bool kCancellationActive = detail::kCancellationActive<HintsT>;
 
     detail::JobDescriptor &desc = sharedReduceDesc();
@@ -5451,7 +5445,7 @@ private:
     }
     if constexpr (kCancellationActive) {
       if (desc.token != tok) {
-        desc.token = std::move(tok);
+        desc.token = tok;
         keyMatches = false;
       }
     } else {
@@ -5559,7 +5553,7 @@ private:
   /// `pthread_mutex` is already a futex pair). Windows uses a CAS fast
   /// path with a bounded `PAUSE` spin and `WaitOnAddress` park because
   /// `SRWLock` carries measurable overhead on the cold-dispatch budget.
-#if defined(_WIN32)
+#ifdef _WIN32
   /// Lock-word `held` bit. Set while a thread owns the gate.
   static constexpr std::uint32_t kHeldBit = 1U;
   /// Lock-word `has-waiter-parked` bit. Set when at least one thread is
@@ -5959,7 +5953,7 @@ private:
           std::uint64_t scan = m_coldStampedMask;
           std::uint64_t stillPending = 0U;
           while (scan != 0U) {
-            const auto bit = static_cast<unsigned>(detail::ctzll(scan));
+            const auto bit = detail::ctzll(scan);
             scan &= scan - 1U;
             auto *w = workersBaseForPublish + bit;
             if ((w->mailbox.load(std::memory_order_acquire) &
@@ -6031,7 +6025,7 @@ private:
       for (std::uint32_t r = 0; r < kPreWakeProbeRounds; ++r) {
         std::uint64_t scan = pendingProbe;
         while (scan != 0U) {
-          const auto bit = static_cast<unsigned>(detail::ctzll(scan));
+          const auto bit = detail::ctzll(scan);
           scan &= scan - 1U;
           if (((workersBase + bit)->mailbox.load(std::memory_order_acquire) &
                ~detail::PoolControl::kAckedBit) == doneSentinel) {
@@ -6164,7 +6158,7 @@ private:
         }
         std::uint64_t scan = pending;
         while (scan != 0U) {
-          const auto bit = static_cast<unsigned>(detail::ctzll(scan));
+          const auto bit = detail::ctzll(scan);
           scan &= scan - 1U;
           if ((workersBase + bit)->cpuId == producerCpuU) {
             return true;
@@ -6196,7 +6190,7 @@ private:
         // fall back to PAUSE-spin for slower arrivals.
         constexpr std::uint32_t kTightProbeIters = 8U;
         while (pending != 0U) {
-          const auto bit = static_cast<unsigned>(detail::ctzll(pending));
+          const auto bit = detail::ctzll(pending);
           auto &w = *(workersBase + bit);
           bool tightDone = false;
           for (std::uint32_t i = 0; i < kTightProbeIters; ++i) {
@@ -6699,7 +6693,7 @@ private:
   /// the same worker pool. Single-producer call sites pay one uncontended
   /// lock/unlock pair on the dispatch hot path. Linux uses `std::mutex`
   /// directly; the Windows branch substitutes a futex-backed hybrid lock.
-#if defined(_WIN32)
+#ifdef _WIN32
   /// Windows lock word (atomic). See `dispatchGateLock` for the bit
   /// layout and the post-park has-waiter-preservation invariant.
   std::atomic<std::uint32_t> m_dispatchMutex{0U};

@@ -9,7 +9,7 @@
 #include <memory>
 #include <thread>
 
-#if defined(__linux__)
+#ifdef __linux__
 #include <pthread.h>
 #include <sched.h>
 #endif
@@ -25,7 +25,7 @@ using namespace citor;
 TEST(
     RegressionAutoPin,
     AutoPinScopeRestoresOriginalAffinityEvenWhenScopeIsDestroyedOnAnotherThread) {
-#if !defined(__linux__)
+#ifndef __linux__
   GTEST_SKIP();
 #else
   // Capture initial affinity.

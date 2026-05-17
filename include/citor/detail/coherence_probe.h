@@ -643,7 +643,7 @@ cachedCoherenceProbe(const std::vector<std::uint32_t> &cpus,
   static std::map<std::vector<std::uint32_t>, CoherenceProbe> cache;
 
   {
-    const std::lock_guard<std::mutex> guard(cacheMutex);
+    const std::scoped_lock guard(cacheMutex);
     const auto hit = cache.find(key);
     if (hit != cache.end()) {
       return hit->second;
@@ -656,7 +656,7 @@ cachedCoherenceProbe(const std::vector<std::uint32_t> &cpus,
   // first inserter's copy so identical pools see identical numbers.
   CoherenceProbe fresh = runCoherenceProbe(cpus, sysfsPrior, roundTrips);
 
-  const std::lock_guard<std::mutex> guard(cacheMutex);
+  const std::scoped_lock guard(cacheMutex);
   return cache.emplace(std::move(key), std::move(fresh)).first->second;
 }
 

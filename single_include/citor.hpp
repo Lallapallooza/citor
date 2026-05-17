@@ -2,7 +2,7 @@
 //
 // citor -- header-only C++20 thread pool
 // version: 0.1.0
-// commit:  fbf02d7221c02b8689b8d9bdd63df529c7a56717
+// commit:  dcf416857ac81eb51d1b96d94e31c1daac3fa732
 // generated: 2026-05-17
 //
 // GENERATED FILE -- DO NOT EDIT.
@@ -438,17 +438,11 @@ enum class Affinity : std::uint8_t {
   /// any other CPU. Best for HPC / real-time use where determinism
   /// matters more than the kernel's ability to rebalance.
   PerCpu,
-  /// `PerCpu` with one placement amendment: at `participants == 2`
-  /// (one worker plus the producer participating as slot 0) slot 1
-  /// lands on the producer's SMT sibling so the producer-worker
-  /// mailbox handshake stays in shared L1. Latency win for tiny
-  /// dispatch bodies; for compute-bound bodies the worker and the
-  /// producer's slot-0 share contend for execution units on the same
-  /// physical core, which can cost 30-40% peak FP throughput on Zen
-  /// and Skylake-derived parts. Use only when the workload is
-  /// dispatch-latency bound at j=2 (HFT, request-response, control
-  /// loops). At `participants > 2` behaviour is identical to
-  /// `PerCpu`.
+  /// `PerCpu` with one amendment: at `participants == 2` slot 1 lands
+  /// on the producer's SMT sibling so the handshake stays L1-resident.
+  /// Latency win for dispatch-bound bodies; compute-bound bodies pay
+  /// peak-FP throughput when slot 0 and slot 1 share execution units.
+  /// Identical to `PerCpu` at `participants > 2`.
   PerCpuSmtPair,
   /// Each worker pinned to its CCD's full logical-CPU set; the kernel
   /// may migrate the worker within its CCD but not across clusters.
@@ -951,14 +945,12 @@ static_assert(sizeof(FunctionRef<void(std::size_t, std::size_t)>) == 16,
 
 namespace citor::detail {
 
-#if defined(_WIN32)
+#ifdef _WIN32
 
-/// Walk every `SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX` record returned by
-/// `GetLogicalProcessorInformationEx` for the requested relationship and call
-/// `f` with each record. Returns `true` only when the entire buffer was walked.
-/// Used to extract SMT siblings (`RelationProcessorCore`) and cache shared-
-/// CPU groups (`RelationCache`) without each call site re-implementing the
-/// "probe size, allocate, fetch, walk variable-stride records" dance.
+/// Walk every `SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX` record for
+/// `rel` and pass each to `f`. Returns `true` only when the entire
+/// buffer was walked. Centralises the probe-size / allocate / fetch /
+/// variable-stride scan that `RelationProcessorCore` and `RelationCache` share.
 template <class F>
 inline bool walkLogicalProcessorInfoEx(LOGICAL_PROCESSOR_RELATIONSHIP rel,
                                        F &&f) {
@@ -994,11 +986,9 @@ inline bool walkLogicalProcessorInfoEx(LOGICAL_PROCESSOR_RELATIONSHIP rel,
   return true;
 }
 
-/// Expand a Win32 `GROUP_AFFINITY` (group + per-group 64-bit mask) into the
-/// flat logical-CPU-id space the rest of the code uses. Only the active
-/// processor group is honoured; multi-group hosts (>64 logical CPUs) fall
-/// back to single-group enumeration. Pools that need more than 64 workers
-/// are out of scope for this port.
+/// Lift a `GROUP_AFFINITY` into the flat logical-CPU-id space. Single
+/// processor group only; multi-group hosts (>64 logical CPUs) require
+/// `SetThreadGroupAffinity`, which the pool does not yet emit.
 inline std::vector<std::uint32_t>
 expandGroupAffinity(const GROUP_AFFINITY &ga) {
   std::vector<std::uint32_t> result;
@@ -1065,15 +1055,10 @@ struct Topology {
   /// Number of distinct CCDs (or shared-L3 groups).
   std::uint32_t ccdCount = 0;
 
-  /// For each logical CPU id (size == `logicalCount`), the "other"
-  /// SMT-sibling logical CPU id on the same physical core, or
-  /// `UINT32_MAX` when the core has no sibling (single-threaded core)
-  /// or the OS did not report siblings. Only the FIRST sibling pair
-  /// is recorded (good enough for SMT2; hyperthreaded x86 is the
-  /// only widely-deployed SMT factor today). The placement rule
-  /// reads this to route slot 1 onto the producer's SMT sibling so
-  /// the producer-worker handshake stays in L1 instead of round-
-  /// tripping through the shared cache.
+  /// SMT sibling of each logical CPU id, or `UINT32_MAX` when the core
+  /// is single-threaded or the OS did not report siblings. SMT4 silicon
+  /// records the first non-self entry deterministically. The placement
+  /// rule reads this to route slot 1 onto the producer's SMT sibling.
   std::vector<std::uint32_t> smtSiblingOfCpu;
 };
 
@@ -1165,7 +1150,7 @@ inline std::vector<std::uint32_t> readCpuList(const std::string &path) {
   return result;
 }
 
-#if defined(_WIN32)
+#ifdef _WIN32
 /// Windows-side topology probe. Uses `GetLogicalProcessorInformationEx` for
 /// SMT-sibling discovery (`RelationProcessorCore`), shared-L3 groups
 /// (`RelationCache` filtered to `Level == 3`), and cache sizes; uses
@@ -1228,11 +1213,8 @@ inline Topology detectTopologyWindows() {
           }
         }
       });
-  // Materialise the "other" SMT sibling per CPU: when the physical core
-  // reports two logical ids, record the OTHER id for each. Hyperthreaded
-  // x86 has SMT factor 2 today; if a core reports three or more
-  // siblings (theoretical SMT4 silicon), we pick the first non-self
-  // entry deterministically.
+  // Record the "other" sibling per CPU. On SMT4 silicon (>2 reported
+  // siblings) we pick the first non-self entry deterministically.
   for (std::uint32_t cpu = 0; cpu < topo.logicalCount; ++cpu) {
     const auto &sibs = smtSiblings[cpu];
     for (const std::uint32_t s : sibs) {
@@ -1265,8 +1247,8 @@ inline Topology detectTopologyWindows() {
 
   // Per-CPU L3 shared-CPU list + L3 size from `RelationCache` filtered to
   // `Level == 3`. Per-core L2 sampled the same way at `Level == 2`. Caches
-  // whose `GroupCount > 1` (split across processor groups) are skipped --
-  // pools with that many CPUs are out of scope.
+  // whose `GroupCount > 1` (split across processor groups) are skipped;
+  // pools spanning multiple groups would need `SetThreadGroupAffinity`.
   std::vector<std::vector<std::uint32_t>> l3SharedByCpu(topo.logicalCount);
   std::vector<std::uint64_t> l3SizeKibByCpu(topo.logicalCount, 0U);
   std::vector<std::uint64_t> l2SizeKibByCpu(topo.logicalCount, 0U);
@@ -1359,17 +1341,12 @@ inline Topology detectTopologyWindows() {
       topo.l2KibPerCore = l2SizeKibByCpu[first];
     }
   }
-  // Pick `preferredCcd` via a two-step heuristic:
-  //   1. If the largest-L3 CCD is more than 1.5x the next-largest, pick
-  //      it unconditionally. The big-cache CCD wins even with BSP-noise
-  //      tax. The 1.5x threshold catches 96/32 MiB Zen V-Cache parts
-  //      (3x) without triggering on uniform-L3 machines (1.0x).
-  //   2. Otherwise (uniform-L3 part) pick the largest L3 CCD that does
-  //      NOT contain CPU 0 (the BSP). Both kernels bias DPC / IRQ /
-  //      kthread placement onto the BSP CCD, so a producer pinned
-  //      there shares cache and pipeline resources with kernel work.
-  //   3. If only one CCD exists (or BSP-avoidance leaves us with
-  //      nothing), fall back to the absolute largest L3 CCD.
+  // Two-step `preferredCcd` pick: a largest-L3 CCD wider than 1.5x
+  // the next-largest wins outright (catches V-Cache at 3x without
+  // firing on uniform L3); otherwise pick the largest L3 CCD that
+  // does not contain the BSP, since both kernels bias DPC / IRQ /
+  // kthread placement onto the BSP's CCD. Fall back to the absolute
+  // largest L3 when only one CCD exists.
   std::uint64_t largestKib = 0U;
   std::uint64_t secondKib = 0U;
   std::uint32_t largestIdx = 0;
@@ -1405,13 +1382,11 @@ inline Topology detectTopologyWindows() {
     topo.preferredCcd = bestIdx == UINT32_MAX ? largestIdx : bestIdx;
   }
 
-  // Mirror the Linux reorder: each CCD's members appear with SMT-capable
-  // first, then descending CPU id within. Hybrid hosts (Alder Lake, Lunar
-  // Lake) put E-cores at higher CPU ids; pure descending order placed the
-  // producer on an E-core (no SMT sibling), defeating the SMT-routing
-  // win on the producer-worker handshake. AMD parts have SMT on every
-  // core so the SMT-capable bias is a no-op and the descending tail
-  // preserves the original placement intent.
+  // Reorder each CCD so SMT-capable cores appear first, descending CPU
+  // id otherwise. Hybrid Intel parts expose E-cores at higher CPU ids;
+  // pure-descending order would place the producer on an E-core, where
+  // the slot-1 SMT-sibling routing rule has nothing to attach to. AMD
+  // parts have SMT on every core, so the bias is a no-op.
   std::vector<std::uint32_t> reordered;
   reordered.reserve(topo.physicalCores.size());
   for (const auto &group : topo.ccdGroups) {
@@ -1457,7 +1432,7 @@ inline Topology detectTopologyWindows() {
 ///
 /// Populated `Topology`; never throws even if sysfs is unavailable.
 inline Topology detectTopology() {
-#if defined(_WIN32)
+#ifdef _WIN32
   return detectTopologyWindows();
 #else
   Topology topo;
@@ -1517,9 +1492,9 @@ inline Topology detectTopology() {
         consumed[sib] = true;
       }
     }
-    // Each CPU in the sibling list points at the "other" sibling for
-    // the SMT2 case; for SMT factors greater than 2 we pick the first
-    // non-self entry deterministically.
+    // Stamp both directions of each sibling pair on first sighting; the
+    // SMT4 fallback in `smtSiblingOfCpu`'s doc applies if a core reports
+    // more than two siblings.
     for (const std::uint32_t sib : siblings) {
       if (sib >= topo.smtSiblingOfCpu.size() || sib == cpu) {
         continue;
@@ -1611,10 +1586,10 @@ inline Topology detectTopology() {
         "/sys/devices/system/cpu/cpu" +
         std::to_string(topo.physicalCores.front()) + "/cache/index2/size");
   }
-  // Two-step CCD pick (see Windows-side comment for the rationale):
-  // largest L3 wins unconditionally when more than 1.5x next-largest
-  // (V-Cache); otherwise pick the largest non-BSP CCD; fall back to
-  // absolute largest if nothing else fits.
+  // Two-step CCD pick: a largest-L3 CCD wider than 1.5x the next wins
+  // outright (V-Cache); otherwise pick the largest non-BSP CCD, since
+  // IRQ / kthread placement biases toward CPU 0's CCD. Fall back to
+  // absolute largest when only one CCD exists.
   std::uint64_t largestKib = 0U;
   std::uint64_t secondKib = 0U;
   std::uint32_t largestIdx = 0;
@@ -1650,16 +1625,12 @@ inline Topology detectTopology() {
     topo.preferredCcd = bestIdx == UINT32_MAX ? largestIdx : bestIdx;
   }
 
-  // Reorder `physicalCores` so each CCD's members appear with SMT-capable
-  // members first and then in descending CPU id order. Hybrid Intel parts
-  // (Alder Lake, Raptor Lake) expose P-cores at lower CPU ids and E-cores
-  // at higher CPU ids; a pure-descending order placed the producer on an
-  // E-core (no SMT sibling), defeating the slot-1 routing rule that
-  // wants the producer's SMT sibling. Pure AMD parts have SMT on every
-  // core, so the SMT-capable bias is a no-op and the descending tail
-  // preserves the irqbalance hint (CPU 0+16 / 1+17 are the conventional
-  // defaults, so a hot-spinning worker on the high-CPU end of the CCD
-  // sees fewer SMT-cross-issue collisions from kthreads on its sibling).
+  // Reorder each CCD so SMT-capable cores appear first, descending CPU
+  // id otherwise. Hybrid Intel parts expose E-cores at higher CPU ids;
+  // pure-descending order would place the producer on an E-core, where
+  // the slot-1 SMT-sibling routing rule has nothing to attach to. The
+  // descending tail within each bucket preserves the irqbalance bias
+  // that puts kthreads on the low-numbered siblings.
   std::vector<std::uint32_t> reordered;
   reordered.reserve(topo.physicalCores.size());
   for (const auto &group : topo.ccdGroups) {
@@ -1732,29 +1703,14 @@ inline std::vector<std::vector<unsigned>> enumerateCcds() {
   return result;
 }
 
-/// Reorders `|cpuPins|` so the producer's reserved CPU sits at index 0
-/// and downstream slots follow a workload-neutral physical-cores-first
-/// rule with two principled exceptions:
-///   * `participants == 2` (one worker): slot 1 lands on the producer's
-///     SMT sibling so the producer-worker ack stays L1-resident. Only
-///     one worker either way, so no compute throughput is sacrificed.
-///   * `participants > pins.size()` (oversubscribed): SMT siblings of
-///     pins are appended as overflow so the pool can serve `j >
-///     physicalCount` requests without silent truncation. Producer-CCD
-///     siblings come first so the early overflow slots stay on the
-///     same NUMA node.
-/// For every other case (`2 < j <= physicalCount`) the function
-/// preserves the caller-supplied distinct-physical-core layout, which
-/// is the compute-throughput-optimal pin set on every supported
-/// microarchitecture. Standalone pools also get a producer-CCD-first
-/// reorder so workers and the producer first-touch on the same NUMA
-/// node.
-///
-/// `|standalone|` is `true` for `PoolKind::Standalone` pools (apply
-/// producer-CCD reorder) and `false` for `PoolKind::Arena` pools (the
-/// `PoolGroup` already filtered `cpuPins` to the arena's CCD; skip the
-/// global-topology reorder so we don't shuffle CPUs out of the arena's
-/// scope).
+/// Reorder `|cpuPins|` so the producer's reserved CPU sits at index 0.
+/// Two exceptions to the default physical-cores-first layout:
+///   * `participants == 2`: slot 1 lands on the producer's SMT sibling
+///     so the handshake stays L1-resident.
+///   * `participants > pins.size()`: SMT siblings of existing pins are
+///     appended as overflow, producer-CCD first.
+/// Standalone pools also get a producer-CCD-first reorder. Arena pools
+/// skip it because `PoolGroup` already filtered `cpuPins` to one CCD.
 inline std::vector<std::uint32_t>
 reserveProducerCpuFirst(const std::vector<std::uint32_t> &cpuPins,
                         std::size_t participants, bool standalone,
@@ -1862,12 +1818,11 @@ inline void bindAffinityOnce(std::uint32_t cpuId) noexcept {
 #endif
 }
 
-#if defined(_WIN32)
+#ifdef _WIN32
 /// Pin the calling thread to a single CPU and return the previous
 /// affinity mask. `SetThreadAffinityMask` returns the previous mask
-/// atomically with the new application, so one call covers the
-/// save+apply pair that on Linux costs `getaffinity + setaffinity`.
-/// Returns 0 on failure (caller treats as "no save, do not restore").
+/// atomically with the new application, so one call covers save +
+/// apply. Returns 0 on failure (caller does not restore).
 inline DWORD_PTR pinCurrentThreadAndSave(std::uint32_t cpuId) noexcept {
   const DWORD_PTR mask = static_cast<DWORD_PTR>(1) << (cpuId & 63U);
   return ::SetThreadAffinityMask(::GetCurrentThread(), mask);
@@ -2085,9 +2040,9 @@ struct InclusiveScanFn {
   [[nodiscard]] T
   operator()(Pool &pool, std::span<const T> in, std::span<T> out, T identity,
              PrefixFn &&prefix,
-             CancellationToken tok = CancellationToken{}) const {
+             const CancellationToken &tok = CancellationToken{}) const {
     return tag_invoke(*this, pool, in, out, std::move(identity),
-                      std::forward<PrefixFn>(prefix), HintsT{}, std::move(tok));
+                      std::forward<PrefixFn>(prefix), HintsT{}, tok);
   }
 };
 
@@ -2557,7 +2512,7 @@ inline constexpr detail::SubmitDetachedFn submitDetached{};
 #if defined(__x86_64__) || defined(_M_X64)
 #endif
 
-#if defined(_MSC_VER)
+#ifdef _MSC_VER
 #endif
 
 namespace citor::detail {
@@ -2588,14 +2543,13 @@ inline unsigned ctzll(std::uint64_t x) noexcept {
 #endif
 }
 
-/// Compute `a * b / c` with a 128-bit intermediate so the multiplication
-/// cannot overflow when both operands fill 64 bits. Used by the per-slot
-/// range partition where `n * slot` overflows for very large ranges.
-/// The caller guarantees the quotient fits in 64 bits (every call site has
-/// `slot < participants`, so `(n*slot)/participants <= n`).
+/// Compute `a * b / c` through a 128-bit intermediate so the
+/// multiplication cannot overflow when both operands fill 64 bits.
+/// Caller guarantees the quotient fits in 64 bits; every site has
+/// `slot < participants`, so `(n*slot)/participants <= n`.
 inline std::uint64_t mulDiv64(std::uint64_t a, std::uint64_t b,
                               std::uint64_t c) noexcept {
-#if defined(__SIZEOF_INT128__)
+#ifdef __SIZEOF_INT128__
   __extension__ using u128 = unsigned __int128;
   return static_cast<std::uint64_t>((static_cast<u128>(a) * b) / c);
 #elif defined(_M_X64) && defined(_MSC_VER)
@@ -3245,11 +3199,9 @@ inline void coherenceProbePin(int cpu) noexcept {
   (void)pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
 }
 #elif defined(_WIN32)
-/// Pins the calling thread to `|cpu|` via `SetThreadAffinityMask`. Failures
-/// are silently ignored: the probe degrades to whatever scheduling Windows
-/// chooses, and the measured pair latency will be inflated rather than
-/// wrong. Mask covers a single processor group (64 logical CPUs);
-/// multi-group hosts are not supported here.
+/// Windows peer: pin `|cpu|` via `SetThreadAffinityMask`. Failures
+/// degrade the probe to whatever scheduling Windows chooses. Single
+/// processor group only (64 logical CPUs).
 inline void coherenceProbePin(int cpu) noexcept {
   const DWORD_PTR mask = static_cast<DWORD_PTR>(1)
                          << (static_cast<std::uint32_t>(cpu) & 63U);
@@ -3281,11 +3233,9 @@ inline double pingPongLatencyNs(int cpuA, int cpuB,
   const bool savedOk =
       pthread_getaffinity_np(pthread_self(), sizeof(savedSet), &savedSet) == 0;
 #elif defined(_WIN32)
-  // Windows has no `pthread_getaffinity_np` equivalent that reads without
-  // setting. `SetThreadAffinityMask` returns the previous mask, so call it
-  // with the all-CPUs mask (which the kernel intersects against the process
-  // mask before applying) to capture the caller's affinity. The brief
-  // all-CPUs window before `coherenceProbePin` re-pins is harmless.
+  // Windows has no read-only affinity accessor; round-trip
+  // `SetThreadAffinityMask(thread, ~0)` to capture the caller's mask.
+  // The brief all-CPUs window is closed by the next pin call.
   const DWORD_PTR savedSet = ::SetThreadAffinityMask(
       ::GetCurrentThread(), static_cast<DWORD_PTR>(~DWORD_PTR{0}));
   const bool savedOk = (savedSet != 0U);
@@ -3763,16 +3713,11 @@ runCoherenceProbe(const std::vector<std::uint32_t> &cpus,
   return out;
 }
 
-/// Process-wide singleton cache for `runCoherenceProbe`.
-///
-/// The latency matrix depends only on the host hardware: a given `cpus`
-/// set translates to one specific subset of physical cores and one
-/// cache hierarchy. Repeated calls for the same `cpus` are pure
-/// duplicate work. Cost matters whenever a process constructs many
-/// pools (test suites, benchmark harnesses, PoolGroup arenas).
-///
-/// Key is the sorted-unique `cpus` vector so the cache hits regardless
-/// of caller input order.
+/// Process-wide cache for `runCoherenceProbe`, keyed on the
+/// sorted-unique `cpus` vector. The latency matrix depends only on the
+/// host hardware, so repeated probes for the same set are duplicate
+/// work; test suites, bench harnesses, and `PoolGroup` arenas reuse a
+/// single matrix per process.
 inline CoherenceProbe
 cachedCoherenceProbe(const std::vector<std::uint32_t> &cpus,
                      const std::vector<std::vector<std::uint32_t>> &sysfsPrior,
@@ -3785,7 +3730,7 @@ cachedCoherenceProbe(const std::vector<std::uint32_t> &cpus,
   static std::map<std::vector<std::uint32_t>, CoherenceProbe> cache;
 
   {
-    const std::lock_guard<std::mutex> guard(cacheMutex);
+    const std::scoped_lock guard(cacheMutex);
     const auto hit = cache.find(key);
     if (hit != cache.end()) {
       return hit->second;
@@ -3798,7 +3743,7 @@ cachedCoherenceProbe(const std::vector<std::uint32_t> &cpus,
   // first inserter's copy so identical pools see identical numbers.
   CoherenceProbe fresh = runCoherenceProbe(cpus, sysfsPrior, roundTrips);
 
-  const std::lock_guard<std::mutex> guard(cacheMutex);
+  const std::scoped_lock guard(cacheMutex);
   return cache.emplace(std::move(key), std::move(fresh)).first->second;
 }
 
@@ -3988,55 +3933,38 @@ inline long futexWakePrivate(std::atomic<std::uint32_t> *addr, int n) noexcept {
 
 #elif defined(_WIN32)
 
-/// Windows parking primitive that mirrors `FUTEX_WAIT_PRIVATE`.
-///
-/// `WaitOnAddress` is the Win32 analogue of Linux's futex: the kernel reads
-/// `*addr`, atomically compares it against `*expected`, and only suspends the
-/// caller when they match. It uses a per-address wait queue keyed on the
-/// pointer, so each pool's `futexWord` has its own queue without any process-
-/// global mutex contention. Returns 0 on success (wake or compare mismatch),
-/// `-1` on failure (sets `GetLastError`). The caller re-checks the source-of-
-/// truth atomic after wake, matching the Linux call-site contract.
+/// Windows peer of `FUTEX_WAIT_PRIVATE`. `WaitOnAddress` reads `*addr`,
+/// compares against `*expected`, and suspends only when they match;
+/// per-address wait queue, no process-global contention. Returns 0 on
+/// success (wake or mismatch), `-1` on failure. Caller re-checks the
+/// source-of-truth atomic after wake.
 inline long futexWaitPrivate(std::atomic<std::uint32_t> *addr,
                              std::uint32_t expected,
                              const void *timeout) noexcept {
   (void)timeout;
   std::uint32_t compare = expected;
-  // Bounded wait instead of INFINITE: Windows' scheduler demotes deeply
-  // parked threads (parked past a few ms) onto a slow-wake path that
-  // costs ~2-3 us to resume vs ~200 ns for a recently-parked thread. The
-  // 1 ms tick keeps the worker in the scheduler's fast-wake working set;
-  // the caller re-checks its source-of-truth atomic on every wake and
-  // re-parks immediately when no work is pending, so the periodic wake
-  // is bounded extra CPU, not a dispatch. Dispenso uses the same value
-  // on Windows (`DISPENSO_POLL_PERIOD_US = 1000`). Linux's
-  // `FUTEX_WAIT` does not exhibit the demotion behaviour; that branch
-  // stays on INFINITE.
+  // Bounded 1 ms re-park instead of `INFINITE`: gives the worker a
+  // periodic chance to observe shutdown or a mailbox update that
+  // raced the wake. Caller re-parks when nothing is pending. Linux's
+  // `FUTEX_WAIT` is driven by the explicit wake and stays on
+  // `INFINITE`.
   constexpr DWORD kWindowsParkTimeoutMs = 1U;
   const BOOL ok = ::WaitOnAddress(static_cast<volatile VOID *>(addr), &compare,
                                   sizeof(std::uint32_t), kWindowsParkTimeoutMs);
   return ok ? 0 : -1;
 }
 
-/// Windows wake primitive that mirrors `FUTEX_WAKE_PRIVATE`.
-///
-/// `WakeByAddressAll` wakes every waiter parked on `addr` (matches the
-/// `n = INT_MAX` shutdown-broadcast shape). The waker side must publish
-/// the new state on `addr` (or whatever source-of-truth the waiter
-/// re-checks) before invoking this call, so a freshly-parked waiter is
-/// guaranteed to observe the update or be woken from the address.
+/// Windows peer of `FUTEX_WAKE_PRIVATE`. `WakeByAddressAll` wakes every
+/// waiter parked on `addr`. Caller must publish the source-of-truth
+/// state before invoking, so a freshly-parked waiter either observes
+/// the update or is woken.
 inline long futexWakePrivate(std::atomic<std::uint32_t> *addr, int n) noexcept {
-  // Collapse any `n >= 2` request to a single `WakeByAddressAll`.
-  // `WakeByAddressSingle` has no batched variant; looping it N times is
-  // N kernel transitions (~150-200 ns each on Win11), which at j=16
-  // dominates the dispatch budget. A single broadcast is one kernel
-  // transition regardless of waiter count; spurious wakees re-park
-  // immediately on their next mailbox check. Dispenso reaches the same
-  // conclusion (`thread_pool.cpp:wakeN`).
-  //
-  // `n == 1` still routes to `WakeByAddressSingle` because singular
-  // wake is identical cost when one is waiting and avoids disturbing
-  // a second parked worker.
+  // Collapse any `n >= 2` request to a single `WakeByAddressAll`:
+  // `WakeByAddressSingle` has no batched variant, so an N-fold loop
+  // would issue N separate wakes. Broadcast wakes the queue in one
+  // call; spurious wakees re-park on their next mailbox check.
+  // `n == 1` still uses `WakeByAddressSingle` to avoid disturbing a
+  // second parked waiter.
   if (n <= 0) {
     return 0;
   }
@@ -5664,8 +5592,8 @@ template <Balance B, class HintsT, class FOp>
         if (eptr == nullptr) {
           std::terminate();
         }
-        std::exception_ptr *expected =
-            nullptr; // NOLINT(misc-const-correctness)
+        // NOLINTNEXTLINE(misc-const-correctness)
+        std::exception_ptr *expected = nullptr;
         if (!desc.firstException.compare_exchange_strong(
                 expected, eptr, std::memory_order_release,
                 std::memory_order_acquire)) {
@@ -5918,8 +5846,8 @@ inline void typedWorkerEntry(JobDescriptor *desc, std::uint32_t rankPacked,
         if (eptr == nullptr) {
           std::terminate();
         }
-        std::exception_ptr *expected =
-            nullptr; // NOLINT(misc-const-correctness)
+        // NOLINTNEXTLINE(misc-const-correctness)
+        std::exception_ptr *expected = nullptr;
         if (!desc->firstException.compare_exchange_strong(
                 expected, eptr, std::memory_order_release,
                 std::memory_order_acquire)) {
@@ -6157,10 +6085,9 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
     // CLEAR. The reuse bit (kReuseBit) is set by the producer when this
     // dispatch reuses cached params; the worker observes it and skips
     // reading desc fields, calling the typed runner's cached fn directly.
-    // We compare phase ignoring both DONE and ACKED. Neither bit is part
-    // of the dispatch identity: the producer never sets them on a new
-    // publish, and a stale kAckedBit carried over from a prior cold-
-    // collapse race must not mask a real phase change.
+    // Mask DONE and ACKED out of the phase compare: neither bit is part
+    // of dispatch identity, and a stale ACKED carried from a prior
+    // cold-collapse race must not hide a real phase change.
     constexpr std::uint64_t kSeenPhaseMask =
         ~(PoolControl::kDoneBit | PoolControl::kAckedBit);
     const std::uint64_t mailboxPhase = mailbox & kSeenPhaseMask;
@@ -6233,27 +6160,16 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
           lastSeenMailbox = doneAcked;
           mailbox = doneAcked;
         } else {
-          // CAS lost the race against another writer (producer's
-          // cold-collapse self-stamp, a later dispatch's publish, or
-          // shutdown's `kShutdownBit` stamp). Use `fetch_or` so we set
-          // `kAckedBit` without clobbering any other bits the racing
-          // writer published. An unconditional store of `expected |
-          // kAckedBit` would re-write `expected` (the mailbox value AS
-          // OF the failed CAS) and clear any further bits a later
-          // writer added between the CAS and this store. The post-
-          // state we want is "whatever the writer published, plus our
-          // ack", which is what `fetch_or(kAckedBit)` produces.
+          // CAS lost to another writer (cold-collapse self-stamp, a
+          // later publish, or shutdown). `fetch_or(kAckedBit)` sets the
+          // ack without clobbering whatever the writer left; an
+          // unconditional store would re-overwrite their bits.
           (void)self.mailbox.fetch_or(PoolControl::kAckedBit,
                                       std::memory_order_acq_rel);
-          // `lastSeenMailbox` must stay at the OLD dispatch's
-          // `doneAcked`, not advance to whatever the racing writer
-          // left in the slot. If a later dispatch overtook us, the
-          // next loop iteration loads `mailbox` and compares its phase
-          // (masking out done/acked bits) against `lastSeenMailbox`'s
-          // phase; an overtaking phase change fires the work path so
-          // the new dispatch is processed. Setting `lastSeenMailbox`
-          // to the overtaking value would mark the new phase as
-          // already seen and drop the next dispatch.
+          // Keep `lastSeenMailbox` at the OLD `doneAcked` so the next
+          // iteration's phase compare fires on the overtaking
+          // generation; advancing to the racing value would mark it
+          // already seen and the new dispatch would be dropped.
           lastSeenMailbox = doneAcked;
           mailbox = self.mailbox.load(std::memory_order_acquire);
         }
@@ -6384,13 +6300,9 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
     // descriptor cleanup, and we don't want a parked worker waking on
     // shutdown to spawn an INT_MAX-equivalent chain.
     //
-    // Skip when participants <= 2: at j=2 the only background worker is
-    // this one (slot 0 is the producer), so there is no other parked
-    // peer to propagate to. The `WakeByAddress*` / `FUTEX_WAKE` syscall
-    // would still fire and extend cold-dispatch latency observed by
-    // the producer's join wait. Cross-platform; the cost is most
-    // visible on Windows where the kernel transition is ~150-200 ns,
-    // but the wake is also pointless on Linux at j=2.
+    // Skip when `participants <= 2`: slot 0 is the producer, so no
+    // other peer is parked to propagate to, and the syscall is dead
+    // weight on the cold-dispatch budget the producer's join observes.
     const std::uint64_t newPhase = mailbox & ~PoolControl::kDoneBit;
     const std::uint64_t oldPhase = lastSeenMailbox & ~PoolControl::kDoneBit;
     if (newPhase != oldPhase && (mailbox & PoolControl::kShutdownBit) == 0 &&
@@ -6614,24 +6526,15 @@ private:
       self->m_autoPinActive.store(true, std::memory_order_release);
     }
 #elif defined(_WIN32)
-    // Windows peer of the Linux auto-pin path. Same intent: on the first
-    // chunk-0 dispatch from this thread for this pool, pin the producer
-    // to slot 0's reserved CPU so the producer's slot-0 share runs
-    // L3-warm relative to background workers and back-to-back dispatches
-    // do not pay cross-CCD wake latency. Without this on Windows the
-    // matmul / reduce / pareto cells exhibit bimodal run-to-run variance:
-    // half the process invocations land the producer on a same-L3 CPU
-    // (fast mode), the other half on a different-L3 CPU (slow mode).
+    // Windows peer of the Linux path above; same contract, different syscalls.
     const std::uint32_t cpuId = producerCpu();
     if (cpuId == UINT32_MAX) {
       return;
     }
     auto &state = autoPinTls();
-    // `SetThreadAffinityMask(thread, ~0)` returns the previous mask and
-    // sets the mask to all-1s. We use the round-trip to capture the
-    // caller's affinity since Windows has no read-only accessor; if the
-    // thread was already pinned to a single CPU we restore the prior
-    // mask and let the existing pin stand, otherwise we apply our own.
+    // Round-trip `SetThreadAffinityMask(thread, ~0)` to capture the
+    // caller's affinity; Windows has no read-only accessor. A
+    // single-CPU pre-existing pin is restored and left alone.
     HANDLE thisThread = ::GetCurrentThread();
     const DWORD_PTR prevMask = ::SetThreadAffinityMask(
         thisThread, static_cast<DWORD_PTR>(~DWORD_PTR{0}));
@@ -6711,16 +6614,11 @@ private:
   /// well when the destroyer happens to be the producer, so a subsequent
   /// pool ctor on the same thread sees a clean state.
   [[gnu::cold, gnu::noinline]] void autoPinRestoreIfOurs() const noexcept {
-    // Restoration uses the pool-side `m_autoPinProducer` /
-    // `m_autoPinSaved` mirror so it lands on the producer thread
-    // regardless of which thread runs the destructor; that is the
-    // whole point of mirroring those fields out of TLS. The TLS
-    // cleanup below is the only piece that must consult the calling
-    // thread's `AutoPinState`: under multi-pool LIFO on the same
-    // producer thread a later-constructed pool may have stolen the
-    // TLS pool tag (its ctor saw `state.pool != this` and re-pinned
-    // to its own slot 0), and only the pool currently named owner
-    // should clear the TLS slot.
+    // Restoration goes through the pool-side `m_autoPinProducer` /
+    // `m_autoPinSaved` mirror so it lands on the producer regardless
+    // of which thread runs the destructor. The TLS cleanup below is
+    // the only step that must check ownership: under multi-pool LIFO
+    // a later pool may have stolen the TLS tag and owns it now.
     auto &state = autoPinTls();
     const bool weOwnTlsTag = state.pool == static_cast<const void *>(this);
 #ifdef __linux__
@@ -6735,11 +6633,9 @@ private:
 #elif defined(_WIN32)
     if (m_autoPinActive.load(std::memory_order_acquire) &&
         m_autoPinProducerTid != 0U && m_autoPinSaved != 0U) {
-      // Open the producer thread with `THREAD_SET_LIMITED_INFORMATION`,
-      // the documented minimum for `SetThreadAffinityMask`. If the
-      // thread is gone the restore is moot; Windows recycles TIDs after
-      // termination, so the OpenThread path is best-effort by
-      // construction.
+      // Best-effort restore via `OpenThread(THREAD_SET_LIMITED_INFORMATION)`.
+      // Windows recycles TIDs, so a missing producer skips restore
+      // rather than risk clobbering an unrelated thread.
       HANDLE handle = ::OpenThread(THREAD_SET_LIMITED_INFORMATION, FALSE,
                                    m_autoPinProducerTid);
       if (handle != nullptr) {
@@ -6748,22 +6644,18 @@ private:
         ::CloseHandle(handle);
       }
     }
-    if (weOwnPin) {
+    if (weOwnTlsTag) {
       state.restorePending = false;
       state.pool = nullptr;
     }
 #endif
   }
 
-  /// Producer-CCD-first reorder without the SMT-aware exceptions. Standalone
-  /// pools default to CCD-local placement (workers spawn on the same CCD as
-  /// slot 0, producer auto-pinned to slot 0 so user buffers first-touch on
-  /// that CCD's NUMA node). `topo.preferredCcd` picks the CCD deterministically
-  /// across runs; on V-Cache parts that bias matters because the kernel
-  /// otherwise could pick the smaller-L3 CCD for the constructor and spill
-  /// hot working sets to DRAM. Arena pools (`standalone == false`) skip the
-  /// reorder because `PoolGroup` already filtered the pin list to one arena's
-  /// CCD.
+  /// Producer-CCD-first reorder without SMT exceptions. Standalone
+  /// pools spawn workers on slot 0's CCD so the producer auto-pin
+  /// makes user buffers first-touch there; `preferredCcd` keeps the
+  /// choice deterministic on V-Cache parts. Arena pools skip the
+  /// reorder because `PoolGroup` already filtered the pin list.
   std::vector<std::uint32_t>
   reserveProducerCpuFirstCcdOnly(const std::vector<std::uint32_t> &cpuPins,
                                  bool standalone) const {
@@ -7095,13 +6987,11 @@ private:
     // tile-decoupled scans, ...) read this ratio to size their cross-CCD
     // share without any hardware-specific constants in the engine.
     //
-    // Activation gate: `effective > 2U`. The previous `ccdCount > 1`
-    // gate excluded hybrid Intel parts with a single L3 (Alder Lake-P,
-    // Lunar Lake) where the P/E cluster split is visible only through
-    // the probe's latency matrix. `effective > 2` keeps the probe off
-    // single-worker pools (where there are no pairs to measure) and
-    // off arenas (PoolGroup owns the cross-arena cost model and per-
-    // arena probes would be biased by the arena's narrower CPU set).
+    // Gate the probe on `effective > 2`. The earlier `ccdCount > 1`
+    // gate hid hybrid single-L3 Intel parts whose P/E split is visible
+    // only through the latency matrix; the new gate still excludes
+    // single-worker pools (no pairs) and arenas (PoolGroup owns the
+    // cross-arena cost model).
     if (m_kind == PoolKind::Standalone && effective > 2U) {
       // Build the flat CPU list the probe should walk: producer CPU plus
       // every worker's pinned CPU. Skip CPUs we could not pin (UINT32_MAX
@@ -7375,12 +7265,11 @@ public:
         m_restore = true;
       }
 #elif defined(_WIN32)
-      // Windows pin: single-CPU pin on slot 0's reserved CPU. Worker-CPU
-      // exclusion is irrelevant here because we pin to the producer's
-      // own reserved CPU; no worker is pinned there. The Linux logic's
-      // SMT-sibling exclusion is omitted because `Topology` does not
-      // retain the sibling table on Windows yet, and IRQ steering on
-      // Win11 rarely lands on a user thread's SMT sibling.
+      // Windows pin: single-CPU pin on slot 0's reserved CPU. The Linux
+      // branch's SMT-sibling exclusion is skipped because the Windows
+      // topology probe does not populate per-CPU sibling tables; slot 0's
+      // CPU is producer-reserved, so the worker-pin and CCD-subset paths
+      // above do not apply here.
       (void)topo;
       (void)workerCpus;
       (void)workerCpuCount;
@@ -7437,20 +7326,14 @@ public:
 #endif
   };
 
-  /// Per-thread owner pointer for `LowLatencyGuard`. Names the pool whose
-  /// guard the current thread holds, or `nullptr` when no LL is active on
-  /// this thread. `DispatchLease` consults it to decide whether the LL
-  /// fast path applies on a given dispatch: only when the calling thread
-  /// is the LL owner of the SAME pool the dispatch targets, since the LL
-  /// contract is single-producer per pool. A thread holding LL on pool A
-  /// must still take pool B's dispatch mutex when dispatching on B; the
-  /// previous depth-only counter let A's holder skip B's mutex and race
-  /// on B's mailbox publish.
-  ///
-  /// Same-pool nesting is preserved through `m_control.hotSpinDepth`; this
-  /// pointer is overwritten by inner guards and restored to the outer
-  /// guard's value on inner dtor.
+  /// Per-thread owner pointer for `LowLatencyGuard`, naming the pool
+  /// whose guard this thread holds. `DispatchLease`'s skip-gate fires
+  /// only when the calling thread owns LL on the SAME pool the
+  /// dispatch targets; the LL contract is single-producer per pool, so
+  /// a thread holding LL on pool A must still take pool B's gate.
+  /// Same-pool nesting is preserved through `hotSpinDepth`.
   static ThreadPool *&lowLatencyOwnerPoolTls() noexcept {
+    // NOLINTNEXTLINE(misc-const-correctness)
     static thread_local ThreadPool *s_pool = nullptr;
     return s_pool;
   }
@@ -8274,21 +8157,18 @@ public:
   /// Subsequent throws drop. The cancellation flag is set as part of the
   /// first-exception capture path so the join finishes promptly.
   template <class HintsT, class... TaskFns>
-  // The `tok` parameter is moved into `runForkJoinOuter` / `runForkJoinNested`
-  // on the non-empty task path; the no-task branch returns immediately. Tidy
-  // sees only the no-task branch and suggests `const &`, but pass-by-value
-  // makes the move possible on the live path.
+  // Pass-by-value disambiguates against the no-token overload when the call
+  // site forwards a `CancellationToken` as the first argument.
   // NOLINTNEXTLINE(performance-unnecessary-value-param)
   void forkJoin(CancellationToken tok, TaskFns &&...fns) {
-    forkJoinImpl<HintsT, /*HasToken=*/true>(std::move(tok),
-                                            std::forward<TaskFns>(fns)...);
+    forkJoinImpl<HintsT, /*HasToken=*/true>(tok, std::forward<TaskFns>(fns)...);
   }
 
   /// Internal implementation shared by `forkJoin` and the no-token
   /// overload. `HasToken` is a compile-time tag that elides token reads
   /// when the caller did not pass a token.
   template <class HintsT, bool HasToken, class... TaskFns>
-  void forkJoinImpl(CancellationToken tok, TaskFns &&...fns) {
+  void forkJoinImpl(const CancellationToken &tok, TaskFns &&...fns) {
     constexpr std::size_t kNTasks = sizeof...(TaskFns);
     if constexpr (kNTasks == 0) {
       (void)tok;
@@ -8820,12 +8700,12 @@ public:
   /// Returns the inclusive total at the right edge:
   /// `prefix(prefix(... prefix(identity, in[0]) ...), in[n-1])`.
   template <class HintsT, class T, class PrefixFn>
-  [[nodiscard]] T inclusiveScan(std::span<const T> in, std::span<T> out,
-                                T identity, PrefixFn &&prefix,
-                                CancellationToken tok = CancellationToken{}) {
-    return runInclusiveScanLookback<HintsT, T>(in, out, std::move(identity),
-                                               std::forward<PrefixFn>(prefix),
-                                               std::move(tok));
+  [[nodiscard]] T
+  inclusiveScan(std::span<const T> in, std::span<T> out, T identity,
+                PrefixFn &&prefix,
+                const CancellationToken &tok = CancellationToken{}) {
+    return runInclusiveScanLookback<HintsT, T>(
+        in, out, std::move(identity), std::forward<PrefixFn>(prefix), tok);
   }
 
   // Friend overload routing the `citor::inclusiveScan` CPO to this pool.
@@ -8843,10 +8723,9 @@ public:
   friend T tag_invoke(const detail::InclusiveScanFn & /*cpo*/, ThreadPool &self,
                       std::span<const T> in, std::span<T> out, T identity,
                       PrefixFn &&prefix, HintsT /*hints*/,
-                      CancellationToken tok) {
-    return self.template inclusiveScan<HintsT>(in, out, std::move(identity),
-                                               std::forward<PrefixFn>(prefix),
-                                               std::move(tok));
+                      const CancellationToken &tok) {
+    return self.template inclusiveScan<HintsT>(
+        in, out, std::move(identity), std::forward<PrefixFn>(prefix), tok);
   }
 
   /// Submit |fn| for fire-and-forget execution; returns without joining.
@@ -9281,12 +9160,10 @@ private:
     const std::size_t n = last - first;
     const std::size_t chunk = reduceChunkSize(n, chunkHint);
     const std::size_t nChunks = ceilDiv(n, chunk);
-    // Mirror the parallel path's per-chunk cancellation poll. Skip the check
-    // entirely when the caller passed the never-stopped sentinel (default
-    // token), so the cancellation-free hot path pays at most one branch on
-    // `canStop` before entering the chunk loop. The parallel path uses
-    // `HintsT::cancellationChecks` to compile this away; the inline impl is
-    // shared by typed and runtime entries, so we gate at runtime here.
+    // Per-chunk cancellation poll, gated on `tok.canStop()` so the
+    // never-stopped sentinel pays one null-pointer test. The parallel
+    // path compiles the check away through `HintsT::cancellationChecks`;
+    // the inline impl is shared with the runtime entry, so the gate is here.
     const bool canStop = tok.canStop();
 
     if (determinism == Determinism::KahanCompensated) {
@@ -10973,13 +10850,8 @@ private:
     const std::size_t nBytes = n * sizeof(T);
     const std::size_t perParticipantBytes =
         (nBytes + participants - 1U) / participants;
-    std::size_t tileBytes = perParticipantBytes;
-    if (tileBytes > l2Bytes) {
-      tileBytes = l2Bytes;
-    }
-    if (tileBytes < kMinTileBytes) {
-      tileBytes = kMinTileBytes;
-    }
+    std::size_t tileBytes = std::min(perParticipantBytes, l2Bytes);
+    tileBytes = std::max(tileBytes, kMinTileBytes);
     const std::size_t tileElems = tileBytes / sizeof(T);
     if (tileElems == 0U) {
       // T larger than the tile budget; fall through to a serial scan.
@@ -11114,6 +10986,7 @@ private:
           }
         } catch (...) {
           auto *eptr = new std::exception_ptr(std::current_exception());
+          // NOLINTNEXTLINE(misc-const-correctness)
           std::exception_ptr *expected = nullptr;
           if (!firstException.compare_exchange_strong(
                   expected, eptr, std::memory_order_release,
@@ -11680,18 +11553,12 @@ private:
                              std::uint32_t /*slot*/) noexcept {
     detail::ForkJoinState &state = *task.state;
 
-    // Honour cancellation by decrementing the counter without running the body
-    // so the join can observe `pendingTasks == 0`. The token poll consults
-    // `state.token`, the FOREIGN task's state token. The previous
-    // `HasToken &&` compile-time gate was unsafe for peer-stolen tasks:
-    // the caller's `HasToken` reflects the OUTER drain's template
-    // instantiation, but a stolen task may belong to a NESTED forkJoin call
-    // whose state carries its own owned token. Compiling the check out for
-    // the no-token outer drain let peers run stolen inner-token tasks past
-    // the inner call's `request_stop()`. `stop_requested()` on a default
-    // sentinel `state.token` is a single null-pointer test (no atomic
-    // load), so the no-token hot path pays at most one register-resident
-    // branch.
+    // Honour cancellation by decrementing pending so the join can
+    // observe `pendingTasks == 0`. Always poll `state.token`: the
+    // caller's `HasToken` reflects the OUTER drain's instantiation,
+    // but a peer-stolen task may belong to a nested call whose state
+    // carries an owned token. The default sentinel resolves to a single
+    // null-pointer test, so the no-token hot path pays one branch.
     if (state.forkJoinCancelled.load(std::memory_order_acquire) != 0U ||
         state.token.stop_requested()) [[unlikely]] {
       state.pendingTasks.fetch_sub(1, std::memory_order_release);
@@ -11745,16 +11612,11 @@ private:
     return s;
   }
 
-  /// Reduce a 64-bit RNG draw to `[0, n)` via multiply-high (Lemire 2018).
-  /// Replaces `xorshiftNext(rng) % n` in the steal hot path. For
-  /// non-power-of-two |n| integer modulo compiles to `idiv` on x86, which
-  /// has long latency; the multiply-high reduction is one 64x64->128
-  /// multiply, three shifts, and no division. The bias is bounded by
-  /// `1 / 2^32` per bucket, irrelevant for victim selection. |n| must be
-  /// non-zero.
+  /// Reduce a 64-bit RNG draw to `[0, n)` via multiply-high (Lemire 2018),
+  /// replacing `xorshiftNext(rng) % n` in the steal hot path so the
+  /// non-power-of-two case avoids `idiv`. Bias is bounded by `1 / 2^32`
+  /// per bucket, irrelevant for victim selection. |n| must be non-zero.
   static std::uint32_t fastRange32(std::uint64_t x, std::uint32_t n) noexcept {
-    // `(x >> 32)` fits in 32 bits and `n` is 32 bits, so the product fits in
-    // 64 bits exactly; no 128-bit intermediate needed.
     return static_cast<std::uint32_t>(((x >> 32) * n) >> 32);
   }
 
@@ -11790,8 +11652,9 @@ private:
   /// per-rank descriptor read.
   template <class HintsT, class Body>
   void dispatchReduceJobTyped(std::size_t first, std::size_t last, Body &body,
-                              CancellationToken tok, std::size_t participants,
-                              std::size_t chunk, std::size_t nChunks) {
+                              const CancellationToken &tok,
+                              std::size_t participants, std::size_t chunk,
+                              std::size_t nChunks) {
     constexpr bool kCancellationActive = detail::kCancellationActive<HintsT>;
 
     detail::JobDescriptor &desc = sharedReduceDesc();
@@ -11845,7 +11708,7 @@ private:
     }
     if constexpr (kCancellationActive) {
       if (desc.token != tok) {
-        desc.token = std::move(tok);
+        desc.token = tok;
         keyMatches = false;
       }
     } else {
@@ -11949,18 +11812,11 @@ private:
   /// defense; the call site guarantees the pairing).
   void releaseDispatchGate() noexcept { dispatchGateUnlock(); }
 
-  /// Dispatch-gate lock primitives.
-  ///
-  /// Linux: thin wrappers around `std::mutex`. glibc's pthread_mutex is
-  /// a futex pair (~10-15 ns uncontended) that sleeps in the kernel under
-  /// sustained contention.
-  ///
-  /// Windows: CAS fast path on `m_dispatchMutex` (~3-5 ns vs ~30-50 ns
-  /// for `std::mutex`'s SRWLock wrapper). On contention a brief PAUSE
-  /// spin absorbs short critical sections without a syscall; on
-  /// sustained contention the gate parks via `WaitOnAddress` so it
-  /// matches `std::mutex`'s "sleep, do not spin" floor.
-#if defined(_WIN32)
+  /// Dispatch-gate primitives. Linux wraps `std::mutex` (glibc's
+  /// `pthread_mutex` is already a futex pair). Windows uses a CAS fast
+  /// path with a bounded `PAUSE` spin and `WaitOnAddress` park because
+  /// `SRWLock` carries measurable overhead on the cold-dispatch budget.
+#ifdef _WIN32
   /// Lock-word `held` bit. Set while a thread owns the gate.
   static constexpr std::uint32_t kHeldBit = 1U;
   /// Lock-word `has-waiter-parked` bit. Set when at least one thread is
@@ -11994,16 +11850,11 @@ private:
       }
       detail::cpuRelax();
     }
-    // Set has-waiter, then acquire or park. Post-park acquire MUST set
-    // the has-waiter bit (acquire as `kHeldBit | kHasWaiterBit`, not
-    // `kHeldBit`). A thread coming out of WaitOnAddress cannot prove it
-    // was the only waiter; a sibling may have CAS'd has-waiter to 1 and
-    // parked on the same word concurrently. Acquiring without the bit
-    // lets the matching unlock observe `prev == kHeldBit` and skip
-    // `WakeByAddressSingle`, stranding the sibling. Pessimistically
-    // preserving the bit costs one redundant wake on unlock when there
-    // were no other waiters; missing a wake is a hang. Standard glibc-
-    // futex pattern.
+    // Post-park acquire CAS sets `kHeldBit | kHasWaiterBit`, not just
+    // `kHeldBit`: a sibling may have parked concurrently, and acquiring
+    // without preserving the bit lets the matching unlock observe
+    // `prev == kHeldBit` and skip the wake, stranding the sibling. One
+    // spurious wake is cheap; missing a wake is a hang.
     for (;;) {
       std::uint32_t cur = m_dispatchMutex.load(std::memory_order_relaxed);
       if (cur == 0U) {
@@ -12353,25 +12204,19 @@ private:
     {
       auto *workersBaseForPublish = m_workers.get();
       auto *descRaw = static_cast<void *>(&desc);
-      // Drain any pending cold-stamped acks BEFORE the publish overwrites
-      // their mailbox lines, regardless of whether this is a reuse-safe
-      // dispatch. A previous publish may have cold-collapsed a worker that
-      // is still parked; the producer's own self-stamp set the worker's
-      // mailbox to `doneSentinel_prev` and recorded its slot in
-      // `m_coldStampedMask`. If we overwrite that mailbox now (reuse or
-      // not), the worker will eventually wake on a publish that has
-      // `kSkipClaimBit` set (the skip-cold-collapse path), take the
-      // plain-store ack branch, and never set `kAckedBit`. A later
-      // non-reuse publish would then spin in this same wait forever.
-      // Wake while waiting because the worker we need an ack from may be
-      // parked on its futex word; the cpuRelax-only spin would never
-      // resolve.
+      // Drain pending cold-stamped acks before any publish (reuse or
+      // not). Overwriting a previously cold-collapsed worker's mailbox
+      // while it is still parked sends it down the plain-store ack
+      // branch on wake, which never sets `kAckedBit`; a later non-reuse
+      // publish would then spin here forever. Wake while waiting
+      // because the worker we need an ack from may already be parked;
+      // a pure cpuRelax spin would not resolve.
       if (m_coldStampedMask != 0U) [[unlikely]] {
         while (m_coldStampedMask != 0U) {
           std::uint64_t scan = m_coldStampedMask;
           std::uint64_t stillPending = 0U;
           while (scan != 0U) {
-            const auto bit = static_cast<unsigned>(detail::ctzll(scan));
+            const auto bit = detail::ctzll(scan);
             scan &= scan - 1U;
             auto *w = workersBaseForPublish + bit;
             if ((w->mailbox.load(std::memory_order_acquire) &
@@ -12443,7 +12288,7 @@ private:
       for (std::uint32_t r = 0; r < kPreWakeProbeRounds; ++r) {
         std::uint64_t scan = pendingProbe;
         while (scan != 0U) {
-          const auto bit = static_cast<unsigned>(detail::ctzll(scan));
+          const auto bit = detail::ctzll(scan);
           scan &= scan - 1U;
           if (((workersBase + bit)->mailbox.load(std::memory_order_acquire) &
                ~detail::PoolControl::kAckedBit) == doneSentinel) {
@@ -12459,31 +12304,16 @@ private:
     }
 
     if (!lowLatencyActive && !preWakeAllDone) {
-      // Always wake. The previous code skipped the wake when the
-      // previous dispatch on this pool published within half the spin
-      // budget ago, on the assumption that workers in that window
-      // cannot have completed their spin and parked. The assumption is
-      // wrong: `readTsc()` is the invariant wall-clock TSC, so a worker
-      // preempted by the OS scheduler during its spin loop accumulates
-      // TSC delta while it is not running. The worker resumes,
-      // observes the elapsed TSC exceeds the spin budget, and parks
-      // on its futex word. The producer's next dispatch under the
-      // hot cadence then skipped the wake; the producer hung forever
-      // in the join wait while every worker was parked. The wake is
-      // cheap on the uncontended path (one syscall when there are no
-      // waiters) and the savings the heuristic claimed are not worth
-      // the lost-wakeup risk on schedulers that preempt user threads
-      // more aggressively than Linux CFS does. The opt-in
-      // `LowLatencyGuard` already covers the genuinely-hot dispatch
-      // case: while it is held, workers spin forever (no parking)
-      // and this entire block is gated off by `!lowLatencyActive`.
+      // Wake unconditionally. A prior TSC-based "hot cadence" skip
+      // assumed a worker could not have parked since the last
+      // dispatch, but the invariant TSC advances while a thread is
+      // descheduled, so a preempted worker accrues delta past the spin
+      // budget and parks; the skipped wake then hangs the join.
+      // `LowLatencyGuard` still covers genuinely-hot dispatch through
+      // the outer `!lowLatencyActive` gate.
       //
-      // Single-writer load/store on `futexWord`: under `m_dispatchMutex`
-      // the dispatching producer is the only writer, so a non-atomic load
-      // + release store is sufficient to bump the parking token. Workers
-      // acquire `generation` (not `futexWord`) for descriptor visibility;
-      // the producer's lifetime contract serializes shutdown against
-      // active dispatch.
+      // `m_dispatchMutex` makes the producer the only writer on
+      // `futexWord`, so a non-atomic load plus release store suffices.
       const std::uint32_t nextFutex =
           m_control.futexWord.load(std::memory_order_relaxed) + 1U;
       m_control.futexWord.store(nextFutex, std::memory_order_release);
@@ -12591,7 +12421,7 @@ private:
         }
         std::uint64_t scan = pending;
         while (scan != 0U) {
-          const auto bit = static_cast<unsigned>(detail::ctzll(scan));
+          const auto bit = detail::ctzll(scan);
           scan &= scan - 1U;
           if ((workersBase + bit)->cpuId == producerCpuU) {
             return true;
@@ -12623,7 +12453,7 @@ private:
         // fall back to PAUSE-spin for slower arrivals.
         constexpr std::uint32_t kTightProbeIters = 8U;
         while (pending != 0U) {
-          const auto bit = static_cast<unsigned>(detail::ctzll(pending));
+          const auto bit = detail::ctzll(pending);
           auto &w = *(workersBase + bit);
           bool tightDone = false;
           for (std::uint32_t i = 0; i < kTightProbeIters; ++i) {
@@ -13120,22 +12950,13 @@ private:
   /// for race freedom.
   std::exception_ptr m_detachedException;
 
-  /// Gate serialising concurrent `dispatchOne` callers through the
-  /// priority lanes. Held only for the duration of a single primitive's
-  /// publish/participate/join cycle so concurrent producers from different
-  /// threads do not interleave dispatches against the same worker pool.
-  /// Single-producer call sites pay one uncontended lock/unlock pair on
-  /// the dispatch hot path.
-  ///
-  /// On Linux this is `std::mutex` directly: glibc's pthread_mutex is a
-  /// futex pair (~10-15 ns uncontended). On Windows `std::mutex` is an
-  /// `SRWLock` wrapper whose `try_lock` / `unlock` chain costs
-  /// ~30-50 ns even uncontended -- not visible at Linux's dispatch
-  /// budget but significant on Windows where the cold-dispatch budget
-  /// is ~1500-3000 ns of scheduler latency. The Windows branch
-  /// substitutes a futex-backed hybrid lock keyed on the same word the
-  /// gate helpers operate on; see `dispatchGate{Lock,TryLock,Unlock}`.
-#if defined(_WIN32)
+  /// Gate serialising concurrent `dispatchOne` callers through the priority
+  /// lanes. Held for one primitive's publish/participate/join cycle so
+  /// producers from different threads do not interleave dispatches against
+  /// the same worker pool. Single-producer call sites pay one uncontended
+  /// lock/unlock pair on the dispatch hot path. Linux uses `std::mutex`
+  /// directly; the Windows branch substitutes a futex-backed hybrid lock.
+#ifdef _WIN32
   /// Windows lock word (atomic). See `dispatchGateLock` for the bit
   /// layout and the post-park has-waiter-preservation invariant.
   std::atomic<std::uint32_t> m_dispatchMutex{0U};

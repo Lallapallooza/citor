@@ -360,8 +360,8 @@ template <Balance B, class HintsT, class FOp>
         if (eptr == nullptr) {
           std::terminate();
         }
-        std::exception_ptr *expected =
-            nullptr; // NOLINT(misc-const-correctness)
+        // NOLINTNEXTLINE(misc-const-correctness)
+        std::exception_ptr *expected = nullptr;
         if (!desc.firstException.compare_exchange_strong(
                 expected, eptr, std::memory_order_release,
                 std::memory_order_acquire)) {
@@ -614,8 +614,8 @@ inline void typedWorkerEntry(JobDescriptor *desc, std::uint32_t rankPacked,
         if (eptr == nullptr) {
           std::terminate();
         }
-        std::exception_ptr *expected =
-            nullptr; // NOLINT(misc-const-correctness)
+        // NOLINTNEXTLINE(misc-const-correctness)
+        std::exception_ptr *expected = nullptr;
         if (!desc->firstException.compare_exchange_strong(
                 expected, eptr, std::memory_order_release,
                 std::memory_order_acquire)) {

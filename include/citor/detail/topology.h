@@ -24,7 +24,7 @@
 
 namespace citor::detail {
 
-#if defined(_WIN32)
+#ifdef _WIN32
 
 /// Walk every `SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX` record for
 /// `rel` and pass each to `f`. Returns `true` only when the entire
@@ -229,7 +229,7 @@ inline std::vector<std::uint32_t> readCpuList(const std::string &path) {
   return result;
 }
 
-#if defined(_WIN32)
+#ifdef _WIN32
 /// Windows-side topology probe. Uses `GetLogicalProcessorInformationEx` for
 /// SMT-sibling discovery (`RelationProcessorCore`), shared-L3 groups
 /// (`RelationCache` filtered to `Level == 3`), and cache sizes; uses
@@ -511,7 +511,7 @@ inline Topology detectTopologyWindows() {
 ///
 /// Populated `Topology`; never throws even if sysfs is unavailable.
 inline Topology detectTopology() {
-#if defined(_WIN32)
+#ifdef _WIN32
   return detectTopologyWindows();
 #else
   Topology topo;
@@ -897,7 +897,7 @@ inline void bindAffinityOnce(std::uint32_t cpuId) noexcept {
 #endif
 }
 
-#if defined(_WIN32)
+#ifdef _WIN32
 /// Pin the calling thread to a single CPU and return the previous
 /// affinity mask. `SetThreadAffinityMask` returns the previous mask
 /// atomically with the new application, so one call covers save +

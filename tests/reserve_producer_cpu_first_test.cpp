@@ -34,7 +34,7 @@ Topology makeHomogeneousSmt(std::uint32_t numCores, std::uint32_t numCcds) {
   const std::uint32_t perCcd = numCores / numCcds;
   for (std::uint32_t c = 0; c < numCores; ++c) {
     const std::uint32_t physCpu = c * 2U;
-    const std::uint32_t sibCpu = c * 2U + 1U;
+    const std::uint32_t sibCpu = (c * 2U) + 1U;
     const std::uint32_t ccd = c / perCcd;
     t.ccdOfCpu[physCpu] = ccd;
     t.ccdOfCpu[sibCpu] = ccd;
@@ -51,7 +51,7 @@ Topology makeHomogeneousSmt(std::uint32_t numCores, std::uint32_t numCcds) {
 /// Alder Lake-P / Raptor Lake (e.g. 12900HK = 6P + 8E).
 Topology makeIntelHybrid(std::uint32_t numP, std::uint32_t numE) {
   Topology t;
-  t.logicalCount = numP * 2U + numE;
+  t.logicalCount = (numP * 2U) + numE;
   t.physicalCount = numP + numE;
   t.ccdCount = 1U;
   t.preferredCcd = 0U;
@@ -62,7 +62,7 @@ Topology makeIntelHybrid(std::uint32_t numP, std::uint32_t numE) {
   // P-cores first: CPU ids 0..2P-1 are P-core SMT pairs.
   for (std::uint32_t p = 0; p < numP; ++p) {
     const std::uint32_t physCpu = p * 2U;
-    const std::uint32_t sibCpu = p * 2U + 1U;
+    const std::uint32_t sibCpu = (p * 2U) + 1U;
     t.smtSiblingOfCpu[physCpu] = sibCpu;
     t.smtSiblingOfCpu[sibCpu] = physCpu;
     t.ccdGroups[0].push_back(physCpu);
@@ -70,7 +70,7 @@ Topology makeIntelHybrid(std::uint32_t numP, std::uint32_t numE) {
   }
   // E-cores: CPU ids 2P..2P+E-1, no SMT sibling.
   for (std::uint32_t e = 0; e < numE; ++e) {
-    const std::uint32_t ecpu = numP * 2U + e;
+    const std::uint32_t ecpu = (numP * 2U) + e;
     t.ccdGroups[0].push_back(ecpu);
     t.physicalCores.push_back(ecpu);
   }
@@ -85,7 +85,7 @@ Topology makeIntelHybrid(std::uint32_t numP, std::uint32_t numE) {
 // single explicit exception to the distinct-physicals rule.
 TEST(ReserveProducerCpuFirst, AmdSmtJ2RoutesSlot1ToProducerSibling) {
   const Topology topo = makeHomogeneousSmt(/*numCores=*/16, /*numCcds=*/2);
-  std::vector<std::uint32_t> input = topo.physicalCores; // [0, 2, 4, ...]
+  const std::vector<std::uint32_t> input = topo.physicalCores; // [0, 2, 4, ...]
   const auto out = reserveProducerCpuFirst(input, /*participants=*/2,
                                            /*standalone=*/true, topo);
   ASSERT_GE(out.size(), 2U);
@@ -99,7 +99,7 @@ TEST(ReserveProducerCpuFirst, AmdSmtJ2RoutesSlot1ToProducerSibling) {
 TEST(ReserveProducerCpuFirst,
      AmdSmtJ8KeepsAllSlotsOnDistinctPhysicalCoresNoSmtPairing) {
   const Topology topo = makeHomogeneousSmt(/*numCores=*/16, /*numCcds=*/2);
-  std::vector<std::uint32_t> input = topo.physicalCores;
+  const std::vector<std::uint32_t> input = topo.physicalCores;
   const auto out = reserveProducerCpuFirst(input, /*participants=*/8,
                                            /*standalone=*/true, topo);
   ASSERT_GE(out.size(), 8U);
@@ -126,7 +126,7 @@ TEST(ReserveProducerCpuFirst,
 TEST(ReserveProducerCpuFirst,
      AmdSmtJ16AtPhysicalCountUsesAllDistinctPhysicalCores) {
   const Topology topo = makeHomogeneousSmt(/*numCores=*/16, /*numCcds=*/2);
-  std::vector<std::uint32_t> input = topo.physicalCores;
+  const std::vector<std::uint32_t> input = topo.physicalCores;
   const auto out = reserveProducerCpuFirst(input, /*participants=*/16,
                                            /*standalone=*/true, topo);
   ASSERT_GE(out.size(), 16U);
@@ -146,7 +146,7 @@ TEST(ReserveProducerCpuFirst,
 TEST(ReserveProducerCpuFirst,
      AmdSmtJ32OversubscribedAppendsSmtSiblingsAsOverflow) {
   const Topology topo = makeHomogeneousSmt(/*numCores=*/16, /*numCcds=*/2);
-  std::vector<std::uint32_t> input = topo.physicalCores;
+  const std::vector<std::uint32_t> input = topo.physicalCores;
   const auto out = reserveProducerCpuFirst(input, /*participants=*/32,
                                            /*standalone=*/true, topo);
   EXPECT_EQ(out.size(), 32U)
@@ -170,7 +170,7 @@ TEST(ReserveProducerCpuFirst,
 // j=2 on hybrid: slot 1 must be SMT sibling of slot 0.
 TEST(ReserveProducerCpuFirst, IntelHybridJ2RoutesSlot1ToProducerSibling) {
   const Topology topo = makeIntelHybrid(/*numP=*/6, /*numE=*/8);
-  std::vector<std::uint32_t> input = topo.physicalCores;
+  const std::vector<std::uint32_t> input = topo.physicalCores;
   const auto out = reserveProducerCpuFirst(input, /*participants=*/2,
                                            /*standalone=*/true, topo);
   ASSERT_GE(out.size(), 2U);
@@ -185,7 +185,7 @@ TEST(ReserveProducerCpuFirst, IntelHybridJ2RoutesSlot1ToProducerSibling) {
 TEST(ReserveProducerCpuFirst,
      IntelHybridJ8KeepsAllSlotsOnDistinctPhysicalCores) {
   const Topology topo = makeIntelHybrid(/*numP=*/6, /*numE=*/8);
-  std::vector<std::uint32_t> input = topo.physicalCores;
+  const std::vector<std::uint32_t> input = topo.physicalCores;
   const auto out = reserveProducerCpuFirst(input, /*participants=*/8,
                                            /*standalone=*/true, topo);
   ASSERT_GE(out.size(), 8U);
@@ -212,7 +212,7 @@ TEST(ReserveProducerCpuFirst,
 TEST(ReserveProducerCpuFirst,
      IntelHybridJ16OversubscribedOverflowsToPCoreSmtSiblings) {
   const Topology topo = makeIntelHybrid(/*numP=*/6, /*numE=*/8);
-  std::vector<std::uint32_t> input = topo.physicalCores;
+  const std::vector<std::uint32_t> input = topo.physicalCores;
   const auto out = reserveProducerCpuFirst(input, /*participants=*/16,
                                            /*standalone=*/true, topo);
   EXPECT_EQ(out.size(), 14U + 6U)
@@ -234,7 +234,7 @@ TEST(ReserveProducerCpuFirst,
 TEST(ReserveProducerCpuFirst,
      SingleCcdHomogeneousJ8AtPhysicalCountKeepsDistinctPhysicals) {
   const Topology topo = makeHomogeneousSmt(/*numCores=*/8, /*numCcds=*/1);
-  std::vector<std::uint32_t> input = topo.physicalCores;
+  const std::vector<std::uint32_t> input = topo.physicalCores;
   const auto out = reserveProducerCpuFirst(input, /*participants=*/8,
                                            /*standalone=*/true, topo);
   ASSERT_GE(out.size(), 8U);

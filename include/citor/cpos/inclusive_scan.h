@@ -56,9 +56,9 @@ struct InclusiveScanFn {
   [[nodiscard]] T
   operator()(Pool &pool, std::span<const T> in, std::span<T> out, T identity,
              PrefixFn &&prefix,
-             CancellationToken tok = CancellationToken{}) const {
+             const CancellationToken &tok = CancellationToken{}) const {
     return tag_invoke(*this, pool, in, out, std::move(identity),
-                      std::forward<PrefixFn>(prefix), HintsT{}, std::move(tok));
+                      std::forward<PrefixFn>(prefix), HintsT{}, tok);
   }
 };
 

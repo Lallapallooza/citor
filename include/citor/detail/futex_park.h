@@ -97,9 +97,8 @@ inline long futexWaitPrivate(std::atomic<std::uint32_t> *addr,
   // `FUTEX_WAIT` is driven by the explicit wake and stays on
   // `INFINITE`.
   constexpr DWORD kWindowsParkTimeoutMs = 1U;
-  const BOOL ok =
-      ::WaitOnAddress(static_cast<volatile VOID *>(addr), &compare,
-                      sizeof(std::uint32_t), kWindowsParkTimeoutMs);
+  const BOOL ok = ::WaitOnAddress(static_cast<volatile VOID *>(addr), &compare,
+                                  sizeof(std::uint32_t), kWindowsParkTimeoutMs);
   return ok ? 0 : -1;
 }
 
