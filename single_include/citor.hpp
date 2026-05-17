@@ -2,7 +2,7 @@
 //
 // citor -- header-only C++20 thread pool
 // version: 0.1.0
-// commit:  d71131273b4c7694b7672b122bd756755827f833
+// commit:  4c0962f718e41655d393968084a3bb132a5d6222
 // generated: 2026-05-17
 //
 // GENERATED FILE -- DO NOT EDIT.
