@@ -21,8 +21,9 @@ using citor::ThreadPool;
 TEST(RegressionForkJoinNestedTokenStolenTask,
      PeerStolenInnerTaskHonorsInnerTokenWhenOuterHasNone) {
   ThreadPool pool(4);
-  ASSERT_GE(pool.participants(), 4U)
-      << "test needs at least 4 participants so peers can steal";
+  if (pool.participants() < 4U) {
+    GTEST_SKIP() << "needs >= 4 participants so peers can steal inner tasks";
+  }
 
   // Pre-stopped inner token. The framework's per-task gate must skip every
   // inner body. The OUTER forkJoin has no token, so the outer drain
