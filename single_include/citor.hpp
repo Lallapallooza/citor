@@ -2,7 +2,7 @@
 //
 // citor -- header-only C++20 thread pool
 // version: 0.1.0
-// commit:  13ab116ca63bf26b6cffd37c25392f6233ea3209
+// commit:  84241150a18c19ff527c0ca287e5b9db44e84e4f
 // generated: 2026-05-17
 //
 // GENERATED FILE -- DO NOT EDIT.
@@ -9281,35 +9281,63 @@ private:
     const std::size_t n = last - first;
     const std::size_t chunk = reduceChunkSize(n, chunkHint);
     const std::size_t nChunks = ceilDiv(n, chunk);
+    // Mirror the parallel path's per-chunk cancellation poll. Skip the check
+    // entirely when the caller passed the never-stopped sentinel (default
+    // token), so the cancellation-free hot path pays at most one branch on
+    // `canStop` before entering the chunk loop. The parallel path uses
+    // `HintsT::cancellationChecks` to compile this away; the inline impl is
+    // shared by typed and runtime entries, so we gate at runtime here.
+    const bool canStop = tok.canStop();
 
     if (determinism == Determinism::KahanCompensated) {
-      std::vector<detail::KahanPair> partials(nChunks);
+      std::vector<detail::KahanPair> partials;
+      partials.reserve(nChunks);
       for (std::size_t b = 0; b < nChunks; ++b) {
+        if (canStop && tok.stop_requested()) [[unlikely]] {
+          break;
+        }
         const std::size_t lo = first + (b * chunk);
         const std::size_t hi = std::min(lo + chunk, last);
         const T mapped = map(lo, hi);
-        partials[b] =
-            detail::kahanAdd(detail::KahanPair{}, static_cast<double>(mapped));
+        partials.push_back(
+            detail::kahanAdd(detail::KahanPair{}, static_cast<double>(mapped)));
+      }
+      if (partials.empty()) {
+        throw cancelled_value_exception<T>(std::move(init));
       }
       const detail::KahanPair treeResult = detail::pairwiseTreeCombine(
           partials, [](detail::KahanPair a, detail::KahanPair b) {
             return detail::kahanCombine(a, b);
           });
       const auto treeT = static_cast<T>(treeResult.sum);
-      return combine(std::move(init), treeT);
+      T combined = combine(std::move(init), treeT);
+      if (partials.size() < nChunks) {
+        throw cancelled_value_exception<T>(std::move(combined));
+      }
+      return combined;
     }
     std::vector<T> partials;
     partials.reserve(nChunks);
     for (std::size_t b = 0; b < nChunks; ++b) {
+      if (canStop && tok.stop_requested()) [[unlikely]] {
+        break;
+      }
       const std::size_t lo = first + (b * chunk);
       const std::size_t hi = std::min(lo + chunk, last);
       partials.push_back(map(lo, hi));
+    }
+    if (partials.empty()) {
+      throw cancelled_value_exception<T>(std::move(init));
     }
     auto wrappedCombine = [&combine](T a, T b) {
       return combine(std::move(a), std::move(b));
     };
     T treeResult = detail::pairwiseTreeCombine(partials, wrappedCombine);
-    return combine(std::move(init), std::move(treeResult));
+    T combined = combine(std::move(init), std::move(treeResult));
+    if (partials.size() < nChunks) {
+      throw cancelled_value_exception<T>(std::move(combined));
+    }
+    return combined;
   }
 
   /// Compile-time-hinted wrapper over `runReduceInlineImpl` that pulls
