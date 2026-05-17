@@ -104,7 +104,7 @@ jobs:
           ( cd single_include && tar czf "../release-artifacts/citor-${tag}-single-header.tar.gz" citor.hpp )
           ( cd release-artifacts && sha256sum "citor-${tag}-single-header.tar.gz" > "citor-${tag}-single-header.tar.gz.sha256" )
 
-      - name: Create GitHub release
+      - name: Create or refresh GitHub release
         if: steps.bump.outputs.bumped == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -124,7 +124,18 @@ jobs:
               echo "**Full diff**: https://github.com/${{ github.repository }}/compare/${PREV}...${TAG}"
             fi
           } > /tmp/notes.md
-          gh release create "$TAG" --title "$TAG" --notes-file /tmp/notes.md release-artifacts/*
+          # Idempotent. The bump-and-release path can re-fire on a force-push
+          # that lands the same tag at a new SHA; the release-on-tag path can
+          # race with this job. When the release already exists, refresh
+          # notes and asset payloads in place; otherwise create.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG exists; refreshing notes and assets"
+            gh release edit "$TAG" --notes-file /tmp/notes.md
+            gh release upload "$TAG" release-artifacts/* --clobber
+          else
+            echo "release $TAG missing; creating"
+            gh release create "$TAG" --title "$TAG" --notes-file /tmp/notes.md release-artifacts/*
+          fi
 
   # Manual tag release: local `cz bump` + `git push --follow-tags`,
   # or any hand-pushed v* tag. Tags pushed by bump-and-release use
@@ -153,7 +164,7 @@ jobs:
           ( cd single_include && tar czf "../release-artifacts/citor-${tag}-single-header.tar.gz" citor.hpp )
           ( cd release-artifacts && sha256sum "citor-${tag}-single-header.tar.gz" > "citor-${tag}-single-header.tar.gz.sha256" )
 
-      - name: Create GitHub release
+      - name: Create or refresh GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -172,4 +183,15 @@ jobs:
               echo "**Full diff**: https://github.com/${{ github.repository }}/compare/${PREV}...${TAG}"
             fi
           } > /tmp/notes.md
-          gh release create "$TAG" --title "$TAG" --notes-file /tmp/notes.md release-artifacts/*
+          # Idempotent. `release-on-tag` fires on every `v*` tag push, which
+          # includes force-moves (tag rewrites during a history-rewrite
+          # session). When the release exists, refresh notes and assets in
+          # place; otherwise create it.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG exists; refreshing notes and assets"
+            gh release edit "$TAG" --notes-file /tmp/notes.md
+            gh release upload "$TAG" release-artifacts/* --clobber
+          else
+            echo "release $TAG missing; creating"
+            gh release create "$TAG" --title "$TAG" --notes-file /tmp/notes.md release-artifacts/*
+          fi
