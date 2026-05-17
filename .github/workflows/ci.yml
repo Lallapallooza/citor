@@ -199,6 +199,41 @@ jobs:
           UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
         run: ctest --test-dir build --output-on-failure -j
 
+  windows-msvc:
+    name: windows-msvc-2022
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: CPM source cache
+        uses: actions/cache@v4
+        with:
+          path: ~/AppData/Local/.cache/CPM
+          key: cpm-windows-${{ hashFiles('cmake/CPM.cmake', 'cmake/GTestDep.cmake') }}
+          restore-keys: |
+            cpm-windows-
+
+      - name: Configure (MSVC, x64)
+        # The Visual Studio 2022 generator picks the MSVC toolchain by
+        # default and pulls in `cl.exe` through CMake's `vcvars` discovery.
+        # Bench is off (the peer-pool CPM pulls are Linux-only); tidy is
+        # off (no clang-tidy on this runner); tests are on.
+        env:
+          CPM_SOURCE_CACHE: ${{ github.workspace }}\.cache\CPM
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+            -DCITOR_BUILD_BENCHMARK=OFF `
+            -DCITOR_ENABLE_CLANG_TIDY=OFF
+
+      - name: Build (Release)
+        run: cmake --build build --config Release -j
+
+      - name: Test
+        # GoogleTest binaries land under build/tests/Release/ with the
+        # multi-config VS generator; ctest finds them automatically.
+        run: ctest --test-dir build -C Release --output-on-failure -j
+
   tsan-smoke:
     name: tsan (smoke)
     runs-on: ubuntu-24.04
