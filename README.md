@@ -1,3 +1,5 @@
+![citor](docs/charts/logo.png)
+
 # citor
 
 > Header-only C++20 thread pool with sub-microsecond dispatch on Linux x86_64. Eight cooperating primitives, decentralized per-slot done-epoch barriers, Chase-Lev work-stealing, per-CCD arenas. MIT.
