@@ -18,6 +18,15 @@ target_compile_features(citor INTERFACE cxx_std_20)
 find_package(Threads REQUIRED)
 target_link_libraries(citor INTERFACE Threads::Threads)
 
+# MSVC's C4324 ("structure was padded due to alignment specifier") is the
+# expected outcome of every `alignas(kCacheLine)` member in the engine.
+# Suppressing it on the public INTERFACE target so consumers see no false-
+# alarm noise when including citor headers. GCC/Clang do not emit this
+# warning at all.
+if(MSVC)
+    target_compile_options(citor INTERFACE /wd4324)
+endif()
+
 if(CITOR_USE_AVX2)
     include(CheckCXXCompilerFlag)
     if(MSVC)

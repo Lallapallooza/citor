@@ -27,6 +27,11 @@ if(MSVC)
             # recognized") fires anyway. Silence it; the GCC/clang build
             # is the source of truth for inlining decisions.
             /wd5030
+            # C4324 ("structure was padded due to alignment specifier") is
+            # the intended outcome of every `alignas(kCacheLine)` member.
+            # MSVC fires it for each contended atomic; nearly 2000 hits
+            # per Windows build with no diagnostic value.
+            /wd4324
     )
 else()
     target_compile_options(
