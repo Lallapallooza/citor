@@ -79,11 +79,15 @@ jobs:
         if: steps.bump.outputs.bumped == 'true'
         run: python3 tools/amalgamate.py
 
-      - name: Commit amalgamation if changed
+      - name: Sync uv lockfile
+        if: steps.bump.outputs.bumped == 'true'
+        run: pipx run uv lock
+
+      - name: Commit post-bump artifacts if changed
         if: steps.bump.outputs.bumped == 'true'
         run: |
-          if ! git diff --quiet -- single_include/citor.hpp; then
-            git add single_include/citor.hpp
+          if ! git diff --quiet -- single_include/citor.hpp uv.lock; then
+            git add single_include/citor.hpp uv.lock
             git commit --amend --no-edit
             git tag -f "${{ steps.bump.outputs.tag }}"
           fi
