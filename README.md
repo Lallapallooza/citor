@@ -1195,6 +1195,14 @@ scripts/                       pre-commit helpers (ctest, clang-tidy, doc-string
 
 Anything under `include/citor/{cpos,detail}/` is reachable but not part of the public API surface. Top-level headers in `include/citor/` (`thread_pool.h`, `hints.h`, `cancellation.h`, `chain.h`, `pool_group.h`, `function_ref.h`, `version.h`) are the user-facing entry points.
 
+## API stability
+
+citor is pre-1.0. The version scheme is semver, so `0.x` minor bumps may break source compatibility in principle. In practice the public surface (`include/citor/*.h` minus the `detail/` and `cpos/` subdirectories) has been stable across the last several releases and a breaking change is unlikely without a clear reason. Anything under `include/citor/detail/` is internal and changes freely.
+
+## Contributing
+
+Contributions, bug reports, and benchmark fairness fixes are welcome. Open an issue or a PR. For perf claims, include the host details and the `parallel_bench --export` JSON so the numbers reproduce. For bench-shape complaints (a peer pool wired in a way that disadvantages it, a missing competitor, an unfair workload), open an issue with the cell name and a proposed fix.
+
 ## License
 
 MIT. See [`LICENSE`](LICENSE).
