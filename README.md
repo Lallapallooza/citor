@@ -5,8 +5,12 @@
 > Header-only C++20 thread pool with sub-microsecond dispatch on Linux x86_64. Eight cooperating primitives, decentralized per-slot done-epoch barriers, Chase-Lev work-stealing, per-CCD arenas. MIT.
 
 [![ci](https://github.com/Lallapallooza/citor/actions/workflows/ci.yml/badge.svg)](https://github.com/Lallapallooza/citor/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Lallapallooza/citor?sort=semver)](https://github.com/Lallapallooza/citor/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
+![Platform](https://img.shields.io/badge/platform-linux%20%7C%20windows-lightgrey)
+[![Conventional Commits](https://img.shields.io/badge/conventional%20commits-1.0.0-yellow.svg)](https://www.conventionalcommits.org/)
+[![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen)](https://github.com/pre-commit/pre-commit)
 
 | | |
 |---|---|
