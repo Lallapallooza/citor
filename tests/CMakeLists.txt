@@ -123,17 +123,18 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(REMOVE_ITEM _citor_tests ${_citor_tests_linux_only})
 endif()
 
-foreach(_t IN LISTS _citor_tests)
-    add_executable(${_t} ${_t}.cpp ${_citor_test_extra_sources})
-    target_link_libraries(${_t} PRIVATE citor::citor GTest::gtest_main)
-    if(CITOR_IS_TOP_LEVEL)
-        target_link_libraries(${_t} PRIVATE citor_warnings)
-    endif()
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        target_link_libraries(${_t} PRIVATE pthread)
-    endif()
-    gtest_discover_tests(${_t})
-endforeach()
+# Test properties must be passed via `gtest_discover_tests(PROPERTIES ...)`,
+# not via a post-hoc `set_tests_properties` loop: `gtest_discover_tests`
+# registers tests at build time (in its generated `<exe>[1]_tests.cmake`),
+# so `DIRECTORY PROPERTY TESTS` is empty at configure time and any loop
+# over it lands properties on zero tests.
+#
+# `PROCESSORS 9` reflects the typical pool-spawning test constructing
+# `ThreadPool(8)` (8 workers + producer). `ctest -jN` then schedules with
+# awareness of total core demand and avoids oversubscribing the box under
+# TSan, where dispatch spin loops fail to make progress under starvation.
+#
+# `TIMEOUT 120` kills any test that exceeds two minutes of wall-clock.
 
 # `TSAN_OPTIONS` applied to every TSan-built test:
 #   * `second_deadlock_stack=1` emits the second mutex-acquisition frame
@@ -166,17 +167,32 @@ if(CITOR_BUILD_WITH_SANITIZER)
             "${_citor_tsan_options}:external_symbolizer_path=${LLVM_SYMBOLIZER_EXE}"
         )
     endif()
-    set(_citor_tsan_fail_regex
-        "WARNING: ThreadSanitizer;ThreadSanitizer: data race;ThreadSanitizer: lock-order-inversion;ThreadSanitizer: thread leak"
-    )
-    get_property(_citor_all_tests DIRECTORY PROPERTY TESTS)
-    foreach(_test IN LISTS _citor_all_tests)
-        set_tests_properties(
-            ${_test}
-            PROPERTIES
-                ENVIRONMENT "TSAN_OPTIONS=${_citor_tsan_options}"
-                FAIL_REGULAR_EXPRESSION "${_citor_tsan_fail_regex}"
-                TIMEOUT 120
-        )
-    endforeach()
 endif()
+
+foreach(_t IN LISTS _citor_tests)
+    add_executable(${_t} ${_t}.cpp ${_citor_test_extra_sources})
+    target_link_libraries(${_t} PRIVATE citor::citor GTest::gtest_main)
+    if(CITOR_IS_TOP_LEVEL)
+        target_link_libraries(${_t} PRIVATE citor_warnings)
+    endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_link_libraries(${_t} PRIVATE pthread)
+    endif()
+    # Inline the PROPERTIES argument so semicolons inside
+    # FAIL_REGULAR_EXPRESSION reach CTest verbatim (the property is itself
+    # a CMake list, and forwarding via `list(APPEND)` + `${var}` splits on
+    # the embedded semicolons).
+    if(CITOR_BUILD_WITH_SANITIZER)
+        gtest_discover_tests(
+            ${_t}
+            PROPERTIES
+                TIMEOUT 120
+                PROCESSORS 9
+                ENVIRONMENT "TSAN_OPTIONS=${_citor_tsan_options}"
+                FAIL_REGULAR_EXPRESSION
+                    "WARNING: ThreadSanitizer\;ThreadSanitizer: data race\;ThreadSanitizer: lock-order-inversion\;ThreadSanitizer: thread leak"
+        )
+    else()
+        gtest_discover_tests(${_t} PROPERTIES TIMEOUT 120 PROCESSORS 9)
+    endif()
+endforeach()
