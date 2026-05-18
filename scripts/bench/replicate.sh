@@ -191,7 +191,7 @@ if [ "$ISOLATED" = "1" ]; then
   while read -r cell; do
     idx=$((idx + 1))
     echo "[$idx/$total] isolated: $cell"
-    timeout 1800 ./build/benchmark/parallel_bench \
+    timeout 300 ./build/benchmark/parallel_bench \
       --filter "$cell" --export "/tmp/out/cell-$idx.json" || \
       echo "[$idx/$total] $cell exited non-zero (likely peer segfault); continuing"
   done < /tmp/pending.txt
