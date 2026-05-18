@@ -25,6 +25,7 @@ set(_citor_tests
     chase_lev_deque_growth_test
     chase_lev_deque_single_thread_test
     coherence_probe_test
+    coro_wrapper_test
     fork_join_affinity_test
     fork_join_cancellation_test
     fork_join_determinism_test

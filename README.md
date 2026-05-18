@@ -317,6 +317,31 @@ citor::parallelFor.template operator()<citor::HintsDefaults>(
 
 `parallelFor` is a CPO value, not a function template, so the explicit hint type goes through `.template operator()<...>(pool, ...)`. Use the member surface in application code; reach for the CPO surface for generic executor adapters and tests that need `tag_invoke` dispatch.
 
+### Coroutine wrapper (optional)
+
+`<citor/coro.h>` is an opt-in header that exposes every primitive as an awaitable for use from C++20 coroutines. Nothing in the engine changes when the header is not included; the wrapper routes each call through `submitDetached` and resumes the awaiting coroutine when the wrapped primitive returns.
+
+```cpp
+#include <citor/coro.h>
+
+citor::coro::Task<std::int64_t> work(citor::ThreadPool &pool) {
+  co_await citor::coro::parallelFor(pool, 0, n,
+      [&](std::size_t lo, std::size_t hi) { /* ... */ });
+  std::int64_t sum = co_await citor::coro::parallelReduce(pool, 0, n,
+      std::int64_t{0}, map, combine);
+  co_return sum;
+}
+
+std::int64_t result = citor::coro::syncWait(work(pool));
+```
+
+Tradeoffs vs. the direct synchronous primitives:
+
+- Coroutine frames are heap-allocated by the compiler.
+- One worker plays the wrapped primitive's "producer" role until it returns; the rest of the pool fans out as usual.
+
+The wrapper is a convenience for users whose call sites are already in coroutine code. Performance-critical paths should keep using the synchronous primitives.
+
 ## ThreadPool lifecycle
 
 ```cpp
