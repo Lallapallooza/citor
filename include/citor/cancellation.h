@@ -59,11 +59,13 @@ namespace detail {
 /// performed before signalling are visible to a worker that observes the stop
 /// flag.
 ///
-/// The default-constructed token shares a single allocated state word (created
-/// lazily in the default constructor) so `stop_requested()` is well-defined on
-/// every code path. Constructing a token is a one-time heap allocation; copy /
-/// move / dtor are pointer-arithmetic only and do not allocate.
-/// `stop_requested()` and `request_stop()` are `noexcept` and allocation-free.
+/// The default-constructed token holds no shared state: it is the
+/// "never-stopped" sentinel and `stop_requested()` always returns `false`.
+/// `request_stop()` on a default-constructed token is a no-op. Construct a
+/// signalable token via `CancellationToken::makeOwned()`; that variant
+/// allocates one shared atomic on the heap and copies share it via
+/// `shared_ptr`. `stop_requested()` and `request_stop()` are `noexcept` and
+/// allocation-free regardless of construction path.
 class CancellationToken {
 public:
   /// Construct a "never-stopped" sentinel token without heap allocation.
