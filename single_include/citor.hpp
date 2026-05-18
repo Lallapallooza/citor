@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 //
 // citor -- header-only C++20 thread pool
-// version: 0.4.0
-// commit:  092a4d25083f6ec6723713b6d89b8073be7585d4
-// generated: 2026-05-19
+// version: 0.4.1
+// commit:  3b316a908fdcaad7dcda8b291262fede245b7010
+// generated: 2026-05-18
 //
 // GENERATED FILE -- DO NOT EDIT.
 // Run `python tools/amalgamate.py` to regenerate.
@@ -13704,4 +13704,4 @@ private:
 // `#define CITOR_VERSION_PATCH 0` lose the version literal a regex can pin
 // against.
 
-#define CITOR_VERSION_STRING "0.4.0"
+#define CITOR_VERSION_STRING "0.4.1"
