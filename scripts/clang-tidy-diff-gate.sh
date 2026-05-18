@@ -27,8 +27,10 @@ fi
 # Skip CPM-fetched third-party sources. CMake's global CXX_CLANG_TIDY
 # applies to every target including transitively-built dependencies
 # (e.g. oneTBB built as a static lib for the bench); we only ever want
-# to lint citor's own code.
-if [[ "$src" == */_deps/* ]]; then
+# to lint citor's own code. CPM puts sources under `_deps/` by default,
+# or under `$CPM_SOURCE_CACHE` (CI uses `.cache/CPM/`) when that env var
+# is set.
+if [[ "$src" == */_deps/* || "$src" == */CPM/* || "$src" == */.cache/CPM/* ]]; then
   exit 0
 fi
 
