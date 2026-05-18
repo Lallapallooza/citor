@@ -203,14 +203,15 @@ run_arch() {
   log "=== arch=$arch sku=$sku (unpinned) ==="
   log "output dir: $out_dir"
 
-  local ami sg_id sir_id instance_id host
+  # Do not localize `sg_id`/`sir_id`/`instance_id`: the EXIT trap's
+  # `cleanup` reads them from global scope.
+  local ami host
   ami="$(resolve_ubuntu_ami)"
   log "ami=$ami"
 
   local sg_name="citor-bench-${TS}-${arch}"
-  # Reset shared globals before each arch (`both` invokes run_arch twice
-  # in sequence). The cleanup function reads these by name; they MUST be
-  # globals so the EXIT trap can still see them after `run_arch` returns.
+  # Reset the shared globals before each arch (`both` invokes run_arch twice
+  # in sequence).
   sg_id=""
   instance_id=""
   sir_id=""
