@@ -4,18 +4,14 @@
 # When the upstream microsoft/vcpkg PR merges, the overlay flag goes away
 # and the canonical `vcpkg install citor` works.
 #
-# To bump the version:
-#   1. Update REF below to the new tag.
-#   2. Run `vcpkg install citor --overlay-ports=...` once locally; vcpkg
-#      will print the expected SHA512 on first failure. Paste it into the
-#      SHA512 line.
-#   3. Update vcpkg.json `version`.
+# Uses `vcpkg_from_git` so the git commit SHA is the verification: there is
+# no tarball hash to recompute per release. To bump the version, update
+# `vcpkg.json` `version`; `${VERSION}` flows from there.
 
-vcpkg_from_github(
+vcpkg_from_git(
     OUT_SOURCE_PATH SOURCE_PATH
-    REPO Lallapallooza/citor
+    URL https://github.com/Lallapallooza/citor.git
     REF "v${VERSION}"
-    SHA512 0
     HEAD_REF main
 )
 
