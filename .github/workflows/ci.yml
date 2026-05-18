@@ -151,6 +151,24 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             $CITOR_CMAKE_EXTRA
 
+      - name: Compute tidy file list
+        run: |
+          # Tidy on the diff only. Any header, CMake or tidy-config change
+          # invalidates downstream TUs we cannot enumerate from the diff,
+          # so those force `__ALL__`.
+          if [[ "${{ github.event_name }}" == pull_request ]]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE="HEAD~1"
+          fi
+          CHANGED=$(git diff --name-only "$BASE" HEAD)
+          if grep -qE '\.(h|hpp|tcc)$|(^|/)\.clang-tidy$|(^|/)CMakeLists\.txt$|^cmake/.*\.cmake$|^scripts/clang-tidy-diff-gate\.sh$' <<<"$CHANGED"; then
+            echo "CITOR_TIDY_FILES=__ALL__" >> "$GITHUB_ENV"
+          else
+            FILES=$(grep -E '\.cpp$' <<<"$CHANGED" | paste -sd: -)
+            echo "CITOR_TIDY_FILES=$FILES" >> "$GITHUB_ENV"
+          fi
+
       - name: Build
         run: cmake --build build -j
 
