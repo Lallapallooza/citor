@@ -87,7 +87,7 @@ citor::ThreadPool pool(/*participants=*/8);
 These points are API contract, not implementation trivia.
 
 - **Header-only.** Including modular headers under `include/citor/` or the generated `single_include/citor.hpp` is enough; there is no library binary to link. Linked C++ runtime + `pthread` are the only runtime dependencies.
-- **CPU-bound and synchronous.** No `co_await` surface, no future, no I/O reactor. Bodies that block on I/O, sleeps, or external locks defeat the latency contract.
+- **CPU-bound and synchronous engine.** No future surface, no I/O reactor. An opt-in coroutine wrapper at `<citor/coro.h>` (see [Coroutine wrapper](#coroutine-wrapper-optional)) is the only `co_await` surface. Bodies that block on I/O, sleeps, or external locks defeat the latency contract.
 - **`ThreadPool(participants)` is the total participant count, including the calling thread.** A pool of `8` runs the caller plus `7` background pthreads, subject to topology and affinity-mask clamping. Query the effective count with `pool.participants()`. `participants == 0` throws `std::invalid_argument`.
 - **Closure lifetime >= call lifetime.** Every primitive captures the body via a 16-byte non-owning `FunctionRef`. The callable must outlive the synchronous call. Captures in the producer's stack frame satisfy this for free.
 - **Producer participates as slot 0.** Single-participant pools fall through to the inline path and never wake a worker.
@@ -109,25 +109,25 @@ Cell legend: ✅ full, 🟡 partial or qualified, ❌ none. Capability columns:
 - **Plex**: workers persistent across N phases without wake/park.
 - **Arena**: per-CCD or shared-L3 arenas with TLS guard.
 - **Det**: bit-identical reduce across worker counts.
-- **<us**: sub-microsecond fan-out floor on Linux x86_64.
+- **<1µs@2**: sub-microsecond empty fan-out at j=2 hot in the `empty_fan_out_j2_hot` bench cell.
 - **Hdr**: header-only.
 - **P=0**: producer participates as slot 0 (no caller wake).
 
-| Pool                       | F-J | Chain | Plex | Arena | Det  | <us | Hdr  | P=0 |
-|----------------------------|:---:|:-----:|:----:|:-----:|:----:|:---:|:----:|:---:|
-| `citor`                    | ✅  | ✅    | ✅   | ✅    | ✅   | ✅  | ✅   | ✅  |
-| `BS::thread_pool`          | ❌  | ❌    | ❌   | ❌    | ❌   | ❌  | ✅   | ❌  |
-| `dp::thread_pool`          | ❌  | ❌    | ❌   | ❌    | ❌   | ❌  | ✅   | ❌  |
-| `task_thread_pool`         | ❌  | ❌    | ❌   | ❌    | ❌   | ❌  | ✅   | ❌  |
-| `riften::Thiefpool`        | ✅  | ❌    | ❌   | ❌    | ❌   | ✅  | ✅   | ❌  |
-| `oneTBB`                   | ✅  | ✅    | 🟡¹  | 🟡²   | 🟡³  | ✅  | ❌   | ❌  |
-| `Taskflow`                 | ✅  | ✅    | 🟡¹  | ❌    | ❌   | ✅  | ✅   | ❌  |
-| `Eigen::ThreadPool`        | ❌  | ❌    | ❌   | ❌    | ❌   | ❌  | ✅   | ❌  |
-| `Leopard`                  | ❌  | ❌    | ❌   | ❌    | ❌   | ❌  | ✅   | ❌  |
-| `dispenso`                 | ✅  | ❌    | ❌   | ❌    | ❌   | ✅  | ✅   | ❌  |
-| `OpenMP`                   | 🟡⁴ | ❌    | 🟡⁵  | ❌    | ❌   | ✅  | 🟡⁶  | ❌  |
-| `libfork` (coroutine)      | ✅  | ❌    | ❌   | ❌    | ❌   | ✅  | ✅   | ❌  |
-| `TooManyCooks` (coroutine) | ✅  | ❌    | ❌   | ❌    | ❌   | ✅  | ✅   | ❌  |
+| Pool                       | F-J | Chain | Plex | Arena | Det  | <1µs@2 | Hdr  | P=0 |
+|----------------------------|:---:|:-----:|:----:|:-----:|:----:|:------:|:----:|:---:|
+| `citor`                    | ✅  | ✅    | ✅   | ✅    | ✅   | ✅     | ✅   | ✅  |
+| `BS::thread_pool`          | ❌  | ❌    | ❌   | ❌    | ❌   | ❌     | ✅   | ❌  |
+| `dp::thread_pool`          | ❌  | ❌    | ❌   | ❌    | ❌   | ❌     | ✅   | ❌  |
+| `task_thread_pool`         | ❌  | ❌    | ❌   | ❌    | ❌   | ❌     | ✅   | ❌  |
+| `riften::Thiefpool`        | ❌  | ❌    | ❌   | ❌    | ❌   | ❌     | ✅   | ❌  |
+| `oneTBB`                   | ✅  | 🟡⁷   | 🟡¹  | 🟡²   | 🟡³  | ✅     | ❌   | ✅  |
+| `Taskflow`                 | ✅  | 🟡⁷   | 🟡¹  | ❌    | ❌   | ❌     | ✅   | ❌  |
+| `Eigen::ThreadPool`        | ❌  | ❌    | ❌   | ❌    | ❌   | ❌     | ✅   | ❌  |
+| `Leopard`                  | ❌  | ❌    | ❌   | ❌    | ❌   | ❌     | ✅   | ❌  |
+| `dispenso`                 | ✅  | 🟡⁷   | ❌   | ❌    | ❌   | ✅     | ❌   | ✅  |
+| `OpenMP`                   | 🟡⁴ | ❌    | 🟡⁵  | ❌    | ❌   | ❌     | 🟡⁶  | ✅  |
+| `libfork` (coroutine)      | ✅  | ❌    | ❌   | ❌    | ❌   | 🟡⁸    | ✅   | ✅  |
+| `TooManyCooks` (coroutine) | ✅  | ❌    | ❌   | ❌    | ❌   | 🟡⁸    | ✅   | ✅  |
 
 ¹ Worker team persists within a single `parallel_for` or pipeline region; consecutive regions still pay teardown plus wake on the next region. citor's `runPlex` keeps the same team live across N user-defined phases under one descriptor.
 
@@ -140,6 +140,10 @@ Cell legend: ✅ full, 🟡 partial or qualified, ❌ none. Capability columns:
 ⁵ libomp's `kmp_blocktime` keeps the team spinning between `parallel` regions, but the team is not a first-class N-phase contract; cross-region rendezvous goes through the OpenMP runtime.
 
 ⁶ OpenMP is a compiler runtime plus a header, not header-only; consumers link `libomp` (clang) or `libgomp` (gcc).
+
+⁷ Ships a related multi-stage primitive (TBB `parallel_pipeline`, Taskflow `tf::Pipeline`, dispenso `pipeline.h` / `graph.h`); the bench shim emulates chain via back-to-back fan-outs rather than driving those.
+
+⁸ Not exercised in the `empty_fan_out_*` sweep; coroutine pools only run the recursive fork-join workloads.
 
 `citor` is a different shape from any single peer. For one-shot throughput fan-out over uniform ranges, `BS::thread_pool` and `OpenMP` are simpler. citor fits workloads that combine short phases, deterministic reductions, recursive irregular work, and CCD-aware locality in one library, behind a header-only INTERFACE target.
 
@@ -339,7 +343,7 @@ citor::parallelFor.template operator()<citor::HintsDefaults>(
 
 ### Coroutine wrapper (optional)
 
-`<citor/coro.h>` is an opt-in header that exposes every primitive as an awaitable for use from C++20 coroutines. Nothing in the engine changes when the header is not included; the wrapper routes each call through `submitDetached` and resumes the awaiting coroutine when the wrapped primitive returns.
+`<citor/coro.h>` is an opt-in header that exposes every primitive as a C++20 awaitable. Each `co_await` is queued on a per-pool driver thread (lazy, joined at process exit) that runs the body and resumes the coroutine.
 
 ```cpp
 #include <citor/coro.h>
@@ -358,9 +362,9 @@ std::int64_t result = citor::coro::syncWait(work(pool));
 Tradeoffs vs. the direct synchronous primitives:
 
 - Coroutine frames are heap-allocated by the compiler.
-- One worker plays the wrapped primitive's "producer" role until it returns; the rest of the pool fans out as usual.
+- Per-await cost is a queue push + futex wake. Sequential awaits serialize through the driver; concurrent awaits in one coroutine bottleneck on it.
 
-The wrapper is a convenience for users whose call sites are already in coroutine code. Performance-critical paths should keep using the synchronous primitives.
+Performance-critical paths should keep using the synchronous primitives.
 
 ## ThreadPool lifecycle
 
@@ -567,7 +571,7 @@ template <class HintsT, class... TaskFns>
 void forkJoin(CancellationToken tok, TaskFns &&...fns);
 ```
 
-The producer participates as slot 0 and steals from other workers' deques when its own drains. `Affinity::CcdLocal` (the default and the named preset `CcdLocalForkJoinHints`) biases steal probes to same-CCD victims first.
+The producer participates as slot 0 and steals from other workers' deques when its own drains. `StealPolicy::ClusterLocal` (the default and the named preset `CcdLocalForkJoinHints`) biases steal probes to same-CCD victims first.
 
 **Exception handling**: the first exception escaping any task body is captured and rethrown from the producer after the join. Subsequent throws drop. The remaining tasks are cancelled so the join doesn't block on quiescence.
 
@@ -575,7 +579,7 @@ The producer participates as slot 0 and steals from other workers' deques when i
 
 ### `submitDetached`
 
-Fire-and-forget. The pool's destructor blocks until every detached body has retired; until then, the pool's lifetime extends every in-flight body.
+Fire-and-forget. The pool's destructor blocks until every detached body has retired; until then, the pool's lifetime extends every in-flight body. The body runs on a dedicated `std::thread` spawned per call, not on a persistent worker, so this is a cold-path primitive.
 
 ```cpp
 template <class HintsT, class TaskFn>
@@ -608,7 +612,7 @@ Cross-arena calls (worker on `PoolGroup` arena A invokes a synchronous primitive
 
 ## Cookbook
 
-Each recipe pairs a workload with the matching primitive. The "Why this primitive" line at the end names the citor-specific reason the call shape was the right pick. All snippets assume `citor::ThreadPool pool;` is in scope.
+Each recipe pairs a workload with the matching primitive. The "Why this primitive" line at the end names the citor-specific reason the call shape was the right pick. All snippets assume a `citor::ThreadPool pool(N)` is in scope (e.g. `pool(8)`).
 
 ### Audio buffer per-sample gain (`parallelFor`)
 
@@ -941,7 +945,8 @@ Each compile-time primitive call templates on a hint type. Start from a preset a
 
 ```cpp
 struct MyHints : citor::HintsDefaults {
-  static constexpr citor::Affinity affinity  = citor::Affinity::CcdLocal;
+  static constexpr citor::Affinity affinity     = citor::Affinity::PerCluster;
+  static constexpr citor::StealPolicy stealPolicy = citor::StealPolicy::ClusterLocal;
   static constexpr double          minTaskUs = 25.0;
   static constexpr std::size_t     chunk     = 4096;
 };
@@ -953,7 +958,8 @@ struct MyHints : citor::HintsDefaults {
 |----------------------|-----------------|--------------------|------------------|
 | `balance`            | `Balance`       | `DynamicChunked`   | `StaticUniform` (worker-strided block partition, deterministic block->rank) vs `DynamicChunked` (atomic counter, straggler-tolerant). Reduce primitives override this internally to `StaticUniform`. |
 | `determinism`        | `Determinism`   | `FixedBlockOrder`  | `parallelReduce` only. `FixedBlockOrder` = chunk-id pairwise tree. `KahanCompensated` = Kahan/Neumaier on top. |
-| `affinity`           | `Affinity`      | `CcdLocal`         | `forkJoin` steal-victim direction. `CcdLocal` biases same-CCD victims first. |
+| `affinity`           | `Affinity`      | `PerCluster`       | Worker placement: `None` / `PerCpu` / `PerCpuSmtPair` / `PerCluster`. Sets where worker threads are pinned at construction time. |
+| `stealPolicy`        | `StealPolicy`   | `ClusterLocal`     | `forkJoin` steal-victim direction: `Global` (any worker) or `ClusterLocal` (biases same-CCD victims first). |
 | `priority`           | `Priority`      | `Throughput`       | Two-bucket gate when concurrent producers contend. `Latency` jumps the gate; `Background` yields. Single-producer pools see no priority effect. |
 | `estimatedItemNs`    | `double`        | `0.0`              | Per-item cost estimate. With `minTaskUs > 0`, gates the inline fallback as `n * estimatedItemNs * 1e-3 < minTaskUs * participants`. |
 | `minTaskUs`          | `double`        | `0.0`              | Minimum task wall time that justifies fan-out. Pair with `estimatedItemNs`. `0.0` disables the gate. |
@@ -971,7 +977,7 @@ struct MyHints : citor::HintsDefaults {
 | `BulkHints`               | `minTaskUs = 25.0`, `cancellationChecks = false`          | hot uniform-cost loops with no cancellation. |
 | `KahanReduceHints`        | `determinism = KahanCompensated`, `minTaskUs = 25.0`      | numerically sensitive sums (`parallelReduce`). |
 | `FixedBlockReduceHints`   | `minTaskUs = 25.0`                                        | integer or order-insensitive reductions (`parallelReduce`). |
-| `CcdLocalForkJoinHints`   | `affinity = CcdLocal`                                     | recursive fork-join workloads with cross-CCD locality. |
+| `CcdLocalForkJoinHints`   | `stealPolicy = ClusterLocal`                              | recursive fork-join workloads with cross-CCD locality. |
 | `ChainHintsDefaults`      | chain shape: `balance = StaticUniform`, `pipelineSameChunk = true` | most chains. |
 | `DynamicChainHints`       | chain shape: `balance = DynamicChunked`, `pipelineSameChunk = false` | stage packs with skewed bodies and only `Global` / `DeterministicReduce` barriers. |
 
@@ -1251,7 +1257,7 @@ Known gaps where citor leaves performance on the table:
 - **Topology-aware dispatch and pinning.** `detail::topology::detectTopology()` enumerates Zen CCDs from sysfs and the engine's dispatch hot path, steal probe, and pinning policy are all shaped by that assumption (8-16 cores per cluster, shared L3, fast intra-cluster coherence). It does not yet model multi-socket EPYC, sub-NUMA-clustering, hybrid P/E cores, asymmetric L3 across chiplets, or Intel's mesh interconnect with tile partitioning. Richer detection plus per-architecture dispatch paths are what unlocks `PoolGroup`'s per-cluster shape on complex server CPUs and on Sapphire Rapids / Granite Rapids parts.
 - **Per-CCD aggregation in the done-epoch barrier.** The producer's join is currently a per-slot acquire-load scan, linear in participant count. The cluster machinery present in `parallelScan` (`clusterIdOfSlot`, `clusterTotals`, `clusterPrefixes`) could be reused so the producer reads one aggregate per CCD instead of one per slot.
 - **Adaptive partitioning for `parallelReduce` on heavy-tailed bodies.** `parallelReduce` partitions into static contiguous chunks and a worker stops after its local range, with no work-stealing after local completion. An opt-in adaptive-bisect mode, gated by hint so the uniform-reduce hot path is unchanged, is the missing primitive shape.
-- **Coroutine-native fork-join.** `include/citor/coro.h` exposes every primitive as an awaitable that routes through `submitDetached` (one heap-allocated frame per call). A continuation-stealing scheduler that avoids the synchronous round-trip would be a separate engine, not a wrapper.
+- **Coroutine-native fork-join.** `include/citor/coro.h` queues each call on a per-pool driver thread. A continuation-stealing scheduler would be a separate engine.
 
 ## Contributing
 
