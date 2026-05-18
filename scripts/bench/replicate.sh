@@ -172,9 +172,47 @@ cmake -S . -B build -G Ninja \
 cmake --build build --target parallel_bench -j >&2
 mkdir -p /tmp/out
 # Unpinned: lets the bench's per-cell j sweep exercise the whole box.
-./build/benchmark/parallel_bench \
-  ${FILTER:+--filter "$FILTER"} \
-  --export /tmp/out/results.json
+if [ "$ISOLATED" = "1" ]; then
+  ./build/benchmark/parallel_bench --list > /tmp/registry.txt
+  if [ -f /tmp/resume.log ]; then
+    # All started cells except the last (potentially crashed mid-run) are done.
+    grep -oE '\[[0-9]+/[0-9]+\] \(.*\) starting: [A-Za-z0-9_]+' /tmp/resume.log \
+      | awk '{print $NF}' | head -n -1 > /tmp/done.txt
+    grep -vxF -f /tmp/done.txt /tmp/registry.txt > /tmp/pending.txt
+  else
+    cp /tmp/registry.txt /tmp/pending.txt
+  fi
+  if [ -n "${FILTER:-}" ]; then
+    grep -F "$FILTER" /tmp/pending.txt > /tmp/pending.filtered && mv /tmp/pending.filtered /tmp/pending.txt
+  fi
+  total=$(wc -l < /tmp/pending.txt)
+  idx=0
+  rm -f /tmp/out/cell-*.json
+  while read -r cell; do
+    idx=$((idx + 1))
+    echo "[$idx/$total] isolated: $cell"
+    timeout 1800 ./build/benchmark/parallel_bench \
+      --filter "$cell" --export "/tmp/out/cell-$idx.json" || \
+      echo "[$idx/$total] $cell exited non-zero (likely peer segfault); continuing"
+  done < /tmp/pending.txt
+  # Merge per-cell JSONs into one. Keep first schema_version + context;
+  # concat samples.
+  shopt -s nullglob
+  cells=(/tmp/out/cell-*.json)
+  if [ "${#cells[@]}" -gt 0 ]; then
+    jq -s '{
+      schema_version: .[0].schema_version,
+      context: .[0].context,
+      samples: (map(.samples) | add)
+    }' "${cells[@]}" > /tmp/out/results.json
+  else
+    echo '{"schema_version":0,"context":{},"samples":[]}' > /tmp/out/results.json
+  fi
+else
+  ./build/benchmark/parallel_bench \
+    ${FILTER:+--filter "$FILTER"} \
+    --export /tmp/out/results.json
+fi
 # Capture host provenance for the JSON sidecar.
 {
   echo "{"
@@ -279,6 +317,13 @@ run_arch() {
     -i "$SSH_KEY_FILE" \
     "$repo_tarball" ubuntu@"$host":/tmp/citor.tar.gz
 
+  if [ -n "$RESUME_LOG" ]; then
+    log "shipping resume log $RESUME_LOG ..."
+    scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      -i "$SSH_KEY_FILE" \
+      "$RESUME_LOG" ubuntu@"$host":/tmp/resume.log
+  fi
+
   local remote_script="/tmp/citor-bench-runner.sh"
   remote_bench_script | ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -i "$SSH_KEY_FILE" ubuntu@"$host" "cat > $remote_script && chmod +x $remote_script"
@@ -286,7 +331,7 @@ run_arch() {
   log "running bench remotely (this takes ~1 h on the slow tail; live progress lands in run.log)..."
   ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -i "$SSH_KEY_FILE" ubuntu@"$host" \
-    "SHA='$SHA' INSTANCE_TYPE='$sku' REGION='$REGION' FILTER='${FILTER:-}' bash $remote_script" \
+    "SHA='$SHA' INSTANCE_TYPE='$sku' REGION='$REGION' FILTER='${FILTER:-}' ISOLATED='$ISOLATED' bash $remote_script" \
     2>&1 | tee -a "$log_file"
 
   log "pulling results ..."
@@ -311,13 +356,21 @@ fi
 WHAT="$1"; shift
 FILTER=""
 ON_DEMAND=0
+ISOLATED=0
+RESUME_LOG=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --filter) FILTER="$2"; shift 2 ;;
     --on-demand) ON_DEMAND=1; shift ;;
+    --isolated) ISOLATED=1; shift ;;
+    --resume-from) RESUME_LOG="$2"; ISOLATED=1; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+if [ -n "$RESUME_LOG" ] && [ ! -f "$RESUME_LOG" ]; then
+  echo "--resume-from: file not found: $RESUME_LOG" >&2
+  exit 2
+fi
 
 case "$WHAT" in
   amd|intel) run_arch "$WHAT" ;;
