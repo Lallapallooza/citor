@@ -17,7 +17,7 @@ from conan.tools.layout import basic_layout
 
 class CitorConan(ConanFile):
     name = "citor"
-    version = "0.3.0"
+    version = "0.4.0"
     license = "MIT"
     homepage = "https://github.com/Lallapallooza/citor"
     url = "https://github.com/Lallapallooza/citor"
