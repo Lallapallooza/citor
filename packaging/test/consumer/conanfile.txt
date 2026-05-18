@@ -1,5 +1,5 @@
 [requires]
-citor/0.2.2
+citor/0.3.0
 
 [generators]
 CMakeDeps
