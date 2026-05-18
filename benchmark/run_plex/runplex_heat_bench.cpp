@@ -172,7 +172,7 @@ measureHeatWith(const char *displayName, std::size_t participants,
 
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     const double sum = runOnce();
-    CITOR_ALWAYS_ASSERT(sum == referenceChecksum);
+    BENCH_CHECK_OR_THROW(sum == referenceChecksum, "runplex_heat_bench.cpp");
   }
 
   std::vector<double> samples;
@@ -182,7 +182,7 @@ measureHeatWith(const char *displayName, std::size_t participants,
     const double sum = runOnce();
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-    CITOR_ALWAYS_ASSERT(sum == referenceChecksum);
+    BENCH_CHECK_OR_THROW(sum == referenceChecksum, "runplex_heat_bench.cpp");
   }
 
   return finalizeRow(displayName, samples);

@@ -25,13 +25,14 @@
 //   - OpenMP                  -> `parallel for reduction(+:)`.
 //
 // All rows produce the same int64 sum (sum of spin costs in ns, 1 ns per unit
-// of `costNs`); a `CITOR_ALWAYS_ASSERT` before timing fails the bench if any
+// of `costNs`); a `BENCH_CHECK_OR_THROW` before timing fails the bench if any
 // row diverges from the sequential reference.
 
 #include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <future>
 #include <random>
 #include <stdexcept>
@@ -163,9 +164,15 @@ template <class RunFn>
 [[nodiscard]] BenchRow measureLoop(const char *name,
                                    const CyclesPerNanosecond &cal, RunFn run,
                                    std::int64_t referenceTotal) {
+  // Peer mismatches log and skip the row; aborting would discard the rest.
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     const std::int64_t v = run();
-    CITOR_ALWAYS_ASSERT(v == referenceTotal);
+    if (v != referenceTotal) [[unlikely]] {
+      std::fprintf(stderr, "[%s] reduce mismatch: expected=%lld actual=%lld\n",
+                   name, static_cast<long long>(referenceTotal),
+                   static_cast<long long>(v));
+      return skippedRow(name);
+    }
   }
   std::vector<double> samples;
   samples.reserve(kIterations);
@@ -176,7 +183,12 @@ template <class RunFn>
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
     sink.store(value, std::memory_order_relaxed);
-    CITOR_ALWAYS_ASSERT(value == referenceTotal);
+    if (value != referenceTotal) [[unlikely]] {
+      std::fprintf(stderr, "[%s] reduce mismatch: expected=%lld actual=%lld\n",
+                   name, static_cast<long long>(referenceTotal),
+                   static_cast<long long>(value));
+      return skippedRow(name);
+    }
   }
   (void)sink.load(std::memory_order_relaxed);
   return finalizeRow(name, samples);

@@ -416,7 +416,8 @@ measureMatmulWith(const char *displayName, std::size_t participants,
         }
       }
     }
-    CITOR_ALWAYS_ASSERT(std::memcmp(cBase, refBase, refBytes) == 0);
+    BENCH_CHECK_OR_THROW(std::memcmp(cBase, refBase, refBytes) == 0,
+                         "matmul_bench.cpp");
   };
 
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {

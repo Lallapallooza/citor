@@ -97,7 +97,7 @@ template <class RunFn>
                                    std::uint64_t referenceXor) {
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     const std::uint64_t v = run();
-    CITOR_ALWAYS_ASSERT(v == referenceXor);
+    BENCH_CHECK_OR_THROW(v == referenceXor, "affinity_sweep_bench.cpp");
   }
   std::vector<double> samples;
   samples.reserve(kIterations);
@@ -106,7 +106,7 @@ template <class RunFn>
     const std::uint64_t value = run();
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-    CITOR_ALWAYS_ASSERT(value == referenceXor);
+    BENCH_CHECK_OR_THROW(value == referenceXor, "affinity_sweep_bench.cpp");
   }
   return finalizeRow(name, samples);
 }

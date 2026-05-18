@@ -465,7 +465,7 @@ BenchRow runTmcUtsT1(std::size_t participants, const CyclesPerNanosecond &cal) {
   for (std::size_t i = 0; i < kUtsWarmupIterations; ++i) {
     parallelCount = runOnce();
   }
-  CITOR_ALWAYS_ASSERT(parallelCount == kExpectedNodes);
+  BENCH_CHECK_OR_THROW(parallelCount == kExpectedNodes, "tmc_runners.cpp");
 
   std::vector<double> samples;
   samples.reserve(kUtsIterations);
@@ -474,7 +474,7 @@ BenchRow runTmcUtsT1(std::size_t participants, const CyclesPerNanosecond &cal) {
     const std::int64_t count = runOnce();
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-    CITOR_ALWAYS_ASSERT(count == kExpectedNodes);
+    BENCH_CHECK_OR_THROW(count == kExpectedNodes, "tmc_runners.cpp");
   }
   return finalizeRow("tmc::cpu_executor", samples);
 }
@@ -834,7 +834,7 @@ BenchRow runTmcStrassen(std::size_t participants, std::size_t n,
       }
     }
     const float tolerance = strassenTolerance(n);
-    CITOR_ALWAYS_ASSERT(maxDiff <= tolerance);
+    BENCH_CHECK_OR_THROW(maxDiff <= tolerance, "tmc_runners.cpp");
   };
 
   for (std::size_t i = 0; i < kStrassenWarmupIterations; ++i) {
@@ -872,7 +872,7 @@ BenchRow runTmcCilksort(std::size_t participants, std::size_t n,
     tmc::post_waitable(tmc::cpu_executor(),
                        cilksortCoro(data.data(), tmp.data(), 0U, n))
         .wait();
-    CITOR_ALWAYS_ASSERT(data == reference);
+    BENCH_CHECK_OR_THROW(data == reference, "tmc_runners.cpp");
   }
 
   std::vector<double> samples;
@@ -885,7 +885,7 @@ BenchRow runTmcCilksort(std::size_t participants, std::size_t n,
         .wait();
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-    CITOR_ALWAYS_ASSERT(data == reference);
+    BENCH_CHECK_OR_THROW(data == reference, "tmc_runners.cpp");
   }
   return finalizeRow("tmc::cpu_executor", samples);
 }
@@ -997,7 +997,7 @@ BenchRow runTmcMatmulDac(std::size_t participants, std::size_t n,
         maxDiff = diff;
       }
     }
-    CITOR_ALWAYS_ASSERT(maxDiff <= tolerance);
+    BENCH_CHECK_OR_THROW(maxDiff <= tolerance, "tmc_runners.cpp");
   };
 
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
@@ -1073,7 +1073,7 @@ BenchRow runTmcSkynet(std::size_t participants,
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     result = runOnce();
   }
-  CITOR_ALWAYS_ASSERT(result == kExpectedSum);
+  BENCH_CHECK_OR_THROW(result == kExpectedSum, "tmc_runners.cpp");
 
   std::vector<double> samples;
   samples.reserve(kIterations);
@@ -1082,7 +1082,7 @@ BenchRow runTmcSkynet(std::size_t participants,
     result = runOnce();
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-    CITOR_ALWAYS_ASSERT(result == kExpectedSum);
+    BENCH_CHECK_OR_THROW(result == kExpectedSum, "tmc_runners.cpp");
   }
   return finalizeRow("tmc::cpu_executor", samples);
 }

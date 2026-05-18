@@ -45,14 +45,15 @@ constexpr std::int64_t kHdrMaxNs = 1'000'000'000LL;
 constexpr int kHdrSigDigits = 3;
 
 // RAII wrapper around HdrHistogram_c. Allocation failure aborts via
-// CITOR_ALWAYS_ASSERT.
+// BENCH_CHECK_OR_THROW.
 class HdrHistogramHandle {
 public:
   HdrHistogramHandle() {
     const int rc = ::hdr_init(/*lowest_discernible_value=*/1, kHdrMaxNs,
                               kHdrSigDigits, &m_hist);
-    CITOR_ALWAYS_ASSERT(rc == 0);
-    CITOR_ALWAYS_ASSERT(m_hist != nullptr);
+    BENCH_CHECK_OR_THROW(rc == 0, "parallel_for_cold_dispatch_bench.cpp");
+    BENCH_CHECK_OR_THROW(m_hist != nullptr,
+                         "parallel_for_cold_dispatch_bench.cpp");
   }
   HdrHistogramHandle(const HdrHistogramHandle &) = delete;
   HdrHistogramHandle &operator=(const HdrHistogramHandle &) = delete;
@@ -101,9 +102,10 @@ measureColdDispatchWith(const char *displayName, std::size_t participants,
 
   // Correctness gate: warmup alone must have driven sink to
   // kWarmupIterations * participants. Fires before the timing window opens.
-  CITOR_ALWAYS_ASSERT(sink.load(std::memory_order_relaxed) ==
-                      static_cast<std::uint64_t>(kWarmupIterations) *
-                          static_cast<std::uint64_t>(participants));
+  BENCH_CHECK_OR_THROW(sink.load(std::memory_order_relaxed) ==
+                           static_cast<std::uint64_t>(kWarmupIterations) *
+                               static_cast<std::uint64_t>(participants),
+                       "parallel_for_cold_dispatch_bench.cpp");
 
   const HdrHistogramHandle hist;
 
@@ -129,10 +131,11 @@ measureColdDispatchWith(const char *displayName, std::size_t participants,
   }
 
   // Final correctness gate.
-  CITOR_ALWAYS_ASSERT(
+  BENCH_CHECK_OR_THROW(
       sink.load(std::memory_order_relaxed) ==
-      static_cast<std::uint64_t>(kWarmupIterations + kIterations) *
-          static_cast<std::uint64_t>(participants));
+          static_cast<std::uint64_t>(kWarmupIterations + kIterations) *
+              static_cast<std::uint64_t>(participants),
+      "parallel_for_cold_dispatch_bench.cpp");
 
   BenchRow row = finalizeRow(displayName, samples);
   if (tailPercentilesEnabled()) {

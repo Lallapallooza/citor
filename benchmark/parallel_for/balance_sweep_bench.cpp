@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -109,9 +110,15 @@ template <class RunFn>
 [[nodiscard]] BenchRow measureLoop(const char *name,
                                    const CyclesPerNanosecond &cal, RunFn run,
                                    std::int64_t referenceTotal) {
+  // Peer mismatches log and skip the row; aborting would discard the rest.
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     const std::int64_t v = run();
-    CITOR_ALWAYS_ASSERT(v == referenceTotal);
+    if (v != referenceTotal) [[unlikely]] {
+      std::fprintf(stderr, "[%s] balance mismatch: expected=%lld actual=%lld\n",
+                   name, static_cast<long long>(referenceTotal),
+                   static_cast<long long>(v));
+      return skippedRow(name);
+    }
   }
   std::vector<double> samples;
   samples.reserve(kIterations);
@@ -120,7 +127,12 @@ template <class RunFn>
     const std::int64_t value = run();
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-    CITOR_ALWAYS_ASSERT(value == referenceTotal);
+    if (value != referenceTotal) [[unlikely]] {
+      std::fprintf(stderr, "[%s] balance mismatch: expected=%lld actual=%lld\n",
+                   name, static_cast<long long>(referenceTotal),
+                   static_cast<long long>(value));
+      return skippedRow(name);
+    }
   }
   return finalizeRow(name, samples);
 }

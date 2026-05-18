@@ -110,7 +110,7 @@ template <class RunFn>
                                    std::int64_t referenceTotal) {
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     const std::int64_t v = run();
-    CITOR_ALWAYS_ASSERT(v == referenceTotal);
+    BENCH_CHECK_OR_THROW(v == referenceTotal, "runplex_stencil_bench.cpp");
   }
   std::vector<double> samples;
   samples.reserve(kIterations);
@@ -119,7 +119,7 @@ template <class RunFn>
     const std::int64_t value = run();
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-    CITOR_ALWAYS_ASSERT(value == referenceTotal);
+    BENCH_CHECK_OR_THROW(value == referenceTotal, "runplex_stencil_bench.cpp");
   }
   return finalizeRow(name, samples);
 }

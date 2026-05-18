@@ -20,7 +20,7 @@
 // rows in a single `BenchTable`, one per producer/arena placement.
 //
 // Internal correctness: each iteration's parallel sum must equal the
-// sequential reference; `CITOR_ALWAYS_ASSERT` aborts on mismatch BEFORE the
+// sequential reference; `BENCH_CHECK_OR_THROW` aborts on mismatch BEFORE the
 // timing window closes (the assert lives inside the timed block, but the
 // check is cheap relative to the 64 MiB-buffer touch loop and only fires on
 // real bugs).
@@ -162,9 +162,11 @@ private:
                                   std::size_t arenaCcd,
                                   const CyclesPerNanosecond &cal) {
   MultiArenaHarness harness{/*requiredCcds=*/2U};
-  CITOR_ALWAYS_ASSERT(arenaCcd < harness.arenaCount());
+  BENCH_CHECK_OR_THROW(arenaCcd < harness.arenaCount(),
+                       "cross_ccd_parallel_for_bench.cpp");
   citor::ThreadPool &pool = harness.arena(arenaCcd);
-  CITOR_ALWAYS_ASSERT(pool.kind() == citor::PoolKind::Arena);
+  BENCH_CHECK_OR_THROW(pool.kind() == citor::PoolKind::Arena,
+                       "cross_ccd_parallel_for_bench.cpp");
 
   const ScopedThreadPin pin(producerCpu);
 
@@ -197,7 +199,8 @@ private:
   };
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     const double sum = runOnce();
-    CITOR_ALWAYS_ASSERT(sum == expectedSum());
+    BENCH_CHECK_OR_THROW(sum == expectedSum(),
+                         "cross_ccd_parallel_for_bench.cpp");
   }
 
   std::vector<double> samples;
@@ -222,10 +225,11 @@ private:
 
     // Cheap correctness check: a stride-shifted spot-check confirms the body
     // ran over the full range without paying the O(n) sequential sum on the
-    // hot path. Mismatch aborts via CITOR_ALWAYS_ASSERT.
+    // hot path. Mismatch throws via BENCH_CHECK_OR_THROW; the harness reports
+    // SKIPPED.
     const std::size_t stride = kElementCount / 64U;
     for (std::size_t k = 0; k < kElementCount; k += stride) {
-      CITOR_ALWAYS_ASSERT(data[k] == 1.0F);
+      BENCH_CHECK_OR_THROW(data[k] == 1.0F, "cross_ccd_parallel_for_bench.cpp");
     }
   }
 

@@ -45,11 +45,6 @@
 #include "../harness/bench_registry.h"
 #include "../harness/cycle_clock.h"
 
-// LLVM libomp Intel-compatibility extensions; declared as free C functions so
-// we do not pull in `omp-tools.h` for these two symbols.
-extern "C" void kmp_set_blocktime(int milliseconds);
-extern "C" int kmp_get_blocktime(void);
-
 namespace citor::bench {
 namespace {
 
@@ -112,7 +107,11 @@ constexpr std::size_t kPrimaryRange = 16384;
 struct AlignedFloatDeleter {
   void operator()(float *p) const noexcept { alignedFree(p); }
 };
-using AlignedFloatBuffer = std::unique_ptr<float[], AlignedFloatDeleter>;
+// `unique_ptr<T[]>` is the only owning-dynamic-array spelling the standard
+// offers; the check below is misfiring.
+using AlignedFloatBuffer =
+    std::unique_ptr<float[],
+                    AlignedFloatDeleter>; // NOLINT(modernize-avoid-c-arrays)
 
 [[nodiscard]] AlignedFloatBuffer allocateAlignedFloats(std::size_t count) {
   const std::size_t bytes = ((count * sizeof(float) + 63U) / 64U) * 64U;
@@ -129,7 +128,8 @@ using AlignedFloatBuffer = std::unique_ptr<float[], AlignedFloatDeleter>;
 /// timing window.
 constexpr std::size_t kSecondaryN = 256;
 
-void secondaryMatmul(float *aBase, float *bBase, float *cBase) noexcept {
+void secondaryMatmul(const float *aBase, const float *bBase,
+                     float *cBase) noexcept {
   const std::size_t n = kSecondaryN;
   // ikj-ordered triple loop; fanned out to libomp threads on the outer i
   // loop. The body uses `omp parallel for` (not `omp parallel`
@@ -168,10 +168,10 @@ void deterministicFill(float *p, std::size_t count,
 /// `kDispatchesPerBracket` brackets the values diverge from the seed by a
 /// non-negligible amount. We use a stride spot-check to assert the body
 /// touched the buffer without paying the full pass on the hot path.
-void spotCheck(const float *data) noexcept {
+void spotCheck(const float *data) {
   const std::size_t stride = kPrimaryRange / 64U;
   for (std::size_t i = 0; i < kPrimaryRange; i += stride) {
-    CITOR_ALWAYS_ASSERT(data[i] != 0.0F);
+    BENCH_CHECK_OR_THROW(data[i] != 0.0F, "blas_coexistence_bench.cpp");
   }
 }
 

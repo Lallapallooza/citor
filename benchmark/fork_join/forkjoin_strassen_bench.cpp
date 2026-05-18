@@ -31,7 +31,7 @@
 // same input; the per-element absolute difference must be below
 // `1e-3 * N` (Strassen has known numerical instability and the tolerance
 // scales with the cumulative error introduced by recursive
-// add/subtract steps). `CITOR_ALWAYS_ASSERT` aborts on mismatch.
+// add/subtract steps). `BENCH_CHECK_OR_THROW` aborts on mismatch.
 
 #include <algorithm>
 #include <array>
@@ -455,7 +455,7 @@ template <class PoolT>
       maxDiff = std::max(diff, maxDiff);
     }
     const float tolerance = strassenTolerance(n);
-    CITOR_ALWAYS_ASSERT(maxDiff <= tolerance);
+    BENCH_CHECK_OR_THROW(maxDiff <= tolerance, "forkjoin_strassen_bench.cpp");
   };
 
   // Warmup + correctness gate.
@@ -554,7 +554,7 @@ template <class PoolT>
       maxDiff = std::max(diff, maxDiff);
     }
     const float tolerance = strassenTolerance(n);
-    CITOR_ALWAYS_ASSERT(maxDiff <= tolerance);
+    BENCH_CHECK_OR_THROW(maxDiff <= tolerance, "forkjoin_strassen_bench.cpp");
   };
 
   auto runOnce = [&]() {

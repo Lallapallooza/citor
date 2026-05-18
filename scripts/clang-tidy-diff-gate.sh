@@ -24,6 +24,14 @@ if [ -n "$repo_root" ] && [[ "$src" == "$repo_root"/* ]]; then
   src="${src#"$repo_root"/}"
 fi
 
+# Skip CPM-fetched third-party sources. CMake's global CXX_CLANG_TIDY
+# applies to every target including transitively-built dependencies
+# (e.g. oneTBB built as a static lib for the bench); we only ever want
+# to lint citor's own code.
+if [[ "$src" == */_deps/* ]]; then
+  exit 0
+fi
+
 # CITOR_TIDY_FILES semantics:
 #   unset       -> tidy every TU (local-dev default).
 #   __ALL__     -> tidy every TU (explicit full-tree request from CI).

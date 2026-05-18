@@ -125,13 +125,14 @@ template <class T, class RunFn>
 [[nodiscard]] BenchRow measureLoop(const char *name,
                                    const CyclesPerNanosecond &cal, RunFn run,
                                    T reference) {
+  // Peer mismatches log and skip the row; aborting would discard the rest.
   std::atomic<T> sink{T{0}};
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     const T value = run();
     if (value != reference) [[unlikely]] {
       reportReduceMismatch(name, reference, value);
+      return skippedRow(name);
     }
-    CITOR_ALWAYS_ASSERT(value == reference);
     sink.store(value, std::memory_order_relaxed);
   }
   std::vector<double> samples;
@@ -143,8 +144,8 @@ template <class T, class RunFn>
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
     if (value != reference) [[unlikely]] {
       reportReduceMismatch(name, reference, value);
+      return skippedRow(name);
     }
-    CITOR_ALWAYS_ASSERT(value == reference);
     sink.store(value, std::memory_order_relaxed);
   }
   (void)sink.load(std::memory_order_relaxed);

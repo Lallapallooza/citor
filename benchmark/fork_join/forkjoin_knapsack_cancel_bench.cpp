@@ -289,7 +289,8 @@ measureKnapsack(const char *name, std::size_t participants, std::size_t nItems,
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     last =
         runOnce(*pool, itemsSorted, capacity, reference, cancellationEnabled);
-    CITOR_ALWAYS_ASSERT(last.parallel == reference);
+    BENCH_CHECK_OR_THROW(last.parallel == reference,
+                         "forkjoin_knapsack_cancel_bench.cpp");
   }
 
   std::vector<double> samples;
@@ -301,14 +302,16 @@ measureKnapsack(const char *name, std::size_t participants, std::size_t nItems,
         runOnce(*pool, itemsSorted, capacity, reference, cancellationEnabled);
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-    CITOR_ALWAYS_ASSERT(out.parallel == reference);
+    BENCH_CHECK_OR_THROW(out.parallel == reference,
+                         "forkjoin_knapsack_cancel_bench.cpp");
     if (cancellationEnabled) {
       // At least one firing per timing iteration in cancel-on mode. The
       // bound-tightening trigger fires when a branch's curValue exceeds
       // the running best by at least 1%; for n in {20, 24} the search
       // tree is rich enough to guarantee at least one such tightening
       // per iteration.
-      CITOR_ALWAYS_ASSERT(out.firings >= 1U);
+      BENCH_CHECK_OR_THROW(out.firings >= 1U,
+                           "forkjoin_knapsack_cancel_bench.cpp");
     }
     totalFirings += out.firings;
   }
@@ -358,14 +361,18 @@ measureKnapsack(const char *name, std::size_t participants, std::size_t nItems,
     state.token = cancellationEnabled ? citor::CancellationToken::makeOwned()
                                       : citor::CancellationToken{};
     runOnceOmp(state);
-    return RunOutput{state.bestValue.load(std::memory_order_acquire), reference,
-                     state.cancelFirings.load(std::memory_order_relaxed)};
+    return RunOutput{
+        .parallel = state.bestValue.load(std::memory_order_acquire),
+        .reference = reference,
+        .firings = state.cancelFirings.load(std::memory_order_relaxed),
+    };
   };
 
   RunOutput last{};
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     last = runIter();
-    CITOR_ALWAYS_ASSERT(last.parallel == reference);
+    BENCH_CHECK_OR_THROW(last.parallel == reference,
+                         "forkjoin_knapsack_cancel_bench.cpp");
   }
 
   std::vector<double> samples;
@@ -375,9 +382,11 @@ measureKnapsack(const char *name, std::size_t participants, std::size_t nItems,
     const RunOutput out = runIter();
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-    CITOR_ALWAYS_ASSERT(out.parallel == reference);
+    BENCH_CHECK_OR_THROW(out.parallel == reference,
+                         "forkjoin_knapsack_cancel_bench.cpp");
     if (cancellationEnabled) {
-      CITOR_ALWAYS_ASSERT(out.firings >= 1U);
+      BENCH_CHECK_OR_THROW(out.firings >= 1U,
+                           "forkjoin_knapsack_cancel_bench.cpp");
     }
   }
   return finalizeRow(name, samples);
@@ -468,14 +477,18 @@ void searchRecSubflow(::tf::Subflow &sub, const std::vector<Item> &items,
       searchRecSubflow(root, itemsSorted, 0U, capacity, 0, state);
     });
     exec.run(flow).wait();
-    return RunOutput{state.bestValue.load(std::memory_order_acquire), reference,
-                     state.cancelFirings.load(std::memory_order_relaxed)};
+    return RunOutput{
+        .parallel = state.bestValue.load(std::memory_order_acquire),
+        .reference = reference,
+        .firings = state.cancelFirings.load(std::memory_order_relaxed),
+    };
   };
 
   RunOutput last{};
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     last = runIter();
-    CITOR_ALWAYS_ASSERT(last.parallel == reference);
+    BENCH_CHECK_OR_THROW(last.parallel == reference,
+                         "forkjoin_knapsack_cancel_bench.cpp");
   }
 
   std::vector<double> samples;
@@ -485,9 +498,11 @@ void searchRecSubflow(::tf::Subflow &sub, const std::vector<Item> &items,
     const RunOutput out = runIter();
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-    CITOR_ALWAYS_ASSERT(out.parallel == reference);
+    BENCH_CHECK_OR_THROW(out.parallel == reference,
+                         "forkjoin_knapsack_cancel_bench.cpp");
     if (cancellationEnabled) {
-      CITOR_ALWAYS_ASSERT(out.firings >= 1U);
+      BENCH_CHECK_OR_THROW(out.firings >= 1U,
+                           "forkjoin_knapsack_cancel_bench.cpp");
     }
   }
   return finalizeRow(name, samples);

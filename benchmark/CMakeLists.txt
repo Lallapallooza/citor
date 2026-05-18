@@ -162,9 +162,7 @@ cpmaddpackage(
         "HDR_HISTOGRAM_BUILD_PROGRAMS OFF"
 )
 
-# Leopard (hosseinmoein) -- header-only C++20 work-stealing pool with
-# parallel_loop + dispatch. Fills a gap between BS-style submit pools and
-# full work-stealing runtimes.
+# Leopard (hosseinmoein) -- header-only C++20 work-stealing pool.
 cpmaddpackage(
     NAME Leopard
     GITHUB_REPOSITORY hosseinmoein/Leopard
@@ -172,33 +170,25 @@ cpmaddpackage(
     DOWNLOAD_ONLY YES
 )
 if(Leopard_ADDED AND NOT TARGET leopard_threadpool)
-    # Leopard's `ThreadPool.tcc` defines several non-template member functions
-    # (e.g. `ThreadPool::ThreadPool`, `Conditioner::execute`) without the
-    # `inline` keyword. Including the header in multiple TUs produces ODR
-    # link errors. Patch the file post-fetch to mark those definitions
-    # `inline` so the header is genuinely header-only across TUs.
     set(_leopard_tcc ${Leopard_SOURCE_DIR}/include/Leopard/ThreadPool.tcc)
     if(EXISTS ${_leopard_tcc})
         file(READ ${_leopard_tcc} _leopard_tcc_contents)
-        # Idempotent guard: only patch when our marker is absent.
-        string(
-            FIND "${_leopard_tcc_contents}"
-            "// citor-patched-inline"
-            _leopard_marker_pos
+        set(_leopard_def_re
+            "(void Conditioner::|ThreadPool::|void ThreadPool::|bool ThreadPool::|[A-Za-z_:]+::size_type ThreadPool::)"
         )
-        if(_leopard_marker_pos EQUAL -1)
-            string(
-                REGEX REPLACE
-                    "(\nvoid Conditioner::|\nThreadPool::|\nvoid ThreadPool::|\nbool ThreadPool::|\n[A-Za-z_:]+::size_type ThreadPool::)"
-                "\ninline\\1"
-                _leopard_tcc_contents
-                "${_leopard_tcc_contents}"
-            )
-            file(
-                WRITE ${_leopard_tcc}
-                "// citor-patched-inline\n${_leopard_tcc_contents}"
-            )
-        endif()
+        string(
+            REGEX REPLACE "\ninline\n${_leopard_def_re}"
+            "\n\\1"
+            _leopard_tcc_contents
+            "${_leopard_tcc_contents}"
+        )
+        string(
+            REGEX REPLACE "\n${_leopard_def_re}"
+            "\ninline\n\\1"
+            _leopard_tcc_contents
+            "${_leopard_tcc_contents}"
+        )
+        file(WRITE ${_leopard_tcc} "${_leopard_tcc_contents}")
     endif()
     add_library(leopard_threadpool INTERFACE)
     target_include_directories(

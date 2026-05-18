@@ -1,0 +1,6 @@
+---
+# Bench overlay. `misc-const-correctness` false-positives on bench locals of
+# third-party pool types passed through non-const reference traits.
+InheritParentConfig: true
+Checks: >
+  -misc-const-correctness

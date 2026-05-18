@@ -87,7 +87,7 @@ template <class PoolT>
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     result = skynetRec(*pool, std::int64_t{0}, kDepth);
   }
-  CITOR_ALWAYS_ASSERT(result == kExpectedSum);
+  BENCH_CHECK_OR_THROW(result == kExpectedSum, "forkjoin_skynet_bench.cpp");
 
   std::vector<double> samples;
   samples.reserve(kIterations);
@@ -96,7 +96,7 @@ template <class PoolT>
     result = skynetRec(*pool, std::int64_t{0}, kDepth);
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-    CITOR_ALWAYS_ASSERT(result == kExpectedSum);
+    BENCH_CHECK_OR_THROW(result == kExpectedSum, "forkjoin_skynet_bench.cpp");
   }
   return finalizeRow(name, samples);
 }
@@ -148,7 +148,7 @@ template <class PoolT>
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     result = runOnce();
   }
-  CITOR_ALWAYS_ASSERT(result == kExpectedSum);
+  BENCH_CHECK_OR_THROW(result == kExpectedSum, "forkjoin_skynet_bench.cpp");
 
   std::vector<double> samples;
   samples.reserve(kIterations);
@@ -157,7 +157,7 @@ template <class PoolT>
     result = runOnce();
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-    CITOR_ALWAYS_ASSERT(result == kExpectedSum);
+    BENCH_CHECK_OR_THROW(result == kExpectedSum, "forkjoin_skynet_bench.cpp");
   }
   return finalizeRow("OpenMP", samples);
 }
@@ -184,7 +184,7 @@ template <class PoolT>
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     result = runOnce();
   }
-  CITOR_ALWAYS_ASSERT(result == kExpectedSum);
+  BENCH_CHECK_OR_THROW(result == kExpectedSum, "forkjoin_skynet_bench.cpp");
 
   std::vector<double> samples;
   samples.reserve(kIterations);
@@ -193,7 +193,7 @@ template <class PoolT>
     result = runOnce();
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-    CITOR_ALWAYS_ASSERT(result == kExpectedSum);
+    BENCH_CHECK_OR_THROW(result == kExpectedSum, "forkjoin_skynet_bench.cpp");
   }
   return finalizeRow("Taskflow::Subflow", samples);
 }

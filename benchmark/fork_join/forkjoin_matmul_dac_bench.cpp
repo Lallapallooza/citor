@@ -203,7 +203,7 @@ template <class PoolT>
       const float diff = std::fabs(cBuf.get()[i] - refBuf.get()[i]);
       maxDiff = std::max(diff, maxDiff);
     }
-    CITOR_ALWAYS_ASSERT(maxDiff <= tolerance);
+    BENCH_CHECK_OR_THROW(maxDiff <= tolerance, "forkjoin_matmul_dac_bench.cpp");
   };
 
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
@@ -270,7 +270,7 @@ template <class PoolT>
       const float diff = std::fabs(cBuf.get()[i] - refBuf.get()[i]);
       maxDiff = std::max(diff, maxDiff);
     }
-    CITOR_ALWAYS_ASSERT(maxDiff <= tolerance);
+    BENCH_CHECK_OR_THROW(maxDiff <= tolerance, "forkjoin_matmul_dac_bench.cpp");
   };
 
   auto runOnce = [&]() {

@@ -342,7 +342,8 @@ template <class PoolT>
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     parallelCount = parWalk(*pool, root, 0);
   }
-  CITOR_ALWAYS_ASSERT(parallelCount == kExpectedNodes);
+  BENCH_CHECK_OR_THROW(parallelCount == kExpectedNodes,
+                       "forkjoin_uts_bench.cpp");
 
   std::vector<double> samples;
   samples.reserve(kIterations);
@@ -351,7 +352,7 @@ template <class PoolT>
     const std::int64_t count = parWalk(*pool, root, 0);
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-    CITOR_ALWAYS_ASSERT(count == kExpectedNodes);
+    BENCH_CHECK_OR_THROW(count == kExpectedNodes, "forkjoin_uts_bench.cpp");
   }
 
   return finalizeRow(name, samples);
@@ -407,7 +408,8 @@ template <class PoolT>
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     parallelCount = runOnce();
   }
-  CITOR_ALWAYS_ASSERT(parallelCount == kExpectedNodes);
+  BENCH_CHECK_OR_THROW(parallelCount == kExpectedNodes,
+                       "forkjoin_uts_bench.cpp");
 
   std::vector<double> samples;
   samples.reserve(kIterations);
@@ -416,7 +418,7 @@ template <class PoolT>
     const std::int64_t count = runOnce();
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-    CITOR_ALWAYS_ASSERT(count == kExpectedNodes);
+    BENCH_CHECK_OR_THROW(count == kExpectedNodes, "forkjoin_uts_bench.cpp");
   }
   return finalizeRow("Taskflow::Subflow", samples);
 }
@@ -451,7 +453,8 @@ template <class PoolT>
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     parallelCount = runOnce();
   }
-  CITOR_ALWAYS_ASSERT(parallelCount == kExpectedNodes);
+  BENCH_CHECK_OR_THROW(parallelCount == kExpectedNodes,
+                       "forkjoin_uts_bench.cpp");
 
   std::vector<double> samples;
   samples.reserve(kIterations);
@@ -460,7 +463,7 @@ template <class PoolT>
     const std::int64_t count = runOnce();
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-    CITOR_ALWAYS_ASSERT(count == kExpectedNodes);
+    BENCH_CHECK_OR_THROW(count == kExpectedNodes, "forkjoin_uts_bench.cpp");
   }
   return finalizeRow("OpenMP", samples);
 }
@@ -481,7 +484,7 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
   static const bool checked = []() {
     const RngState root = rngInit(kRootSeed);
     const std::int64_t seq = seqWalk(root, 0);
-    CITOR_ALWAYS_ASSERT(seq == kExpectedNodes);
+    BENCH_CHECK_OR_THROW(seq == kExpectedNodes, "forkjoin_uts_bench.cpp");
     return true;
   }();
   (void)checked;

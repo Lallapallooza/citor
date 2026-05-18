@@ -31,8 +31,6 @@
 #include "../harness/cycle_clock.h"
 #include "../harness/harness.h"
 
-extern "C" void kmp_set_blocktime(int milliseconds);
-
 namespace {
 
 void printCalibrationBanner(const citor::bench::CyclesPerNanosecond &cal) {

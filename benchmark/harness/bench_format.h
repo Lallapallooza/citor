@@ -11,12 +11,22 @@
 #include <ostream>
 #include <random>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 #include "citor/detail/topology.h"
+
+// Bench-side correctness check. Throws so the harness's per-cell try/catch
+// in `bench_main.cpp` reports SKIPPED instead of aborting the sweep.
+#define BENCH_CHECK_OR_THROW(cond, what)                                       \
+  do {                                                                         \
+    if (!(cond)) [[unlikely]] {                                                \
+      throw std::runtime_error(std::string{"bench check failed: "} + (what));  \
+    }                                                                          \
+  } while (false)
 
 namespace citor::bench {
 
@@ -114,6 +124,15 @@ struct BenchRow {
   // rawSampleExportEnabled() is set; consumed by the JSON exporter.
   std::vector<double> rawSamplesNs;
 };
+
+// Short-circuit row used by measureLoop helpers when a peer pool's result
+// fails the correctness gate.
+inline BenchRow skippedRow(const char *name) {
+  BenchRow row;
+  row.name = name;
+  row.skipped = true;
+  return row;
+}
 
 // Comparison table for one workload. formatTable preserves row order and
 // computes the relative column against |baselineName|.

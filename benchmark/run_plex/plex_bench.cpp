@@ -109,7 +109,7 @@ inline void assertExpectedSink(const char *name, std::size_t participants,
                  name, static_cast<unsigned long long>(expected),
                  static_cast<unsigned long long>(actual));
   }
-  CITOR_ALWAYS_ASSERT(actual == expected);
+  BENCH_CHECK_OR_THROW(actual == expected, "plex_bench.cpp");
 }
 
 /// Generic measurement loop sampling per-call wall time.

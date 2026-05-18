@@ -135,8 +135,18 @@ jobs:
         env:
           CPM_SOURCE_CACHE: ${{ github.workspace }}/.cache/CPM
         run: |
+          # bench=ON only on clang-19: gcc-14 + bench pulls third-party
+          # headers (TooManyCooks, others) that trigger `-Werror=*` false
+          # positives we can't fix upstream-side. clang-19 is the bench's
+          # supported toolchain; gcc-14 stays a tests-only library-compat
+          # row.
+          if [[ "${{ matrix.compiler }}" == clang-* ]]; then
+            BENCH=ON
+          else
+            BENCH=OFF
+          fi
           cmake -S . -B build -G Ninja \
-            -DCITOR_BUILD_BENCHMARK=ON \
+            -DCITOR_BUILD_BENCHMARK=$BENCH \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             $CITOR_CMAKE_EXTRA

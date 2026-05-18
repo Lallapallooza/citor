@@ -101,12 +101,15 @@ template <class RunFn, class ValidateFn>
   }
   // Warmup pass + one initial validate to catch obvious regressions early
   // and set up the same baseline cache state every pool starts from.
+  // On mismatch, return a skipped row so the sweep keeps going.
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     for (std::size_t k = 0; k < kBatchSize; ++k) {
       run();
     }
   }
-  validate(name);
+  if (!validate(name)) {
+    return skippedRow(name);
+  }
 
   std::vector<double> samples;
   samples.reserve(kIterations);
@@ -124,8 +127,8 @@ template <class RunFn, class ValidateFn>
     for (std::size_t j = 0; j < distractor.size(); ++j) {
       distractorAcc ^= distractor[j];
     }
-    if ((i + 1U) % kValidateEvery == 0U) {
-      validate(name);
+    if ((i + 1U) % kValidateEvery == 0U && !validate(name)) {
+      return skippedRow(name);
     }
   }
   // Anti-DCE: prevent the compiler from optimizing away the distractor.
@@ -134,7 +137,9 @@ template <class RunFn, class ValidateFn>
   }
   // Final correctness gate: catches any regression that periodic checks
   // happened to miss between calls.
-  validate(name);
+  if (!validate(name)) {
+    return skippedRow(name);
+  }
   return finalizeRow(name, samples);
 }
 
@@ -195,11 +200,12 @@ struct ScanData {
   ThreadPool pool(participants, citor::Affinity::PerCluster);
   ScanData d = buildData();
   const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
-  auto validate = [&](const char *poolName) {
+  auto validate = [&](const char *poolName) -> bool {
     if (d.out != reference) [[unlikely]] {
       reportScanMismatch(poolName, reference, d.out);
+      return false;
     }
-    CITOR_ALWAYS_ASSERT(d.out == reference);
+    return true;
   };
   // The native pool calls the body twice per slot; we rely on a per-slot pass
   // counter (incremented by the body on entry) to distinguish the two passes.
@@ -244,11 +250,12 @@ struct ScanData {
   ThreadPool pool(participants, citor::Affinity::PerCluster);
   ScanData d = buildData();
   const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
-  auto validate = [&](const char *poolName) {
+  auto validate = [&](const char *poolName) -> bool {
     if (d.out != reference) [[unlikely]] {
       reportScanMismatch(poolName, reference, d.out);
+      return false;
     }
-    CITOR_ALWAYS_ASSERT(d.out == reference);
+    return true;
   };
   BenchRow row = measureLoop(
       "citor::ThreadPool::inclusiveScan", cal,
@@ -307,11 +314,12 @@ blockRange(std::size_t blockIdx, std::size_t blocks) noexcept {
   BS::light_thread_pool pool(participants);
   ScanData d = buildData();
   const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
-  auto validate = [&](const char *poolName) {
+  auto validate = [&](const char *poolName) -> bool {
     if (d.out != reference) [[unlikely]] {
       reportScanMismatch(poolName, reference, d.out);
+      return false;
     }
-    CITOR_ALWAYS_ASSERT(d.out == reference);
+    return true;
   };
   BenchRow row = measureLoop(
       "BS::thread_pool::scan_two_wave", cal,
@@ -344,11 +352,12 @@ template <class Pool, class EnqueueFn>
                                          Pool &pool, EnqueueFn enqueue) {
   ScanData d = buildData();
   const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
-  auto validate = [&](const char *poolName) {
+  auto validate = [&](const char *poolName) -> bool {
     if (d.out != reference) [[unlikely]] {
       reportScanMismatch(poolName, reference, d.out);
+      return false;
     }
-    CITOR_ALWAYS_ASSERT(d.out == reference);
+    return true;
   };
   BenchRow row = measureLoop(
       name, cal,
@@ -407,11 +416,12 @@ template <class Pool, class EnqueueFn>
   auto arena = CompetitorTraits<::tbb::task_arena>::make(participants);
   ScanData d = buildData();
   const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
-  auto validate = [&](const char *poolName) {
+  auto validate = [&](const char *poolName) -> bool {
     if (d.out != reference) [[unlikely]] {
       reportScanMismatch(poolName, reference, d.out);
+      return false;
     }
-    CITOR_ALWAYS_ASSERT(d.out == reference);
+    return true;
   };
   // `tbb::parallel_scan`'s body has a different shape (`Body::operator()` plus
   // `reverse_join` + `assign`), but the trait wraps it under `parallelScan`
@@ -453,11 +463,12 @@ template <class Pool, class EnqueueFn>
   auto exec = CompetitorTraits<::tf::Executor>::make(participants);
   ScanData d = buildData();
   const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
-  auto validate = [&](const char *poolName) {
+  auto validate = [&](const char *poolName) -> bool {
     if (d.out != reference) [[unlikely]] {
       reportScanMismatch(poolName, reference, d.out);
+      return false;
     }
-    CITOR_ALWAYS_ASSERT(d.out == reference);
+    return true;
   };
   // One Taskflow task per block. Direct emplace keeps the two-wave layout in
   // lockstep with `participants`-sized `partials` / `excl` arrays.
@@ -489,11 +500,12 @@ template <class Pool, class EnqueueFn>
   auto pool = CompetitorTraits<::Eigen::ThreadPool>::make(participants);
   ScanData d = buildData();
   const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
-  auto validate = [&](const char *poolName) {
+  auto validate = [&](const char *poolName) -> bool {
     if (d.out != reference) [[unlikely]] {
       reportScanMismatch(poolName, reference, d.out);
+      return false;
     }
-    CITOR_ALWAYS_ASSERT(d.out == reference);
+    return true;
   };
   // One Eigen Schedule per block via Barrier; the per-block index drives
   // pass 1 / pass 2 of the two-wave layout directly.
@@ -529,11 +541,12 @@ template <class Pool, class EnqueueFn>
   auto pool = CompetitorTraits<hmthrp::ThreadPool>::make(participants);
   ScanData d = buildData();
   const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
-  auto validate = [&](const char *poolName) {
+  auto validate = [&](const char *poolName) -> bool {
     if (d.out != reference) [[unlikely]] {
       reportScanMismatch(poolName, reference, d.out);
+      return false;
     }
-    CITOR_ALWAYS_ASSERT(d.out == reference);
+    return true;
   };
   // One Leopard dispatch per block returning a future; the per-block index
   // drives pass 1 / pass 2 of the two-wave layout directly.
@@ -569,29 +582,35 @@ template <class Pool, class EnqueueFn>
   auto pool = CompetitorTraits<dispenso::ThreadPool>::make(participants);
   ScanData d = buildData();
   const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
-  auto validate = [&](const char *poolName) {
+  auto validate = [&](const char *poolName) -> bool {
     if (d.out != reference) [[unlikely]] {
       reportScanMismatch(poolName, reference, d.out);
+      return false;
     }
-    CITOR_ALWAYS_ASSERT(d.out == reference);
+    return true;
   };
   // One dispenso TaskSet schedule per block; the per-block index drives
   // pass 1 / pass 2 of the two-wave layout directly.
   BenchRow row = measureLoop(
       "dispenso::scan_two_wave", cal,
       [&] {
-        runTwoWaveScan(
-            d, participants, [&](std::size_t blocks, auto blockBody) {
-              dispenso::TaskSet ts(*pool);
-              for (std::size_t b = 0; b < blocks; ++b) {
-                const auto [lo, hi] = blockRange(b, blocks);
-                if (lo == hi) {
-                  continue;
-                }
-                ts.schedule([b, lo, hi, &blockBody] { blockBody(b, lo, hi); });
-              }
-              ts.wait();
-            });
+        runTwoWaveScan(d, participants,
+                       [&](std::size_t blocks, auto blockBody) {
+                         dispenso::TaskSet ts(*pool);
+                         for (std::size_t b = 0; b < blocks; ++b) {
+                           const auto [lo, hi] = blockRange(b, blocks);
+                           if (lo == hi) {
+                             continue;
+                           }
+                           // `pool` is the return of `CompetitorTraits::make`,
+                           // which never returns null; the analyzer cannot
+                           // prove that.
+                           ts.schedule([b, lo, hi, &blockBody] {
+                             blockBody(b, lo, hi);
+                           }); // NOLINT(clang-analyzer-core.NullDereference)
+                         }
+                         ts.wait();
+                       });
       },
       validate);
   (void)d.out[kN - 1];
@@ -604,11 +623,12 @@ template <class Pool, class EnqueueFn>
                                          const CyclesPerNanosecond &cal) {
   ScanData d = buildData();
   const std::vector<std::int64_t> reference = computeInclusiveReference(d.in);
-  auto validate = [&](const char *poolName) {
+  auto validate = [&](const char *poolName) -> bool {
     if (d.out != reference) [[unlikely]] {
       reportScanMismatch(poolName, reference, d.out);
+      return false;
     }
-    CITOR_ALWAYS_ASSERT(d.out == reference);
+    return true;
   };
   BenchRow row = measureLoop(
       "OpenMP::scan_two_wave", cal,

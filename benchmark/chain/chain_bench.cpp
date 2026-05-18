@@ -515,7 +515,7 @@ measureParetoLoop(const char *name, const CyclesPerNanosecond &cal, RunFn run,
   // range due to the Pareto bodies, well above the timer-tick floor.
   for (std::size_t i = 0; i < 2; ++i) {
     const std::int64_t v = run();
-    CITOR_ALWAYS_ASSERT(v == referenceTotal);
+    BENCH_CHECK_OR_THROW(v == referenceTotal, "chain_bench.cpp");
   }
   std::vector<double> samples;
   constexpr std::size_t kParetoIterations = 20;
@@ -525,7 +525,7 @@ measureParetoLoop(const char *name, const CyclesPerNanosecond &cal, RunFn run,
     const std::int64_t value = run();
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-    CITOR_ALWAYS_ASSERT(value == referenceTotal);
+    BENCH_CHECK_OR_THROW(value == referenceTotal, "chain_bench.cpp");
   }
   return finalizeRow(name, samples);
 }

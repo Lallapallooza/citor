@@ -30,7 +30,7 @@
 //
 // Internal correctness gate (BEFORE timing): the cilksort output is compared
 // element-wise against `std::sort` on a fresh copy of the same input;
-// `CITOR_ALWAYS_ASSERT` aborts on mismatch.
+// `BENCH_CHECK_OR_THROW` aborts on mismatch.
 
 #include <algorithm>
 #include <array>
@@ -252,7 +252,8 @@ void parallelMerge(Pool &pool, std::int32_t *src, std::size_t aLo,
     const std::size_t inclusiveTotal =
         pool.template parallelScan<citor::HintsDefaults>(
             kMergeBuckets, std::size_t{0}, body, std::plus<std::size_t>{});
-    CITOR_ALWAYS_ASSERT(inclusiveTotal == total);
+    BENCH_CHECK_OR_THROW(inclusiveTotal == total,
+                         "forkjoin_cilksort_bench.cpp");
   }
 #ifdef CITOR_BENCH_HAS_TBB
   else if constexpr (std::is_same_v<Pool, ::tbb::task_arena>) {
@@ -283,7 +284,7 @@ void parallelMerge(Pool &pool, std::int32_t *src, std::size_t aLo,
       offsets[i] = running;
       running += sizes[i];
     }
-    CITOR_ALWAYS_ASSERT(running == total);
+    BENCH_CHECK_OR_THROW(running == total, "forkjoin_cilksort_bench.cpp");
   }
 #endif
 #ifdef CITOR_BENCH_HAS_DISPENSO
@@ -297,7 +298,7 @@ void parallelMerge(Pool &pool, std::int32_t *src, std::size_t aLo,
       offsets[i] = running;
       running += sizes[i];
     }
-    CITOR_ALWAYS_ASSERT(running == total);
+    BENCH_CHECK_OR_THROW(running == total, "forkjoin_cilksort_bench.cpp");
   }
 #endif
 #ifdef CITOR_BENCH_HAS_TASKFLOW
@@ -312,7 +313,7 @@ void parallelMerge(Pool &pool, std::int32_t *src, std::size_t aLo,
       offsets[i] = running;
       running += sizes[i];
     }
-    CITOR_ALWAYS_ASSERT(running == total);
+    BENCH_CHECK_OR_THROW(running == total, "forkjoin_cilksort_bench.cpp");
   }
 #endif
 
@@ -453,7 +454,7 @@ template <class PoolT>
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     data = input;
     cilksortRec(*pool, data.data(), tmp.data(), std::size_t{0}, n);
-    CITOR_ALWAYS_ASSERT(data == reference);
+    BENCH_CHECK_OR_THROW(data == reference, "forkjoin_cilksort_bench.cpp");
   }
 
   std::vector<double> samples;
@@ -464,7 +465,7 @@ template <class PoolT>
     cilksortRec(*pool, data.data(), tmp.data(), std::size_t{0}, n);
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-    CITOR_ALWAYS_ASSERT(data == reference);
+    BENCH_CHECK_OR_THROW(data == reference, "forkjoin_cilksort_bench.cpp");
   }
 
   return finalizeRow(name, samples);
@@ -507,7 +508,7 @@ template <class PoolT>
 
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     runOnce();
-    CITOR_ALWAYS_ASSERT(data == reference);
+    BENCH_CHECK_OR_THROW(data == reference, "forkjoin_cilksort_bench.cpp");
   }
 
   std::vector<double> samples;
@@ -518,7 +519,7 @@ template <class PoolT>
     runOnce();
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-    CITOR_ALWAYS_ASSERT(data == reference);
+    BENCH_CHECK_OR_THROW(data == reference, "forkjoin_cilksort_bench.cpp");
   }
   return finalizeRow("Taskflow::Subflow", samples);
 }
@@ -567,7 +568,7 @@ template <class PoolT>
 
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     runOnce();
-    CITOR_ALWAYS_ASSERT(data == reference);
+    BENCH_CHECK_OR_THROW(data == reference, "forkjoin_cilksort_bench.cpp");
   }
 
   std::vector<double> samples;
@@ -584,7 +585,7 @@ template <class PoolT>
     }
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-    CITOR_ALWAYS_ASSERT(data == reference);
+    BENCH_CHECK_OR_THROW(data == reference, "forkjoin_cilksort_bench.cpp");
   }
 
   return finalizeRow("OpenMP", samples);

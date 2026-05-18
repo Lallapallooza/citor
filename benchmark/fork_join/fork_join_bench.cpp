@@ -204,7 +204,7 @@ template <class Spawn>
   };
   std::vector<State> roots;
   roots.reserve(static_cast<std::size_t>(n) * static_cast<std::size_t>(n));
-  std::vector<State> frontier{State{0U, 0U, 0U}};
+  std::vector<State> frontier{State{.cols = 0U, .diag1 = 0U, .diag2 = 0U}};
   for (int depth = 0; depth < kQueensRootDepth && !frontier.empty(); ++depth) {
     std::vector<State> next;
     next.reserve(frontier.size() * static_cast<std::size_t>(n));
@@ -351,9 +351,12 @@ template <class Workload>
         result = workload([](auto &&a, auto &&b) {
           using A = decltype(a);
           using B = decltype(b);
-#pragma omp task shared(a)
+          // tidy mis-orders the `shared(...)` clause vs. the body's
+          // forward; the pragma evaluates before the body, the forward
+          // executes inside the task.
+#pragma omp task shared(a) // NOLINT(bugprone-use-after-move)
           std::forward<A>(a)();
-#pragma omp task shared(b)
+#pragma omp task shared(b) // NOLINT(bugprone-use-after-move)
           std::forward<B>(b)();
 #pragma omp taskwait
         });
@@ -400,7 +403,7 @@ template <class Workload>
     std::uint64_t diag2;
   };
   std::vector<State> roots;
-  std::vector<State> frontier{State{0U, 0U, 0U}};
+  std::vector<State> frontier{State{.cols = 0U, .diag1 = 0U, .diag2 = 0U}};
   for (int depth = 0; depth < kQueensRootDepth && !frontier.empty(); ++depth) {
     std::vector<State> next;
     next.reserve(frontier.size() * static_cast<std::size_t>(n));

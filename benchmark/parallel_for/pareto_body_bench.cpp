@@ -11,7 +11,7 @@
 // The bench reports per-call median ns for the parallel for. Each pool's
 // invocation must visit every iteration exactly once; a side-effect counter
 // (parallel sum of per-iteration costs) is checked against the sequential
-// reference via CITOR_ALWAYS_ASSERT before timing on every pool.
+// reference via BENCH_CHECK_OR_THROW before timing on every pool.
 //
 // Per-pool primitive mapping (default Balance for each pool):
 //   - citor pool              -> `parallelFor<ParetoBodyHints>` (StaticUniform,
@@ -170,7 +170,7 @@ template <class RunFn>
   }
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     const std::int64_t v = run();
-    CITOR_ALWAYS_ASSERT(v == referenceTotal);
+    BENCH_CHECK_OR_THROW(v == referenceTotal, "pareto_body_bench.cpp");
   }
   std::vector<double> samples;
   samples.reserve(kIterations);
@@ -179,7 +179,7 @@ template <class RunFn>
     const std::int64_t value = run();
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-    CITOR_ALWAYS_ASSERT(value == referenceTotal);
+    BENCH_CHECK_OR_THROW(value == referenceTotal, "pareto_body_bench.cpp");
   }
   return finalizeRow(name, samples);
 }

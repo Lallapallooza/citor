@@ -481,7 +481,7 @@ BenchRow runLibforkUtsT1(std::size_t participants,
   for (std::size_t i = 0; i < kUtsWarmupIterations; ++i) {
     parallelCount = runOnce();
   }
-  CITOR_ALWAYS_ASSERT(parallelCount == kExpectedNodes);
+  BENCH_CHECK_OR_THROW(parallelCount == kExpectedNodes, "libfork_runners.cpp");
 
   std::vector<double> samples;
   samples.reserve(kUtsIterations);
@@ -490,7 +490,7 @@ BenchRow runLibforkUtsT1(std::size_t participants,
     const std::int64_t count = runOnce();
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-    CITOR_ALWAYS_ASSERT(count == kExpectedNodes);
+    BENCH_CHECK_OR_THROW(count == kExpectedNodes, "libfork_runners.cpp");
   }
   return finalizeRow("libfork", samples);
 }
@@ -873,7 +873,7 @@ BenchRow runLibforkStrassen(std::size_t participants, std::size_t n,
       }
     }
     const float tolerance = strassenTolerance(n);
-    CITOR_ALWAYS_ASSERT(maxDiff <= tolerance);
+    BENCH_CHECK_OR_THROW(maxDiff <= tolerance, "libfork_runners.cpp");
   };
 
   for (std::size_t i = 0; i < kStrassenWarmupIterations; ++i) {
@@ -908,7 +908,7 @@ BenchRow runLibforkCilksort(std::size_t participants, std::size_t n,
     data = input;
     lf::sync_wait(pool, cilksortCoro, data.data(), tmp.data(), std::size_t{0},
                   n);
-    CITOR_ALWAYS_ASSERT(data == reference);
+    BENCH_CHECK_OR_THROW(data == reference, "libfork_runners.cpp");
   }
 
   std::vector<double> samples;
@@ -920,7 +920,7 @@ BenchRow runLibforkCilksort(std::size_t participants, std::size_t n,
                   n);
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-    CITOR_ALWAYS_ASSERT(data == reference);
+    BENCH_CHECK_OR_THROW(data == reference, "libfork_runners.cpp");
   }
   return finalizeRow("libfork", samples);
 }
@@ -1036,7 +1036,7 @@ BenchRow runLibforkMatmulDac(std::size_t participants, std::size_t n,
         maxDiff = diff;
       }
     }
-    CITOR_ALWAYS_ASSERT(maxDiff <= tolerance);
+    BENCH_CHECK_OR_THROW(maxDiff <= tolerance, "libfork_runners.cpp");
   };
 
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
@@ -1111,7 +1111,7 @@ BenchRow runLibforkSkynet(std::size_t participants,
   for (std::size_t i = 0; i < kWarmupIterations; ++i) {
     result = runOnce();
   }
-  CITOR_ALWAYS_ASSERT(result == kExpectedSum);
+  BENCH_CHECK_OR_THROW(result == kExpectedSum, "libfork_runners.cpp");
 
   std::vector<double> samples;
   samples.reserve(kIterations);
@@ -1120,7 +1120,7 @@ BenchRow runLibforkSkynet(std::size_t participants,
     result = runOnce();
     const std::uint64_t endCycles = readCyclesEnd();
     samples.push_back(cyclesToNs(endCycles - startCycles, cal));
-    CITOR_ALWAYS_ASSERT(result == kExpectedSum);
+    BENCH_CHECK_OR_THROW(result == kExpectedSum, "libfork_runners.cpp");
   }
   return finalizeRow("libfork", samples);
 }
