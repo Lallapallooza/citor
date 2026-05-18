@@ -91,6 +91,7 @@ These points are API contract, not implementation trivia.
 - **Concurrent producers are safe.** Two threads calling primitives on the same pool serialize through the dispatch lease. `Hints::priority` arbitrates: `Latency` jumps the queue, `Background` yields. Single-producer pools never see priority effects.
 - **Cancellation is cooperative.** A stop request is observed at primitive-defined boundaries, not by preempting a running body. Void-returning primitives early-return on stop; only `parallelReduce` throws (`cancelled_value_exception<T>` carrying the deterministic partial).
 - **Nested parallelism is safe everywhere.** `parallelFor` and `forkJoin` have first-class same-pool nested paths (children land on the calling worker's deque). Other synchronous primitives detect same-pool reentrancy and fall through to inline-on-caller; safe, but the inner call runs single-threaded.
+- **Performance target is single-CCD Zen with physical-core pinning.** The dispatch hot path, steal probe, pinning policy, and cluster machinery are shaped for Zen 4 / Zen 5 hosts where workers fit inside one CCD's shared L3. Multi-CCD AMD servers (Genoa, Turin), Intel mesh CPUs (Sapphire Rapids, Granite Rapids), and unpinned configurations build and pass the test suite, but the dispatch path is not yet tuned for those topologies; see [Future work](#future-work) for the open items.
 
 ## vs other thread pools
 
@@ -146,6 +147,18 @@ Numbers age out on every microarchitecture and compiler bump. The shape is what'
 - **Inline fallback.** When `n * estimatedItemNs * 1e-3 < minTaskUs * participants`, the pool runs the call inline on the producer with zero wake. Set `minTaskUs > 0` and a non-zero `estimatedItemNs` on hot paths where the dispatch floor matters.
 
 Run `benchmark/parallel_bench` on your hardware for absolute numbers. The charts below summarize one run on a single Zen 5 CCD against the bundled peer pools, governor=performance, boost off. Lower is faster. Click any chart for the full SVG.
+
+### Where the design assumptions don't hold
+
+Three platforms are exercised: the design-target single-CCD pin (Zen 5 9950X3D, `taskset -c 0-15`), AWS `c7a.metal-48xl` (Genoa, 12 CCDs, 96 cores), and AWS `c7i.metal-24xl` (Sapphire Rapids, mesh, 48 physical cores).
+
+On the single-CCD design target citor wins the vast majority of contested bench cells with the remaining differences inside single-digit-percent noise. On larger hosts the win-rate is lower and the losses cluster in three patterns:
+
+- **Stencil and other barrier-bound workloads** lose to OpenMP on multi-CCD because the producer's done-epoch scan is linear in participant count; cross-CCD coherence amplifies the cost.
+- **Heavy-tailed reductions** lose to oneTBB because `parallelReduce` is statically partitioned with no work-stealing after local completion; oneTBB's `auto_partitioner` redistributes the slow chunk.
+- **Recursive fork-join** loses to coroutine-native pools (libfork) on multi-CCD when the comparative bench constructs a single `ThreadPool` spanning all CCDs instead of using `PoolGroup`'s per-CCD arena shape (the engine has it, the comparative bench does not yet exercise it).
+
+Open items for each pattern are listed in [Future work](#future-work).
 
 ### Cross-suite summary
 
