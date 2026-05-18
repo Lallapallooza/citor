@@ -1,28 +1,29 @@
 #pragma once
 
-// Coroutine wrappers for citor's synchronous primitives. Opt-in header
-// for users whose call sites are already in coroutine code: each wrapper
-// returns an awaitable that routes the call through `submitDetached` and
-// resumes the awaiting coroutine when the wrapped primitive returns.
-//
-// Tradeoffs vs. the direct synchronous primitives:
-//   - Coroutine frames are heap-allocated by the compiler.
-//   - One worker plays the wrapped primitive's "producer" role until it
-//     returns; the rest of the pool fans out as usual.
+// Coroutine wrappers for citor's synchronous primitives. Opt-in
+// header: each wrapper returns an awaitable that runs the body on a
+// per-pool driver thread and resumes the coroutine when the body
+// returns.
 
+#include <atomic>
 #include <condition_variable>
 #include <coroutine>
+#include <cstdint>
+#include <deque>
 #include <exception>
+#include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <thread>
 #include <tuple>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 
-#include "cancellation.h"
-#include "hints.h"
-#include "thread_pool.h"
+#include "citor/cancellation.h"
+#include "citor/hints.h"
+#include "citor/thread_pool.h"
 
 namespace citor::coro {
 
@@ -205,11 +206,112 @@ public:
   void unhandled_exception() { exc = std::current_exception(); }
 };
 
+/// Wrapper-destruction handshake for `syncWait`. `state` packs a done
+/// bit (set by the wrapper body) and an in-flight worker counter
+/// (bumped in `PoolAwaiter::await_suspend`, dropped after `h.resume`
+/// returns). `syncWait` destroys the wrapper only when both signal.
+struct SyncWaitGate {
+  /// High bit of `state`: set when the wrapper coroutine body completes.
+  static constexpr std::uint64_t kDoneBit = std::uint64_t{1} << 63;
+  /// Low 63 bits of `state`: in-flight worker count.
+  static constexpr std::uint64_t kCounterMask = kDoneBit - 1;
+  /// Combined state word; the producer waits for `kDoneBit` set and the
+  /// counter at zero before destroying the wrapper.
+  std::atomic<std::uint64_t> state{0};
+};
+
+/// Thread-local pointer to the gate of the syncWait the current thread
+/// is participating in. `syncWait` sets it on the producer thread for
+/// the initial resume, and every `PoolAwaiter` worker lambda re-sets it
+/// for the duration of `h.resume` so that nested `co_await`s constructed
+/// on the worker side inherit the same gate. Null when no syncWait is
+/// active on this thread.
+inline thread_local std::shared_ptr<SyncWaitGate> *tlSyncWaitGate = nullptr;
+
+/// One persistent driver thread per pool. Runs the body and resumes
+/// the coroutine for each `co_await`, so the wrapper does not pay a
+/// `pthread_create` per call. Constructed lazily, joined at process
+/// exit. Holds no pool reference; destroying the pool while the
+/// driver still exists is safe as long as no coroutine work is in
+/// flight.
+class CoroDriver {
+public:
+  /// Type-erased closure the driver invokes for each enqueued await.
+  using Task = std::function<void()>;
+
+  /// Spawns the driver thread.
+  CoroDriver() : m_thread([this]() { run(); }) {}
+
+  CoroDriver(const CoroDriver &) = delete;
+  CoroDriver &operator=(const CoroDriver &) = delete;
+
+  /// Signals shutdown and joins the driver thread.
+  ~CoroDriver() {
+    {
+      const std::lock_guard<std::mutex> lk(m_mu);
+      m_shutdown = true;
+    }
+    m_cv.notify_all();
+    if (m_thread.joinable()) {
+      m_thread.join();
+    }
+  }
+
+  /// Enqueue |t| for the driver thread to run. Returns immediately.
+  void submit(Task t) {
+    {
+      const std::lock_guard<std::mutex> lk(m_mu);
+      m_queue.push_back(std::move(t));
+    }
+    m_cv.notify_one();
+  }
+
+private:
+  /// Driver loop: wait for work or shutdown, dequeue, run, repeat.
+  void run() {
+    while (true) {
+      std::unique_lock<std::mutex> lk(m_mu);
+      m_cv.wait(lk, [this]() { return m_shutdown || !m_queue.empty(); });
+      if (m_queue.empty()) {
+        return;
+      }
+      Task t = std::move(m_queue.front());
+      m_queue.pop_front();
+      lk.unlock();
+      t();
+    }
+  }
+
+  /// Guards `m_queue` and `m_shutdown`.
+  std::mutex m_mu;
+  /// Signalled on submit and at shutdown.
+  std::condition_variable m_cv;
+  /// FIFO of pending body-and-resume closures.
+  std::deque<Task> m_queue;
+  /// Set by the destructor to wind the driver loop down.
+  bool m_shutdown = false;
+  /// The driver loop runs here.
+  std::thread m_thread;
+};
+
+/// Lazy per-pool accessor; the first `co_await` against |pool|
+/// spawns its driver, subsequent awaits reuse it.
+inline CoroDriver &driverFor(ThreadPool &pool) {
+  static std::mutex mu;
+  static std::unordered_map<ThreadPool *, std::unique_ptr<CoroDriver>> drivers;
+  const std::lock_guard<std::mutex> lk(mu);
+  auto it = drivers.find(&pool);
+  if (it == drivers.end()) {
+    it = drivers.emplace(&pool, std::make_unique<CoroDriver>()).first;
+  }
+  return *it->second;
+}
+
 /// Wraps a synchronous callable so the coroutine awaiting it resumes once
 /// the callable returns. Lives in the awaiting coroutine's frame.
 template <class Body>
 struct PoolAwaiter {
-  /// Pool the body runs on (via `submitDetached`).
+  /// Pool whose driver thread runs the body.
   ThreadPool *pool;
   /// Captured callable executed by the worker.
   Body body;
@@ -219,13 +321,28 @@ struct PoolAwaiter {
   ResultStorage<Result> result;
   /// Latched exception thrown from the body if any.
   std::exception_ptr exc;
+  /// Gate inherited from the surrounding `syncWait`, captured at awaiter
+  /// construction time. Null outside any `syncWait` scope; the awaiter
+  /// then runs without producer-side counter coordination.
+  std::shared_ptr<SyncWaitGate> gate{tlSyncWaitGate != nullptr
+                                         ? *tlSyncWaitGate
+                                         : std::shared_ptr<SyncWaitGate>{}};
 
   /// Always suspends; the body runs on a worker.
   [[nodiscard]] static bool await_ready() noexcept { return false; }
 
-  /// Schedules the body on a worker and resumes the coroutine when done.
+  /// Enqueues the body on the pool's driver thread and resumes the
+  /// coroutine when the body returns.
   void await_suspend(std::coroutine_handle<> h) {
-    pool->template submitDetached<HintsDefaults>([this, h]() mutable {
+    auto g = gate;
+    if (g) {
+      g->state.fetch_add(1, std::memory_order_relaxed);
+    }
+    driverFor(*pool).submit([this, h, g]() mutable {
+      std::shared_ptr<SyncWaitGate> *savedTL = nullptr;
+      if (g) {
+        savedTL = std::exchange(tlSyncWaitGate, &g);
+      }
       try {
         if constexpr (std::is_void_v<Result>) {
           body();
@@ -236,6 +353,17 @@ struct PoolAwaiter {
         exc = std::current_exception();
       }
       h.resume();
+      // h.resume has returned. The wrapper coroutine and every coroutine
+      // it transferred to have fully unwound on this thread; the frame
+      // members (body, result, exc) are no longer touched below.
+      if (g) {
+        tlSyncWaitGate = savedTL;
+        const auto prev = g->state.fetch_sub(1, std::memory_order_release);
+        if ((prev & SyncWaitGate::kCounterMask) == 1 &&
+            (prev & SyncWaitGate::kDoneBit) != 0) {
+          g->state.notify_all();
+        }
+      }
     });
   }
 
@@ -364,18 +492,17 @@ template <class HintsT = HintsDefaults, class F>
   return detail::PoolAwaiter<decltype(fn)>{&pool, std::move(fn), {}, {}};
 }
 
-/// Block the calling thread until |task| completes, then return its value or
-/// rethrow its exception. The expected top-level driver for coroutine code
-/// that needs to interface with synchronous callers.
+/// Block the calling thread until |task| completes; return its value
+/// or rethrow its exception. Destruction waits on the `SyncWaitGate`
+/// so no worker is still inside `h.resume` when the wrapper frame
+/// goes away.
 template <class T>
 T syncWait(Task<T> task) {
-  std::mutex mu;
-  std::condition_variable cv;
-  bool done = false;
   std::exception_ptr exc;
   detail::ResultStorage<T> result;
+  auto gate = std::make_shared<detail::SyncWaitGate>();
 
-  auto wrapper = [&]() -> Task<void> {
+  auto wrapper = [&, gate]() -> Task<void> {
     try {
       if constexpr (std::is_void_v<T>) {
         co_await std::move(task);
@@ -385,26 +512,26 @@ T syncWait(Task<T> task) {
     } catch (...) {
       exc = std::current_exception();
     }
-    {
-      const std::lock_guard<std::mutex> lk(mu);
-      done = true;
-    }
-    cv.notify_one();
+    gate->state.fetch_or(detail::SyncWaitGate::kDoneBit,
+                         std::memory_order_release);
+    // Skip the notify here: the last worker to fetch_sub its counter slot
+    // will see (prev & kCounterMask) == 1 and the done bit set, and will
+    // notify then. Notifying here would only produce spurious wakeups
+    // (counter still non-zero).
   };
 
+  auto *savedTL = std::exchange(detail::tlSyncWaitGate, &gate);
   Task<void> outer = wrapper();
   outer.handle().resume();
-  {
-    std::unique_lock<std::mutex> lk(mu);
-    cv.wait(lk, [&] { return done; });
+  detail::tlSyncWaitGate = savedTL;
+
+  std::uint64_t s = gate->state.load(std::memory_order_acquire);
+  while ((s & detail::SyncWaitGate::kDoneBit) == 0 ||
+         (s & detail::SyncWaitGate::kCounterMask) != 0) {
+    gate->state.wait(s, std::memory_order_acquire);
+    s = gate->state.load(std::memory_order_acquire);
   }
-  // `done` is set in the wrapper body before `final_suspend` runs. The
-  // worker thread is still inside the final-suspend chain at that point;
-  // destroying the coroutine handle now would race the worker. Spin until
-  // the handle reaches its final-suspend point so destruction is safe.
-  while (!outer.handle().done()) {
-    std::this_thread::yield();
-  }
+
   if (exc) {
     std::rethrow_exception(exc);
   }

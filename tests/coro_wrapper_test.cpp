@@ -83,4 +83,23 @@ TEST(CoroWrapper, ExceptionPropagates) {
   EXPECT_THROW(citor::coro::syncWait(task()), std::runtime_error);
 }
 
+// Stress test: hammer syncWait to expose any race between the producer
+// destroying the coroutine handle and the worker thread unwinding the
+// symmetric-transfer chain back through h.resume(). Under TSan this would
+// surface as a data race on the coroutine frame's metadata. Under release
+// this would surface as a SIGSEGV/UAF eventually. Run many tight iterations
+// so the race window has many chances to open.
+TEST(CoroWrapper, SyncWaitStressHammer) {
+  ThreadPool pool(4);
+  constexpr int kIterations = 5000;
+  for (int i = 0; i < kIterations; ++i) {
+    auto task = [&]() -> citor::coro::Task<int> {
+      const int v = co_await citor::coro::async(pool, [i] { return i + 1; });
+      co_return v;
+    };
+    const int got = citor::coro::syncWait(task());
+    ASSERT_EQ(got, i + 1);
+  }
+}
+
 } // namespace
