@@ -51,6 +51,7 @@ The name comes from Latin *cito* ("swiftly, quickly").
 - [Benchmarks](#benchmarks)
 - [Supported targets](#supported-targets)
 - [Repository layout](#repository-layout)
+- [Future work](#future-work)
 - [License](#license)
 
 ---
@@ -1223,6 +1224,15 @@ Anything under `include/citor/{cpos,detail}/` is reachable but not part of the p
 ## API stability
 
 citor is pre-1.0. The version scheme is semver, so `0.x` minor bumps may break source compatibility in principle. In practice the public surface (`include/citor/*.h` minus the `detail/` and `cpos/` subdirectories) has been stable across the last several releases and a breaking change is unlikely without a clear reason. Anything under `include/citor/detail/` is internal and changes freely.
+
+## Future work
+
+Known gaps where citor leaves performance on the table:
+
+- **Topology-aware dispatch and pinning.** `detail::topology::detectTopology()` enumerates Zen CCDs from sysfs and the engine's dispatch hot path, steal probe, and pinning policy are all shaped by that assumption (8-16 cores per cluster, shared L3, fast intra-cluster coherence). It does not yet model multi-socket EPYC, sub-NUMA-clustering, hybrid P/E cores, asymmetric L3 across chiplets, or Intel's mesh interconnect with tile partitioning. Richer detection plus per-architecture dispatch paths are what unlocks `PoolGroup`'s per-cluster shape on complex server CPUs and on Sapphire Rapids / Granite Rapids parts.
+- **Per-CCD aggregation in the done-epoch barrier.** The producer's join is currently a per-slot acquire-load scan, linear in participant count. The cluster machinery present in `parallelScan` (`clusterIdOfSlot`, `clusterTotals`, `clusterPrefixes`) could be reused so the producer reads one aggregate per CCD instead of one per slot.
+- **Adaptive partitioning for `parallelReduce` on heavy-tailed bodies.** `parallelReduce` partitions into static contiguous chunks and a worker stops after its local range, with no work-stealing after local completion. An opt-in adaptive-bisect mode, gated by hint so the uniform-reduce hot path is unchanged, is the missing primitive shape.
+- **Coroutine-native fork-join.** `include/citor/coro.h` exposes every primitive as an awaitable that routes through `submitDetached` (one heap-allocated frame per call). A continuation-stealing scheduler that avoids the synchronous round-trip would be a separate engine, not a wrapper.
 
 ## Contributing
 
