@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        compiler: [clang-18, gcc-14]
+        compiler: [clang-19, gcc-14]
     name: ${{ matrix.compiler }}
     steps:
       - uses: actions/checkout@v4
@@ -28,17 +28,20 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt-get update
-          # llvm-18 brings `llvm-symbolizer-18`, which TSan picks up for
-          # symbolized stack traces under ctest's sanitized environment.
-          sudo apt-get install -y llvm-18
+          sudo apt-get install -y llvm-18 ca-certificates wget gnupg
           if [[ "${{ matrix.compiler }}" == clang-* ]]; then
-            sudo apt-get install -y clang-18 clang-tidy-18 lld-18 ninja-build
-            echo "CC=clang-18"  >> "$GITHUB_ENV"
-            echo "CXX=clang++-18" >> "$GITHUB_ENV"
-            # The clang-18 cell runs clang-tidy as part of the build via
-            # `CMAKE_CXX_CLANG_TIDY`; one configure+build covers both. The
-            # gcc-14 cell skips tidy because tidy is compiler-agnostic and
-            # a second run would not surface new diagnostics.
+            # Ubuntu 24.04's default repos cap at clang-18; clang-19 fixes
+            # the OpenMP frontend bug that rejects structured-binding
+            # capture inside TUs that mix `#pragma omp` with citor's
+            # templated dispatch headers (the benchmark surfaces it).
+            wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+              | sudo gpg --dearmor -o /etc/apt/keyrings/llvm.gpg
+            echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" \
+              | sudo tee /etc/apt/sources.list.d/llvm.list >/dev/null
+            sudo apt-get update
+            sudo apt-get install -y clang-19 clang-tidy-19 lld-19 libomp-19-dev ninja-build
+            echo "CC=clang-19"  >> "$GITHUB_ENV"
+            echo "CXX=clang++-19" >> "$GITHUB_ENV"
             echo "CITOR_CMAKE_EXTRA=-DCITOR_ENABLE_CLANG_TIDY=ON" >> "$GITHUB_ENV"
           else
             sudo apt-get install -y gcc-14 g++-14 ninja-build
@@ -111,7 +114,7 @@ jobs:
               fi
             fi
           fi
-          echo "CITOR_CLANG_TIDY_BIN=clang-tidy-18" >> "$GITHUB_ENV"
+          echo "CITOR_CLANG_TIDY_BIN=clang-tidy-19" >> "$GITHUB_ENV"
           echo "CITOR_REPO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
 
       - name: CPM source cache
@@ -133,7 +136,7 @@ jobs:
           CPM_SOURCE_CACHE: ${{ github.workspace }}/.cache/CPM
         run: |
           cmake -S . -B build -G Ninja \
-            -DCITOR_BUILD_BENCHMARK=OFF \
+            -DCITOR_BUILD_BENCHMARK=ON \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             $CITOR_CMAKE_EXTRA

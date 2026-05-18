@@ -386,6 +386,13 @@ if(CITOR_IS_TOP_LEVEL)
     target_link_libraries(parallel_bench PRIVATE citor_warnings)
 endif()
 
+# Third-party competitor pools (notably task_thread_pool) call
+# `std::result_of` internally, which libstdc++ marks deprecated under
+# C++17 and removes under C++20. The deprecation fires per-instantiation
+# in every bench TU that calls `pool.submit(...)`, so a header-local
+# pragma does not catch it. Suppress globally for parallel_bench.
+target_compile_options(parallel_bench PRIVATE -Wno-deprecated-declarations)
+
 if(TARGET TBB::tbb)
     target_link_libraries(parallel_bench PRIVATE TBB::tbb)
     target_compile_definitions(parallel_bench PRIVATE CITOR_BENCH_HAS_TBB)
