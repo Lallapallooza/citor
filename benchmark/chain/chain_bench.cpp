@@ -396,14 +396,30 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
   return table;
 }
 
-/// 7 empty stages x 16 workers; the spec's headline chain workload.
-BenchTable runChainJ16(const CyclesPerNanosecond &cal) {
-  return buildTable(/*participants=*/16, "j16_7stages_empty", cal);
-}
-
-/// 7 empty stages x 8 workers variant.
-BenchTable runChainJ8(const CyclesPerNanosecond &cal) {
-  return buildTable(/*participants=*/8, "j8_7stages_empty", cal);
+template <std::size_t JParticipants>
+BenchTable runChainCell(const CyclesPerNanosecond &cal) {
+  static_assert(JParticipants == 8 || JParticipants == 16 ||
+                    JParticipants == 32 || JParticipants == 48 ||
+                    JParticipants == 96,
+                "unsupported j-value");
+  constexpr const char *jSuffix = []() -> const char * {
+    if constexpr (JParticipants == 8) {
+      return "j8_7stages_empty";
+    } else if constexpr (JParticipants == 16) {
+      return "j16_7stages_empty";
+    } else if constexpr (JParticipants == 32) {
+      return "j32_7stages_empty";
+    } else if constexpr (JParticipants == 48) {
+      return "j48_7stages_empty";
+    } else {
+      return "j96_7stages_empty";
+    }
+  }();
+  if (!hasEnoughPhysicalCores(JParticipants)) {
+    throw std::runtime_error("needs " + std::to_string(JParticipants) +
+                             " physical cores");
+  }
+  return buildTable(JParticipants, jSuffix, cal);
 }
 
 // =============================================================================
@@ -619,25 +635,55 @@ BenchTable buildParetoTable(std::size_t participants, const char *suffix,
   return table;
 }
 
-BenchTable runChainParetoJ8(const CyclesPerNanosecond &cal) {
-  return buildParetoTable(/*participants=*/8, "j8_7stages_pareto_body", cal);
-}
-
-BenchTable runChainParetoJ16(const CyclesPerNanosecond &cal) {
-  return buildParetoTable(/*participants=*/16, "j16_7stages_pareto_body", cal);
+template <std::size_t JParticipants>
+BenchTable runChainParetoCell(const CyclesPerNanosecond &cal) {
+  static_assert(JParticipants == 8 || JParticipants == 16 ||
+                    JParticipants == 32 || JParticipants == 48 ||
+                    JParticipants == 96,
+                "unsupported j-value");
+  constexpr const char *jSuffix = []() -> const char * {
+    if constexpr (JParticipants == 8) {
+      return "j8_7stages_pareto_body";
+    } else if constexpr (JParticipants == 16) {
+      return "j16_7stages_pareto_body";
+    } else if constexpr (JParticipants == 32) {
+      return "j32_7stages_pareto_body";
+    } else if constexpr (JParticipants == 48) {
+      return "j48_7stages_pareto_body";
+    } else {
+      return "j96_7stages_pareto_body";
+    }
+  }();
+  if (!hasEnoughPhysicalCores(JParticipants)) {
+    throw std::runtime_error("needs " + std::to_string(JParticipants) +
+                             " physical cores");
+  }
+  return buildParetoTable(JParticipants, jSuffix, cal);
 }
 
 /// File-scope registrar.
 struct ChainRegistrar {
   ChainRegistrar() {
     registerWorkload(
-        {.name = "chain_dispatch_j8_7stages_empty", .run = &runChainJ8});
+        {.name = "chain_dispatch_j8_7stages_empty", .run = &runChainCell<8>});
     registerWorkload(
-        {.name = "chain_dispatch_j16_7stages_empty", .run = &runChainJ16});
+        {.name = "chain_dispatch_j16_7stages_empty", .run = &runChainCell<16>});
+    registerWorkload(
+        {.name = "chain_dispatch_j32_7stages_empty", .run = &runChainCell<32>});
+    registerWorkload(
+        {.name = "chain_dispatch_j48_7stages_empty", .run = &runChainCell<48>});
+    registerWorkload(
+        {.name = "chain_dispatch_j96_7stages_empty", .run = &runChainCell<96>});
     registerWorkload({.name = "chain_pareto_j8_7stages_pareto_body",
-                      .run = &runChainParetoJ8});
+                      .run = &runChainParetoCell<8>});
     registerWorkload({.name = "chain_pareto_j16_7stages_pareto_body",
-                      .run = &runChainParetoJ16});
+                      .run = &runChainParetoCell<16>});
+    registerWorkload({.name = "chain_pareto_j32_7stages_pareto_body",
+                      .run = &runChainParetoCell<32>});
+    registerWorkload({.name = "chain_pareto_j48_7stages_pareto_body",
+                      .run = &runChainParetoCell<48>});
+    registerWorkload({.name = "chain_pareto_j96_7stages_pareto_body",
+                      .run = &runChainParetoCell<96>});
   }
 };
 

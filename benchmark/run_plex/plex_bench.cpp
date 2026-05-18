@@ -34,6 +34,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <future>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -383,15 +384,30 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
   return table;
 }
 
-// 30-phase x 16-worker x 5 us body.
-BenchTable runPlexJ16(const CyclesPerNanosecond &cal) {
-  return buildTable(/*participants=*/16, "j16_30phases_5us", cal);
-}
-
-/// 30-phase x 8-worker variant; sanity-check that mid-tier participants do
-/// not regress.
-BenchTable runPlexJ8(const CyclesPerNanosecond &cal) {
-  return buildTable(/*participants=*/8, "j8_30phases_5us", cal);
+template <std::size_t JParticipants>
+BenchTable runPlexCell(const CyclesPerNanosecond &cal) {
+  static_assert(JParticipants == 8 || JParticipants == 16 ||
+                    JParticipants == 32 || JParticipants == 48 ||
+                    JParticipants == 96,
+                "unsupported j-value");
+  constexpr const char *jSuffix = []() -> const char * {
+    if constexpr (JParticipants == 8) {
+      return "j8_30phases_5us";
+    } else if constexpr (JParticipants == 16) {
+      return "j16_30phases_5us";
+    } else if constexpr (JParticipants == 32) {
+      return "j32_30phases_5us";
+    } else if constexpr (JParticipants == 48) {
+      return "j48_30phases_5us";
+    } else {
+      return "j96_30phases_5us";
+    }
+  }();
+  if (!hasEnoughPhysicalCores(JParticipants)) {
+    throw std::runtime_error("needs " + std::to_string(JParticipants) +
+                             " physical cores");
+  }
+  return buildTable(JParticipants, jSuffix, cal);
 }
 
 /// File-scope registrar; pushes the workloads into the bench registry at TU
@@ -399,9 +415,15 @@ BenchTable runPlexJ8(const CyclesPerNanosecond &cal) {
 struct PlexRegistrar {
   PlexRegistrar() {
     registerWorkload(
-        {.name = "plex_transition_j8_30phases_5us", .run = &runPlexJ8});
+        {.name = "plex_transition_j8_30phases_5us", .run = &runPlexCell<8>});
     registerWorkload(
-        {.name = "plex_transition_j16_30phases_5us", .run = &runPlexJ16});
+        {.name = "plex_transition_j16_30phases_5us", .run = &runPlexCell<16>});
+    registerWorkload(
+        {.name = "plex_transition_j32_30phases_5us", .run = &runPlexCell<32>});
+    registerWorkload(
+        {.name = "plex_transition_j48_30phases_5us", .run = &runPlexCell<48>});
+    registerWorkload(
+        {.name = "plex_transition_j96_30phases_5us", .run = &runPlexCell<96>});
   }
 };
 

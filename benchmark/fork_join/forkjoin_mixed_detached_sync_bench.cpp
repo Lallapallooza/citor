@@ -25,6 +25,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -166,19 +167,39 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
   return table;
 }
 
-BenchTable runJ8(const CyclesPerNanosecond &cal) {
-  return buildTable(8, "j8", cal);
-}
-BenchTable runJ16(const CyclesPerNanosecond &cal) {
-  return buildTable(16, "j16", cal);
+template <std::size_t JParticipants>
+BenchTable runCell(const CyclesPerNanosecond &cal) {
+  static_assert(JParticipants == 8 || JParticipants == 16 ||
+                    JParticipants == 32 || JParticipants == 48,
+                "unsupported j-value");
+  constexpr const char *jSuffix = []() -> const char * {
+    if constexpr (JParticipants == 8) {
+      return "j8";
+    } else if constexpr (JParticipants == 16) {
+      return "j16";
+    } else if constexpr (JParticipants == 32) {
+      return "j32";
+    } else {
+      return "j48";
+    }
+  }();
+  if (!hasEnoughPhysicalCores(JParticipants)) {
+    throw std::runtime_error("needs " + std::to_string(JParticipants) +
+                             " physical cores");
+  }
+  return buildTable(JParticipants, jSuffix, cal);
 }
 
 struct MixedRegistrar {
   MixedRegistrar() {
     registerWorkload(
-        {.name = "forkjoin_mixed_detached_sync_j8", .run = &runJ8});
+        {.name = "forkjoin_mixed_detached_sync_j8", .run = &runCell<8>});
     registerWorkload(
-        {.name = "forkjoin_mixed_detached_sync_j16", .run = &runJ16});
+        {.name = "forkjoin_mixed_detached_sync_j16", .run = &runCell<16>});
+    registerWorkload(
+        {.name = "forkjoin_mixed_detached_sync_j32", .run = &runCell<32>});
+    registerWorkload(
+        {.name = "forkjoin_mixed_detached_sync_j48", .run = &runCell<48>});
   }
 };
 

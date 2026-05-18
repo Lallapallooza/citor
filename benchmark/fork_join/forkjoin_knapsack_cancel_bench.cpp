@@ -35,6 +35,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -558,6 +559,13 @@ BenchTable buildTable(std::size_t participants, KnapsackCell cell,
 
 template <std::size_t CellIdx, std::size_t Participants>
 BenchTable runKnapsackCell(const CyclesPerNanosecond &cal) {
+  static_assert(Participants == 8 || Participants == 16 || Participants == 32 ||
+                    Participants == 48,
+                "unsupported j-value");
+  if (!hasEnoughPhysicalCores(Participants)) {
+    throw std::runtime_error("needs " + std::to_string(Participants) +
+                             " physical cores");
+  }
   constexpr KnapsackCell cell = kCells[CellIdx];
   return buildTable(Participants, cell, cal);
 }
@@ -568,10 +576,18 @@ struct KnapsackRegistrar {
                       .run = &runKnapsackCell<0, 8>});
     registerWorkload({.name = "forkjoin_knapsack_cancel_j16_n20",
                       .run = &runKnapsackCell<0, 16>});
+    registerWorkload({.name = "forkjoin_knapsack_cancel_j32_n20",
+                      .run = &runKnapsackCell<0, 32>});
+    registerWorkload({.name = "forkjoin_knapsack_cancel_j48_n20",
+                      .run = &runKnapsackCell<0, 48>});
     registerWorkload({.name = "forkjoin_knapsack_cancel_j8_n24",
                       .run = &runKnapsackCell<1, 8>});
     registerWorkload({.name = "forkjoin_knapsack_cancel_j16_n24",
                       .run = &runKnapsackCell<1, 16>});
+    registerWorkload({.name = "forkjoin_knapsack_cancel_j32_n24",
+                      .run = &runKnapsackCell<1, 32>});
+    registerWorkload({.name = "forkjoin_knapsack_cancel_j48_n24",
+                      .run = &runKnapsackCell<1, 48>});
   }
 };
 

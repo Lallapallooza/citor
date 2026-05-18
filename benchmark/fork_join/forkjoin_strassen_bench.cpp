@@ -41,6 +41,7 @@
 #include <cstdlib>
 #include <memory>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -621,6 +622,13 @@ BenchTable buildTable(std::size_t participants, StrassenCell cell,
 
 template <std::size_t CellIdx, std::size_t Participants>
 BenchTable runStrassenCell(const CyclesPerNanosecond &cal) {
+  static_assert(Participants == 8 || Participants == 16 || Participants == 32 ||
+                    Participants == 48 || Participants == 96,
+                "unsupported j-value");
+  if (!hasEnoughPhysicalCores(Participants)) {
+    throw std::runtime_error("needs " + std::to_string(Participants) +
+                             " physical cores");
+  }
   constexpr StrassenCell cell = kCells[CellIdx];
   return buildTable(Participants, cell, cal);
 }
@@ -631,10 +639,22 @@ struct StrassenRegistrar {
         {.name = "forkjoin_strassen_j8_n1024", .run = &runStrassenCell<0, 8>});
     registerWorkload({.name = "forkjoin_strassen_j16_n1024",
                       .run = &runStrassenCell<0, 16>});
+    registerWorkload({.name = "forkjoin_strassen_j32_n1024",
+                      .run = &runStrassenCell<0, 32>});
+    registerWorkload({.name = "forkjoin_strassen_j48_n1024",
+                      .run = &runStrassenCell<0, 48>});
+    registerWorkload({.name = "forkjoin_strassen_j96_n1024",
+                      .run = &runStrassenCell<0, 96>});
     registerWorkload(
         {.name = "forkjoin_strassen_j8_n2048", .run = &runStrassenCell<1, 8>});
     registerWorkload({.name = "forkjoin_strassen_j16_n2048",
                       .run = &runStrassenCell<1, 16>});
+    registerWorkload({.name = "forkjoin_strassen_j32_n2048",
+                      .run = &runStrassenCell<1, 32>});
+    registerWorkload({.name = "forkjoin_strassen_j48_n2048",
+                      .run = &runStrassenCell<1, 48>});
+    registerWorkload({.name = "forkjoin_strassen_j96_n2048",
+                      .run = &runStrassenCell<1, 96>});
   }
 };
 

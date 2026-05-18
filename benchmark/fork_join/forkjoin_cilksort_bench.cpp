@@ -38,6 +38,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -626,6 +627,13 @@ BenchTable buildTable(std::size_t participants, CilksortCell cell,
 
 template <std::size_t CellIdx, std::size_t Participants>
 BenchTable runCilksortCell(const CyclesPerNanosecond &cal) {
+  static_assert(Participants == 8 || Participants == 16 || Participants == 32 ||
+                    Participants == 48 || Participants == 96,
+                "unsupported j-value");
+  if (!hasEnoughPhysicalCores(Participants)) {
+    throw std::runtime_error("needs " + std::to_string(Participants) +
+                             " physical cores");
+  }
   constexpr CilksortCell cell = kCells[CellIdx];
   return buildTable(Participants, cell, cal);
 }
@@ -637,9 +645,21 @@ struct CilksortRegistrar {
     registerWorkload(
         {.name = "forkjoin_cilksort_j16_n1m", .run = &runCilksortCell<0, 16>});
     registerWorkload(
+        {.name = "forkjoin_cilksort_j32_n1m", .run = &runCilksortCell<0, 32>});
+    registerWorkload(
+        {.name = "forkjoin_cilksort_j48_n1m", .run = &runCilksortCell<0, 48>});
+    registerWorkload(
+        {.name = "forkjoin_cilksort_j96_n1m", .run = &runCilksortCell<0, 96>});
+    registerWorkload(
         {.name = "forkjoin_cilksort_j8_n16m", .run = &runCilksortCell<1, 8>});
     registerWorkload(
         {.name = "forkjoin_cilksort_j16_n16m", .run = &runCilksortCell<1, 16>});
+    registerWorkload(
+        {.name = "forkjoin_cilksort_j32_n16m", .run = &runCilksortCell<1, 32>});
+    registerWorkload(
+        {.name = "forkjoin_cilksort_j48_n16m", .run = &runCilksortCell<1, 48>});
+    registerWorkload(
+        {.name = "forkjoin_cilksort_j96_n16m", .run = &runCilksortCell<1, 96>});
   }
 };
 

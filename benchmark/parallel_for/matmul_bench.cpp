@@ -20,6 +20,7 @@
 #include <cstring>
 #include <future>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -482,9 +483,9 @@ constexpr std::array<MatmulCell, 4> kCells{{
 
 /// Build a matmul comparison table for one `(j, N)` cell.
 BenchTable buildTable(std::size_t participants, MatmulCell cell,
-                      const CyclesPerNanosecond &cal) {
+                      const char *jSuffix, const CyclesPerNanosecond &cal) {
   BenchTable table;
-  table.workload = std::string{"matmul_j16_"} + cell.suffix;
+  table.workload = std::string{"matmul_"} + jSuffix + "_" + cell.suffix;
 
   table.rows.push_back(measureCitorMatmulWithHint<citor::StaticHints>(
       "citor::ThreadPool[Static]", participants, cell.n, cal));
@@ -525,18 +526,42 @@ BenchTable buildTable(std::size_t participants, MatmulCell cell,
   return table;
 }
 
-template <std::size_t CellIdx>
+template <std::size_t CellIdx, std::size_t JParticipants>
 BenchTable runCell(const CyclesPerNanosecond &cal) {
+  static_assert(JParticipants == 16 || JParticipants == 32 ||
+                    JParticipants == 48,
+                "unsupported j-value");
+  constexpr const char *jSuffix = []() -> const char * {
+    if constexpr (JParticipants == 16) {
+      return "j16";
+    } else if constexpr (JParticipants == 32) {
+      return "j32";
+    } else {
+      return "j48";
+    }
+  }();
+  if (!hasEnoughPhysicalCores(JParticipants)) {
+    throw std::runtime_error("needs " + std::to_string(JParticipants) +
+                             " physical cores");
+  }
   constexpr MatmulCell cell = kCells[CellIdx];
-  return buildTable(/*participants=*/16, cell, cal);
+  return buildTable(JParticipants, cell, jSuffix, cal);
 }
 
 struct MatmulRegistrar {
   MatmulRegistrar() {
-    registerWorkload({.name = "matmul_j16_n512", .run = &runCell<0>});
-    registerWorkload({.name = "matmul_j16_n1024", .run = &runCell<1>});
-    registerWorkload({.name = "matmul_j16_n2048", .run = &runCell<2>});
-    registerWorkload({.name = "matmul_j16_n4096", .run = &runCell<3>});
+    registerWorkload({.name = "matmul_j16_n512", .run = &runCell<0, 16>});
+    registerWorkload({.name = "matmul_j16_n1024", .run = &runCell<1, 16>});
+    registerWorkload({.name = "matmul_j16_n2048", .run = &runCell<2, 16>});
+    registerWorkload({.name = "matmul_j16_n4096", .run = &runCell<3, 16>});
+    registerWorkload({.name = "matmul_j32_n512", .run = &runCell<0, 32>});
+    registerWorkload({.name = "matmul_j32_n1024", .run = &runCell<1, 32>});
+    registerWorkload({.name = "matmul_j32_n2048", .run = &runCell<2, 32>});
+    registerWorkload({.name = "matmul_j32_n4096", .run = &runCell<3, 32>});
+    registerWorkload({.name = "matmul_j48_n512", .run = &runCell<0, 48>});
+    registerWorkload({.name = "matmul_j48_n1024", .run = &runCell<1, 48>});
+    registerWorkload({.name = "matmul_j48_n2048", .run = &runCell<2, 48>});
+    registerWorkload({.name = "matmul_j48_n4096", .run = &runCell<3, 48>});
   }
 };
 

@@ -28,6 +28,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -271,6 +272,13 @@ BenchTable buildTable(std::size_t participants, HeatCell cell,
 
 template <std::size_t CellIdx, std::size_t Participants>
 BenchTable runHeatCell(const CyclesPerNanosecond &cal) {
+  static_assert(Participants == 8 || Participants == 16 || Participants == 32 ||
+                    Participants == 48,
+                "unsupported j-value");
+  if (!hasEnoughPhysicalCores(Participants)) {
+    throw std::runtime_error("needs " + std::to_string(Participants) +
+                             " physical cores");
+  }
   constexpr HeatCell cell = kCells[CellIdx];
   return buildTable(Participants, cell, cal);
 }
@@ -282,9 +290,17 @@ struct HeatRegistrar {
     registerWorkload(
         {.name = "runplex_heat_j16_n2048", .run = &runHeatCell<0, 16>});
     registerWorkload(
+        {.name = "runplex_heat_j32_n2048", .run = &runHeatCell<0, 32>});
+    registerWorkload(
+        {.name = "runplex_heat_j48_n2048", .run = &runHeatCell<0, 48>});
+    registerWorkload(
         {.name = "runplex_heat_j8_n4096", .run = &runHeatCell<1, 8>});
     registerWorkload(
         {.name = "runplex_heat_j16_n4096", .run = &runHeatCell<1, 16>});
+    registerWorkload(
+        {.name = "runplex_heat_j32_n4096", .run = &runHeatCell<1, 32>});
+    registerWorkload(
+        {.name = "runplex_heat_j48_n4096", .run = &runHeatCell<1, 48>});
   }
 };
 

@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -241,17 +242,29 @@ BenchTable buildTable(std::size_t participants, const char *jSuffix,
 template <std::size_t JParticipants, std::size_t CellIdx>
 BenchTable runCell(const CyclesPerNanosecond &cal) {
   constexpr BodyCell cell = kBodyCells[CellIdx];
-  static_assert(JParticipants == 2 || JParticipants == 8 || JParticipants == 16,
+  static_assert(JParticipants == 2 || JParticipants == 8 ||
+                    JParticipants == 16 || JParticipants == 32 ||
+                    JParticipants == 48 || JParticipants == 96,
                 "unsupported j-value");
   constexpr const char *jSuffix = []() -> const char * {
     if constexpr (JParticipants == 2) {
       return "j2";
     } else if constexpr (JParticipants == 8) {
       return "j8";
-    } else {
+    } else if constexpr (JParticipants == 16) {
       return "j16";
+    } else if constexpr (JParticipants == 32) {
+      return "j32";
+    } else if constexpr (JParticipants == 48) {
+      return "j48";
+    } else {
+      return "j96";
     }
   }();
+  if (!hasEnoughPhysicalCores(JParticipants)) {
+    throw std::runtime_error("needs " + std::to_string(JParticipants) +
+                             " physical cores");
+  }
   return buildTable(JParticipants, jSuffix, cell, cal);
 }
 
@@ -289,6 +302,30 @@ struct GranularityRegistrar {
         {.name = "granularity_j16_body100us", .run = &runCell<16, 4>});
     registerWorkload(
         {.name = "granularity_j16_body1ms", .run = &runCell<16, 5>});
+    // j = 32 (skipped on hosts with fewer than 32 physical cores)
+    registerWorkload({.name = "granularity_j32_body0", .run = &runCell<32, 0>});
+    registerWorkload(
+        {.name = "granularity_j32_body100ns", .run = &runCell<32, 1>});
+    registerWorkload(
+        {.name = "granularity_j32_body1us", .run = &runCell<32, 2>});
+    registerWorkload(
+        {.name = "granularity_j32_body10us", .run = &runCell<32, 3>});
+    registerWorkload(
+        {.name = "granularity_j32_body100us", .run = &runCell<32, 4>});
+    registerWorkload(
+        {.name = "granularity_j32_body1ms", .run = &runCell<32, 5>});
+    // j = 48 (skipped on hosts with fewer than 48 physical cores)
+    registerWorkload({.name = "granularity_j48_body0", .run = &runCell<48, 0>});
+    registerWorkload(
+        {.name = "granularity_j48_body100ns", .run = &runCell<48, 1>});
+    registerWorkload(
+        {.name = "granularity_j48_body1us", .run = &runCell<48, 2>});
+    registerWorkload(
+        {.name = "granularity_j48_body10us", .run = &runCell<48, 3>});
+    registerWorkload(
+        {.name = "granularity_j48_body100us", .run = &runCell<48, 4>});
+    registerWorkload(
+        {.name = "granularity_j48_body1ms", .run = &runCell<48, 5>});
   }
 };
 

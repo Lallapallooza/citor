@@ -56,6 +56,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -670,53 +671,91 @@ BenchTable buildQueensTable(std::size_t participants, const char *suffix,
   return table;
 }
 
-BenchTable runFibJ8(const CyclesPerNanosecond &cal) {
-  return buildFibTable(8, "j8", cal);
+template <std::size_t JParticipants>
+[[nodiscard]] constexpr const char *jSuffix() noexcept {
+  if constexpr (JParticipants == 8) {
+    return "j8";
+  } else if constexpr (JParticipants == 16) {
+    return "j16";
+  } else if constexpr (JParticipants == 32) {
+    return "j32";
+  } else {
+    return "j48";
+  }
 }
-BenchTable runFibJ16(const CyclesPerNanosecond &cal) {
-  return buildFibTable(16, "j16", cal);
+
+template <std::size_t JParticipants>
+inline void ensurePhysicalCores() {
+  static_assert(JParticipants == 8 || JParticipants == 16 ||
+                    JParticipants == 32 || JParticipants == 48,
+                "unsupported j-value");
+  if (!hasEnoughPhysicalCores(JParticipants)) {
+    throw std::runtime_error("needs " + std::to_string(JParticipants) +
+                             " physical cores");
+  }
 }
-BenchTable runFibFineJ8(const CyclesPerNanosecond &cal) {
-  return buildFibFineTable(8, "j8", cal);
+
+template <std::size_t JParticipants>
+BenchTable runFibCell(const CyclesPerNanosecond &cal) {
+  ensurePhysicalCores<JParticipants>();
+  return buildFibTable(JParticipants, jSuffix<JParticipants>(), cal);
 }
-BenchTable runFibFineJ16(const CyclesPerNanosecond &cal) {
-  return buildFibFineTable(16, "j16", cal);
+template <std::size_t JParticipants>
+BenchTable runFibFineCell(const CyclesPerNanosecond &cal) {
+  ensurePhysicalCores<JParticipants>();
+  return buildFibFineTable(JParticipants, jSuffix<JParticipants>(), cal);
 }
-BenchTable runFibTortureN30J8(const CyclesPerNanosecond &cal) {
-  return buildFibTortureTable(8, 30, "n30_j8", cal);
+template <std::size_t JParticipants, int N>
+BenchTable runFibTortureCell(const CyclesPerNanosecond &cal) {
+  ensurePhysicalCores<JParticipants>();
+  const std::string suffix =
+      std::string{"n"} + std::to_string(N) + "_" + jSuffix<JParticipants>();
+  return buildFibTortureTable(JParticipants, N, suffix.c_str(), cal);
 }
-BenchTable runFibTortureN30J16(const CyclesPerNanosecond &cal) {
-  return buildFibTortureTable(16, 30, "n30_j16", cal);
-}
-BenchTable runFibTortureN35J8(const CyclesPerNanosecond &cal) {
-  return buildFibTortureTable(8, 35, "n35_j8", cal);
-}
-BenchTable runFibTortureN35J16(const CyclesPerNanosecond &cal) {
-  return buildFibTortureTable(16, 35, "n35_j16", cal);
-}
-BenchTable runQueensJ8(const CyclesPerNanosecond &cal) {
-  return buildQueensTable(8, "j8", cal);
-}
-BenchTable runQueensJ16(const CyclesPerNanosecond &cal) {
-  return buildQueensTable(16, "j16", cal);
+template <std::size_t JParticipants>
+BenchTable runQueensCell(const CyclesPerNanosecond &cal) {
+  ensurePhysicalCores<JParticipants>();
+  return buildQueensTable(JParticipants, jSuffix<JParticipants>(), cal);
 }
 
 struct ForkJoinRegistrar {
   ForkJoinRegistrar() {
-    registerWorkload({.name = "forkjoin_fib28_j8", .run = &runFibJ8});
-    registerWorkload({.name = "forkjoin_fib28_j16", .run = &runFibJ16});
-    registerWorkload({.name = "forkjoin_fib_fine_j8", .run = &runFibFineJ8});
-    registerWorkload({.name = "forkjoin_fib_fine_j16", .run = &runFibFineJ16});
+    registerWorkload({.name = "forkjoin_fib28_j8", .run = &runFibCell<8>});
+    registerWorkload({.name = "forkjoin_fib28_j16", .run = &runFibCell<16>});
+    registerWorkload({.name = "forkjoin_fib28_j32", .run = &runFibCell<32>});
+    registerWorkload({.name = "forkjoin_fib28_j48", .run = &runFibCell<48>});
     registerWorkload(
-        {.name = "forkjoin_fib_torture_n30_j8", .run = &runFibTortureN30J8});
+        {.name = "forkjoin_fib_fine_j8", .run = &runFibFineCell<8>});
     registerWorkload(
-        {.name = "forkjoin_fib_torture_n30_j16", .run = &runFibTortureN30J16});
+        {.name = "forkjoin_fib_fine_j16", .run = &runFibFineCell<16>});
     registerWorkload(
-        {.name = "forkjoin_fib_torture_n35_j8", .run = &runFibTortureN35J8});
+        {.name = "forkjoin_fib_fine_j32", .run = &runFibFineCell<32>});
     registerWorkload(
-        {.name = "forkjoin_fib_torture_n35_j16", .run = &runFibTortureN35J16});
-    registerWorkload({.name = "forkjoin_nqueens12_j8", .run = &runQueensJ8});
-    registerWorkload({.name = "forkjoin_nqueens12_j16", .run = &runQueensJ16});
+        {.name = "forkjoin_fib_fine_j48", .run = &runFibFineCell<48>});
+    registerWorkload({.name = "forkjoin_fib_torture_n30_j8",
+                      .run = &runFibTortureCell<8, 30>});
+    registerWorkload({.name = "forkjoin_fib_torture_n30_j16",
+                      .run = &runFibTortureCell<16, 30>});
+    registerWorkload({.name = "forkjoin_fib_torture_n30_j32",
+                      .run = &runFibTortureCell<32, 30>});
+    registerWorkload({.name = "forkjoin_fib_torture_n30_j48",
+                      .run = &runFibTortureCell<48, 30>});
+    registerWorkload({.name = "forkjoin_fib_torture_n35_j8",
+                      .run = &runFibTortureCell<8, 35>});
+    registerWorkload({.name = "forkjoin_fib_torture_n35_j16",
+                      .run = &runFibTortureCell<16, 35>});
+    registerWorkload({.name = "forkjoin_fib_torture_n35_j32",
+                      .run = &runFibTortureCell<32, 35>});
+    registerWorkload({.name = "forkjoin_fib_torture_n35_j48",
+                      .run = &runFibTortureCell<48, 35>});
+    registerWorkload(
+        {.name = "forkjoin_nqueens12_j8", .run = &runQueensCell<8>});
+    registerWorkload(
+        {.name = "forkjoin_nqueens12_j16", .run = &runQueensCell<16>});
+    registerWorkload(
+        {.name = "forkjoin_nqueens12_j32", .run = &runQueensCell<32>});
+    registerWorkload(
+        {.name = "forkjoin_nqueens12_j48", .run = &runQueensCell<48>});
   }
 };
 

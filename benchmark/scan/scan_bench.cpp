@@ -33,6 +33,7 @@
 #include <cstring>
 #include <future>
 #include <numeric>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -665,23 +666,45 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
   return table;
 }
 
-/// 1M-element inclusive scan x 16 workers; the headline workload.
-BenchTable runScanJ16(const CyclesPerNanosecond &cal) {
-  return buildTable(/*participants=*/16, "j16_n1M_int64_plus", cal);
-}
-
-/// 1M-element inclusive scan x 8 workers; mid-tier sanity check.
-BenchTable runScanJ8(const CyclesPerNanosecond &cal) {
-  return buildTable(/*participants=*/8, "j8_n1M_int64_plus", cal);
+template <std::size_t JParticipants>
+BenchTable runScanCell(const CyclesPerNanosecond &cal) {
+  static_assert(JParticipants == 8 || JParticipants == 16 ||
+                    JParticipants == 32 || JParticipants == 48 ||
+                    JParticipants == 96,
+                "unsupported j-value");
+  constexpr const char *jSuffix = []() -> const char * {
+    if constexpr (JParticipants == 8) {
+      return "j8_n1M_int64_plus";
+    } else if constexpr (JParticipants == 16) {
+      return "j16_n1M_int64_plus";
+    } else if constexpr (JParticipants == 32) {
+      return "j32_n1M_int64_plus";
+    } else if constexpr (JParticipants == 48) {
+      return "j48_n1M_int64_plus";
+    } else {
+      return "j96_n1M_int64_plus";
+    }
+  }();
+  if (!hasEnoughPhysicalCores(JParticipants)) {
+    throw std::runtime_error("needs " + std::to_string(JParticipants) +
+                             " physical cores");
+  }
+  return buildTable(JParticipants, jSuffix, cal);
 }
 
 /// File-scope registrar.
 struct ScanRegistrar {
   ScanRegistrar() {
     registerWorkload(
-        {.name = "scan_inclusive_j8_n1M_int64_plus", .run = &runScanJ8});
+        {.name = "scan_inclusive_j8_n1M_int64_plus", .run = &runScanCell<8>});
     registerWorkload(
-        {.name = "scan_inclusive_j16_n1M_int64_plus", .run = &runScanJ16});
+        {.name = "scan_inclusive_j16_n1M_int64_plus", .run = &runScanCell<16>});
+    registerWorkload(
+        {.name = "scan_inclusive_j32_n1M_int64_plus", .run = &runScanCell<32>});
+    registerWorkload(
+        {.name = "scan_inclusive_j48_n1M_int64_plus", .run = &runScanCell<48>});
+    registerWorkload(
+        {.name = "scan_inclusive_j96_n1M_int64_plus", .run = &runScanCell<96>});
   }
 };
 

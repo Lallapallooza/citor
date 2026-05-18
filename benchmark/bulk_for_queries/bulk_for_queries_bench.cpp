@@ -33,6 +33,7 @@
 #include <future>
 #include <limits>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -68,9 +69,9 @@ constexpr std::size_t kRefPoints = 10'000;
 /// multiply-adds.
 constexpr std::size_t kDim = 64;
 
-/// Worker count for the bench. Lines up with the representative bulk-query
-/// workload size.
-constexpr std::size_t kParticipants = 16;
+// Per-cell participant count is supplied by `runCell<J>()` and threaded
+// through every measure helper. Block-range computation uses the captured
+// value instead of a file-scope constant.
 
 /// Synthetic per-query body: compute the squared-Euclidean distance from
 ///        `query[q]` to every reference point and store the minimum in
@@ -130,6 +131,11 @@ blockRange(std::size_t blockIdx, std::size_t blocks) noexcept {
   return {lo, hi};
 }
 
+/// Build the workload name suffix for this `participants` value.
+[[nodiscard]] inline std::string buildWorkloadName(std::size_t participants) {
+  return "bulk_for_queries_q10k_n10k_d64_j" + std::to_string(participants);
+}
+
 /// Generic measurement loop: invoke |run|() once per warmup iteration, then
 /// `kIterations` measured iterations stamping the cycle delta around each call.
 template <class RunFn>
@@ -149,8 +155,9 @@ template <class RunFn>
   return finalizeRow(name, samples);
 }
 
-[[nodiscard]] BenchRow measureNewPool(const CyclesPerNanosecond &cal) {
-  ThreadPool pool(kParticipants);
+[[nodiscard]] BenchRow measureNewPool(std::size_t participants,
+                                      const CyclesPerNanosecond &cal) {
+  ThreadPool pool(participants);
   Workload w = buildWorkload();
   const float *queries = w.queries.data();
   const float *refs = w.refs.data();
@@ -167,8 +174,9 @@ template <class RunFn>
   return row;
 }
 
-[[nodiscard]] BenchRow measureBsPool(const CyclesPerNanosecond &cal) {
-  BS::light_thread_pool pool(kParticipants);
+[[nodiscard]] BenchRow measureBsPool(std::size_t participants,
+                                     const CyclesPerNanosecond &cal) {
+  BS::light_thread_pool pool(participants);
   Workload w = buildWorkload();
   const float *queries = w.queries.data();
   const float *refs = w.refs.data();
@@ -188,13 +196,14 @@ template <class RunFn>
 /// dp::thread_pool ships no multi-block API; we fan out N independent enqueues
 /// (one per block) and join the resulting futures. This is the natural
 /// dp-shaped equivalent of `submit_blocks`.
-[[nodiscard]] BenchRow measureDpPool(const CyclesPerNanosecond &cal) {
-  dp::thread_pool<> pool(static_cast<unsigned int>(kParticipants));
+[[nodiscard]] BenchRow measureDpPool(std::size_t participants,
+                                     const CyclesPerNanosecond &cal) {
+  dp::thread_pool<> pool(static_cast<unsigned int>(participants));
   Workload w = buildWorkload();
   const float *queries = w.queries.data();
   const float *refs = w.refs.data();
   float *out = w.outBuf.data();
-  const std::size_t blocks = kParticipants;
+  const std::size_t blocks = participants;
   auto bodyChunk = [queries, refs, out](std::size_t lo, std::size_t hi) {
     for (std::size_t q = lo; q < hi; ++q) {
       runOneQuery(q, queries, refs, out);
@@ -220,14 +229,15 @@ template <class RunFn>
 }
 
 /// task_thread_pool ships no multi-block API; same N-future shape as dp.
-[[nodiscard]] BenchRow measureTaskPool(const CyclesPerNanosecond &cal) {
+[[nodiscard]] BenchRow measureTaskPool(std::size_t participants,
+                                       const CyclesPerNanosecond &cal) {
   ::task_thread_pool::task_thread_pool pool(
-      static_cast<unsigned int>(kParticipants));
+      static_cast<unsigned int>(participants));
   Workload w = buildWorkload();
   const float *queries = w.queries.data();
   const float *refs = w.refs.data();
   float *out = w.outBuf.data();
-  const std::size_t blocks = kParticipants;
+  const std::size_t blocks = participants;
   auto bodyChunk = [queries, refs, out](std::size_t lo, std::size_t hi) {
     for (std::size_t q = lo; q < hi; ++q) {
       runOneQuery(q, queries, refs, out);
@@ -253,13 +263,14 @@ template <class RunFn>
 }
 
 /// riften::Thiefpool ships no multi-block API; same N-future shape as dp.
-[[nodiscard]] BenchRow measureRiftenPool(const CyclesPerNanosecond &cal) {
-  riften::Thiefpool pool(kParticipants);
+[[nodiscard]] BenchRow measureRiftenPool(std::size_t participants,
+                                         const CyclesPerNanosecond &cal) {
+  riften::Thiefpool pool(participants);
   Workload w = buildWorkload();
   const float *queries = w.queries.data();
   const float *refs = w.refs.data();
   float *out = w.outBuf.data();
-  const std::size_t blocks = kParticipants;
+  const std::size_t blocks = participants;
   auto bodyChunk = [queries, refs, out](std::size_t lo, std::size_t hi) {
     for (std::size_t q = lo; q < hi; ++q) {
       runOneQuery(q, queries, refs, out);
@@ -285,13 +296,14 @@ template <class RunFn>
 }
 
 #ifdef CITOR_BENCH_HAS_TBB
-[[nodiscard]] BenchRow measureTbbPool(const CyclesPerNanosecond &cal) {
-  auto arena = CompetitorTraits<::tbb::task_arena>::make(kParticipants);
+[[nodiscard]] BenchRow measureTbbPool(std::size_t participants,
+                                      const CyclesPerNanosecond &cal) {
+  auto arena = CompetitorTraits<::tbb::task_arena>::make(participants);
   Workload w = buildWorkload();
   const float *queries = w.queries.data();
   const float *refs = w.refs.data();
   float *out = w.outBuf.data();
-  const std::size_t grain = (kQueries + kParticipants - 1) / kParticipants;
+  const std::size_t grain = (kQueries + participants - 1) / participants;
   auto bodyChunk = [queries, refs, out](std::size_t lo, std::size_t hi) {
     for (std::size_t q = lo; q < hi; ++q) {
       runOneQuery(q, queries, refs, out);
@@ -308,8 +320,9 @@ template <class RunFn>
 #endif
 
 #ifdef CITOR_BENCH_HAS_TASKFLOW
-[[nodiscard]] BenchRow measureTaskflowPool(const CyclesPerNanosecond &cal) {
-  auto exec = CompetitorTraits<::tf::Executor>::make(kParticipants);
+[[nodiscard]] BenchRow measureTaskflowPool(std::size_t participants,
+                                           const CyclesPerNanosecond &cal) {
+  auto exec = CompetitorTraits<::tf::Executor>::make(participants);
   Workload w = buildWorkload();
   const float *queries = w.queries.data();
   const float *refs = w.refs.data();
@@ -321,7 +334,7 @@ template <class RunFn>
   };
   BenchRow row = measureLoop(CompetitorTraits<::tf::Executor>::name, cal, [&] {
     CompetitorTraits<::tf::Executor>::parallelFor(
-        *exec, std::size_t{0}, kQueries, kParticipants, bodyChunk);
+        *exec, std::size_t{0}, kQueries, participants, bodyChunk);
   });
   (void)out[0];
   return row;
@@ -329,8 +342,9 @@ template <class RunFn>
 #endif
 
 #ifdef CITOR_BENCH_HAS_EIGEN_THREADPOOL
-[[nodiscard]] BenchRow measureEigenPool(const CyclesPerNanosecond &cal) {
-  auto pool = CompetitorTraits<::Eigen::ThreadPool>::make(kParticipants);
+[[nodiscard]] BenchRow measureEigenPool(std::size_t participants,
+                                        const CyclesPerNanosecond &cal) {
+  auto pool = CompetitorTraits<::Eigen::ThreadPool>::make(participants);
   Workload w = buildWorkload();
   const float *queries = w.queries.data();
   const float *refs = w.refs.data();
@@ -343,7 +357,7 @@ template <class RunFn>
   BenchRow row =
       measureLoop(CompetitorTraits<::Eigen::ThreadPool>::name, cal, [&] {
         CompetitorTraits<::Eigen::ThreadPool>::parallelFor(
-            *pool, std::size_t{0}, kQueries, kParticipants, bodyChunk);
+            *pool, std::size_t{0}, kQueries, participants, bodyChunk);
       });
   (void)out[0];
   return row;
@@ -351,8 +365,9 @@ template <class RunFn>
 #endif
 
 #ifdef CITOR_BENCH_HAS_LEOPARD
-[[nodiscard]] BenchRow measureLeopardPool(const CyclesPerNanosecond &cal) {
-  auto pool = CompetitorTraits<hmthrp::ThreadPool>::make(kParticipants);
+[[nodiscard]] BenchRow measureLeopardPool(std::size_t participants,
+                                          const CyclesPerNanosecond &cal) {
+  auto pool = CompetitorTraits<hmthrp::ThreadPool>::make(participants);
   Workload w = buildWorkload();
   const float *queries = w.queries.data();
   const float *refs = w.refs.data();
@@ -365,7 +380,7 @@ template <class RunFn>
   BenchRow row =
       measureLoop(CompetitorTraits<hmthrp::ThreadPool>::name, cal, [&] {
         CompetitorTraits<hmthrp::ThreadPool>::parallelFor(
-            *pool, std::size_t{0}, kQueries, kParticipants, bodyChunk);
+            *pool, std::size_t{0}, kQueries, participants, bodyChunk);
       });
   (void)out[0];
   return row;
@@ -373,8 +388,9 @@ template <class RunFn>
 #endif
 
 #ifdef CITOR_BENCH_HAS_DISPENSO
-[[nodiscard]] BenchRow measureDispensoPool(const CyclesPerNanosecond &cal) {
-  auto pool = CompetitorTraits<dispenso::ThreadPool>::make(kParticipants);
+[[nodiscard]] BenchRow measureDispensoPool(std::size_t participants,
+                                           const CyclesPerNanosecond &cal) {
+  auto pool = CompetitorTraits<dispenso::ThreadPool>::make(participants);
   Workload w = buildWorkload();
   const float *queries = w.queries.data();
   const float *refs = w.refs.data();
@@ -387,7 +403,7 @@ template <class RunFn>
   BenchRow row =
       measureLoop(CompetitorTraits<dispenso::ThreadPool>::name, cal, [&] {
         CompetitorTraits<dispenso::ThreadPool>::parallelFor(
-            *pool, std::size_t{0}, kQueries, kParticipants, bodyChunk);
+            *pool, std::size_t{0}, kQueries, participants, bodyChunk);
       });
   (void)out[0];
   return row;
@@ -395,8 +411,9 @@ template <class RunFn>
 #endif
 
 #ifdef CITOR_BENCH_HAS_OPENMP
-[[nodiscard]] BenchRow measureOpenMpPool(const CyclesPerNanosecond &cal) {
-  auto runner = CompetitorTraits<OpenMpRunner>::make(kParticipants);
+[[nodiscard]] BenchRow measureOpenMpPool(std::size_t participants,
+                                         const CyclesPerNanosecond &cal) {
+  auto runner = CompetitorTraits<OpenMpRunner>::make(participants);
   Workload w = buildWorkload();
   const float *queries = w.queries.data();
   const float *refs = w.refs.data();
@@ -430,33 +447,46 @@ template <class RunFn>
 }
 #endif
 
-BenchTable buildTable(const CyclesPerNanosecond &cal) {
+BenchTable buildTable(std::size_t participants,
+                      const CyclesPerNanosecond &cal) {
   BenchTable table;
-  table.workload = "bulk_for_queries_q10k_n10k_d64_j16";
-  table.rows.push_back(measureNewPool(cal));
-  table.rows.push_back(measureBsPool(cal));
-  table.rows.push_back(measureDpPool(cal));
-  table.rows.push_back(measureTaskPool(cal));
-  table.rows.push_back(measureRiftenPool(cal));
+  table.workload = buildWorkloadName(participants);
+  table.rows.push_back(measureNewPool(participants, cal));
+  table.rows.push_back(measureBsPool(participants, cal));
+  table.rows.push_back(measureDpPool(participants, cal));
+  table.rows.push_back(measureTaskPool(participants, cal));
+  table.rows.push_back(measureRiftenPool(participants, cal));
 #ifdef CITOR_BENCH_HAS_TBB
-  table.rows.push_back(measureTbbPool(cal));
+  table.rows.push_back(measureTbbPool(participants, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_TASKFLOW
-  table.rows.push_back(measureTaskflowPool(cal));
+  table.rows.push_back(measureTaskflowPool(participants, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_EIGEN_THREADPOOL
-  table.rows.push_back(measureEigenPool(cal));
+  table.rows.push_back(measureEigenPool(participants, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_OPENMP
-  table.rows.push_back(measureOpenMpPool(cal));
+  table.rows.push_back(measureOpenMpPool(participants, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_LEOPARD
-  table.rows.push_back(measureLeopardPool(cal));
+  table.rows.push_back(measureLeopardPool(participants, cal));
 #endif
 #ifdef CITOR_BENCH_HAS_DISPENSO
-  table.rows.push_back(measureDispensoPool(cal));
+  table.rows.push_back(measureDispensoPool(participants, cal));
 #endif
   return table;
+}
+
+template <std::size_t JParticipants>
+BenchTable runCell(const CyclesPerNanosecond &cal) {
+  static_assert(JParticipants == 16 || JParticipants == 32 ||
+                    JParticipants == 48 || JParticipants == 96,
+                "unsupported j-value");
+  if (!hasEnoughPhysicalCores(JParticipants)) {
+    throw std::runtime_error("needs " + std::to_string(JParticipants) +
+                             " physical cores");
+  }
+  return buildTable(JParticipants, cal);
 }
 
 /// File-scope registrar: pushes the workload into the bench registry at TU
@@ -464,7 +494,13 @@ BenchTable buildTable(const CyclesPerNanosecond &cal) {
 struct BulkForQueriesRegistrar {
   BulkForQueriesRegistrar() {
     registerWorkload(
-        {.name = "bulk_for_queries_q10k_n10k_d64_j16", .run = &buildTable});
+        {.name = "bulk_for_queries_q10k_n10k_d64_j16", .run = &runCell<16>});
+    registerWorkload(
+        {.name = "bulk_for_queries_q10k_n10k_d64_j32", .run = &runCell<32>});
+    registerWorkload(
+        {.name = "bulk_for_queries_q10k_n10k_d64_j48", .run = &runCell<48>});
+    registerWorkload(
+        {.name = "bulk_for_queries_q10k_n10k_d64_j96", .run = &runCell<96>});
   }
 };
 

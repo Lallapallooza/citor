@@ -31,6 +31,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -499,19 +500,39 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
   return table;
 }
 
-BenchTable runParetoBodyJ8(const CyclesPerNanosecond &cal) {
-  return buildTable(8, "j8_n1M", cal);
-}
-BenchTable runParetoBodyJ16(const CyclesPerNanosecond &cal) {
-  return buildTable(16, "j16_n1M", cal);
+template <std::size_t JParticipants>
+BenchTable runCell(const CyclesPerNanosecond &cal) {
+  static_assert(JParticipants == 8 || JParticipants == 16 ||
+                    JParticipants == 32 || JParticipants == 48 ||
+                    JParticipants == 96,
+                "unsupported j-value");
+  constexpr const char *jSuffix = []() -> const char * {
+    if constexpr (JParticipants == 8) {
+      return "j8_n1M";
+    } else if constexpr (JParticipants == 16) {
+      return "j16_n1M";
+    } else if constexpr (JParticipants == 32) {
+      return "j32_n1M";
+    } else if constexpr (JParticipants == 48) {
+      return "j48_n1M";
+    } else {
+      return "j96_n1M";
+    }
+  }();
+  if (!hasEnoughPhysicalCores(JParticipants)) {
+    throw std::runtime_error("needs " + std::to_string(JParticipants) +
+                             " physical cores");
+  }
+  return buildTable(JParticipants, jSuffix, cal);
 }
 
 struct ParetoBodyRegistrar {
   ParetoBodyRegistrar() {
-    registerWorkload(
-        {.name = "pareto_body_for_j8_n1M", .run = &runParetoBodyJ8});
-    registerWorkload(
-        {.name = "pareto_body_for_j16_n1M", .run = &runParetoBodyJ16});
+    registerWorkload({.name = "pareto_body_for_j8_n1M", .run = &runCell<8>});
+    registerWorkload({.name = "pareto_body_for_j16_n1M", .run = &runCell<16>});
+    registerWorkload({.name = "pareto_body_for_j32_n1M", .run = &runCell<32>});
+    registerWorkload({.name = "pareto_body_for_j48_n1M", .run = &runCell<48>});
+    registerWorkload({.name = "pareto_body_for_j96_n1M", .run = &runCell<96>});
   }
 };
 

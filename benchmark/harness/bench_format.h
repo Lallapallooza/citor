@@ -16,6 +16,8 @@
 #include <utility>
 #include <vector>
 
+#include "citor/detail/topology.h"
+
 namespace citor::bench {
 
 // Process-global toggle for the tail-percentile output columns. Default OFF
@@ -49,6 +51,23 @@ inline bool &rawSampleExportEnabled() {
 // stopwatch right now. The marker carries no semantic effect.
 inline void announceRow(std::string_view name) {
   std::cerr << "  ... " << name << "\n";
+}
+
+// Cached host physical-core count. One sysfs probe per process; cells
+// gate on this through `hasEnoughPhysicalCores()`.
+inline std::uint32_t hostPhysicalCoreCount() {
+  static const std::uint32_t cached = []() {
+    return citor::detail::detectTopology().physicalCount;
+  }();
+  return cached;
+}
+
+// True when the host has at least `needed` physical cores. Used by
+// per-cell `runCell<J>()` to short-circuit on undersized hosts. Gate
+// on physical cores, not logical: a j=32 cell should not run on a
+// 16-core host even when SMT exposes 32 logical CPUs.
+inline bool hasEnoughPhysicalCores(std::uint32_t needed) {
+  return hostPhysicalCoreCount() >= needed;
 }
 
 // Returns true when |name| should be measured. Empty filter list means "all

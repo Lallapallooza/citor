@@ -31,6 +31,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -181,23 +182,39 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
   return table;
 }
 
-BenchTable runColdFanoutJ16(const CyclesPerNanosecond &cal) {
-  return buildTable(/*participants=*/16, "j16_cold", cal);
-}
-
-BenchTable runColdFanoutJ8(const CyclesPerNanosecond &cal) {
-  return buildTable(/*participants=*/8, "j8_cold", cal);
-}
-
-BenchTable runColdFanoutJ2(const CyclesPerNanosecond &cal) {
-  return buildTable(/*participants=*/2, "j2_cold", cal);
+template <std::size_t JParticipants>
+BenchTable runCell(const CyclesPerNanosecond &cal) {
+  static_assert(JParticipants == 2 || JParticipants == 8 ||
+                    JParticipants == 16 || JParticipants == 32 ||
+                    JParticipants == 48,
+                "unsupported j-value");
+  constexpr const char *jSuffix = []() -> const char * {
+    if constexpr (JParticipants == 2) {
+      return "j2_cold";
+    } else if constexpr (JParticipants == 8) {
+      return "j8_cold";
+    } else if constexpr (JParticipants == 16) {
+      return "j16_cold";
+    } else if constexpr (JParticipants == 32) {
+      return "j32_cold";
+    } else {
+      return "j48_cold";
+    }
+  }();
+  if (!hasEnoughPhysicalCores(JParticipants)) {
+    throw std::runtime_error("needs " + std::to_string(JParticipants) +
+                             " physical cores");
+  }
+  return buildTable(JParticipants, jSuffix, cal);
 }
 
 struct ColdPathRegistrar {
   ColdPathRegistrar() {
-    registerWorkload({.name = "cold_fan_out_j2", .run = &runColdFanoutJ2});
-    registerWorkload({.name = "cold_fan_out_j8", .run = &runColdFanoutJ8});
-    registerWorkload({.name = "cold_fan_out_j16", .run = &runColdFanoutJ16});
+    registerWorkload({.name = "cold_fan_out_j2", .run = &runCell<2>});
+    registerWorkload({.name = "cold_fan_out_j8", .run = &runCell<8>});
+    registerWorkload({.name = "cold_fan_out_j16", .run = &runCell<16>});
+    registerWorkload({.name = "cold_fan_out_j32", .run = &runCell<32>});
+    registerWorkload({.name = "cold_fan_out_j48", .run = &runCell<48>});
   }
 };
 

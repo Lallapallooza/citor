@@ -32,6 +32,7 @@
 #include <cstdlib>
 #include <memory>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -342,6 +343,13 @@ BenchTable buildTable(std::size_t participants, MatmulCell cell,
 
 template <std::size_t CellIdx, std::size_t Participants>
 BenchTable runMatmulDacCell(const CyclesPerNanosecond &cal) {
+  static_assert(Participants == 8 || Participants == 16 || Participants == 32 ||
+                    Participants == 48 || Participants == 96,
+                "unsupported j-value");
+  if (!hasEnoughPhysicalCores(Participants)) {
+    throw std::runtime_error("needs " + std::to_string(Participants) +
+                             " physical cores");
+  }
   constexpr MatmulCell cell = kCells[CellIdx];
   return buildTable(Participants, cell, cal);
 }
@@ -352,10 +360,22 @@ struct MatmulDacRegistrar {
                       .run = &runMatmulDacCell<0, 8>});
     registerWorkload({.name = "forkjoin_matmul_dac_j16_n1024",
                       .run = &runMatmulDacCell<0, 16>});
+    registerWorkload({.name = "forkjoin_matmul_dac_j32_n1024",
+                      .run = &runMatmulDacCell<0, 32>});
+    registerWorkload({.name = "forkjoin_matmul_dac_j48_n1024",
+                      .run = &runMatmulDacCell<0, 48>});
+    registerWorkload({.name = "forkjoin_matmul_dac_j96_n1024",
+                      .run = &runMatmulDacCell<0, 96>});
     registerWorkload({.name = "forkjoin_matmul_dac_j8_n2048",
                       .run = &runMatmulDacCell<1, 8>});
     registerWorkload({.name = "forkjoin_matmul_dac_j16_n2048",
                       .run = &runMatmulDacCell<1, 16>});
+    registerWorkload({.name = "forkjoin_matmul_dac_j32_n2048",
+                      .run = &runMatmulDacCell<1, 32>});
+    registerWorkload({.name = "forkjoin_matmul_dac_j48_n2048",
+                      .run = &runMatmulDacCell<1, 48>});
+    registerWorkload({.name = "forkjoin_matmul_dac_j96_n2048",
+                      .run = &runMatmulDacCell<1, 96>});
   }
 };
 

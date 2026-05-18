@@ -15,6 +15,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -155,14 +156,35 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
   return table;
 }
 
-BenchTable runAffinityJ16(const CyclesPerNanosecond &cal) {
-  return buildTable(16, "j16_64MB_2KBstride", cal);
+template <std::size_t JParticipants>
+BenchTable runCell(const CyclesPerNanosecond &cal) {
+  static_assert(JParticipants == 16 || JParticipants == 32 ||
+                    JParticipants == 48,
+                "unsupported j-value");
+  constexpr const char *jSuffix = []() -> const char * {
+    if constexpr (JParticipants == 16) {
+      return "j16_64MB_2KBstride";
+    } else if constexpr (JParticipants == 32) {
+      return "j32_64MB_2KBstride";
+    } else {
+      return "j48_64MB_2KBstride";
+    }
+  }();
+  if (!hasEnoughPhysicalCores(JParticipants)) {
+    throw std::runtime_error("needs " + std::to_string(JParticipants) +
+                             " physical cores");
+  }
+  return buildTable(JParticipants, jSuffix, cal);
 }
 
 struct AffinitySweepRegistrar {
   AffinitySweepRegistrar() {
     registerWorkload({.name = "affinity_sweep_strided_j16_64MB_2KBstride",
-                      .run = &runAffinityJ16});
+                      .run = &runCell<16>});
+    registerWorkload({.name = "affinity_sweep_strided_j32_64MB_2KBstride",
+                      .run = &runCell<32>});
+    registerWorkload({.name = "affinity_sweep_strided_j48_64MB_2KBstride",
+                      .run = &runCell<48>});
   }
 };
 

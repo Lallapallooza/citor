@@ -34,6 +34,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <future>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -821,34 +822,73 @@ BenchTable buildKahanTable(std::size_t participants, const char *suffix,
   return table;
 }
 
-BenchTable runReducePlainJ2(const CyclesPerNanosecond &cal) {
-  return buildPlainTable(2, "j2_n1M", cal);
+template <std::size_t JParticipants>
+[[nodiscard]] constexpr const char *jSuffixN1M() noexcept {
+  if constexpr (JParticipants == 2) {
+    return "j2_n1M";
+  } else if constexpr (JParticipants == 8) {
+    return "j8_n1M";
+  } else if constexpr (JParticipants == 16) {
+    return "j16_n1M";
+  } else if constexpr (JParticipants == 32) {
+    return "j32_n1M";
+  } else if constexpr (JParticipants == 48) {
+    return "j48_n1M";
+  } else {
+    return "j96_n1M";
+  }
 }
-BenchTable runReducePlainJ8(const CyclesPerNanosecond &cal) {
-  return buildPlainTable(8, "j8_n1M", cal);
+
+template <std::size_t JParticipants>
+BenchTable runReducePlainCell(const CyclesPerNanosecond &cal) {
+  static_assert(JParticipants == 2 || JParticipants == 8 ||
+                    JParticipants == 16 || JParticipants == 32 ||
+                    JParticipants == 48 || JParticipants == 96,
+                "unsupported j-value");
+  if (!hasEnoughPhysicalCores(JParticipants)) {
+    throw std::runtime_error("needs " + std::to_string(JParticipants) +
+                             " physical cores");
+  }
+  return buildPlainTable(JParticipants, jSuffixN1M<JParticipants>(), cal);
 }
-BenchTable runReducePlainJ16(const CyclesPerNanosecond &cal) {
-  return buildPlainTable(16, "j16_n1M", cal);
-}
-BenchTable runReduceKahanJ8(const CyclesPerNanosecond &cal) {
-  return buildKahanTable(8, "j8_n1M", cal);
-}
-BenchTable runReduceKahanJ16(const CyclesPerNanosecond &cal) {
-  return buildKahanTable(16, "j16_n1M", cal);
+
+template <std::size_t JParticipants>
+BenchTable runReduceKahanCell(const CyclesPerNanosecond &cal) {
+  static_assert(JParticipants == 8 || JParticipants == 16 ||
+                    JParticipants == 32 || JParticipants == 48 ||
+                    JParticipants == 96,
+                "unsupported j-value");
+  if (!hasEnoughPhysicalCores(JParticipants)) {
+    throw std::runtime_error("needs " + std::to_string(JParticipants) +
+                             " physical cores");
+  }
+  return buildKahanTable(JParticipants, jSuffixN1M<JParticipants>(), cal);
 }
 
 struct ReduceRegistrar {
   ReduceRegistrar() {
     registerWorkload(
-        {.name = "reduce_plus_int64_j2_n1M", .run = &runReducePlainJ2});
+        {.name = "reduce_plus_int64_j2_n1M", .run = &runReducePlainCell<2>});
     registerWorkload(
-        {.name = "reduce_plus_int64_j8_n1M", .run = &runReducePlainJ8});
+        {.name = "reduce_plus_int64_j8_n1M", .run = &runReducePlainCell<8>});
     registerWorkload(
-        {.name = "reduce_plus_int64_j16_n1M", .run = &runReducePlainJ16});
+        {.name = "reduce_plus_int64_j16_n1M", .run = &runReducePlainCell<16>});
     registerWorkload(
-        {.name = "reduce_kahan_double_j8_n1M", .run = &runReduceKahanJ8});
+        {.name = "reduce_plus_int64_j32_n1M", .run = &runReducePlainCell<32>});
     registerWorkload(
-        {.name = "reduce_kahan_double_j16_n1M", .run = &runReduceKahanJ16});
+        {.name = "reduce_plus_int64_j48_n1M", .run = &runReducePlainCell<48>});
+    registerWorkload(
+        {.name = "reduce_plus_int64_j96_n1M", .run = &runReducePlainCell<96>});
+    registerWorkload(
+        {.name = "reduce_kahan_double_j8_n1M", .run = &runReduceKahanCell<8>});
+    registerWorkload({.name = "reduce_kahan_double_j16_n1M",
+                      .run = &runReduceKahanCell<16>});
+    registerWorkload({.name = "reduce_kahan_double_j32_n1M",
+                      .run = &runReduceKahanCell<32>});
+    registerWorkload({.name = "reduce_kahan_double_j48_n1M",
+                      .run = &runReduceKahanCell<48>});
+    registerWorkload({.name = "reduce_kahan_double_j96_n1M",
+                      .run = &runReduceKahanCell<96>});
   }
 };
 

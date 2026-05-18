@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -193,35 +194,47 @@ BenchTable buildTable(std::size_t participants, const char *suffix,
   return table;
 }
 
-/// Bench runner for the j=16 hot variant; the headline workload at the
-/// a representative dominant workload shape on multi-CCD AMD chips.
-BenchTable runEmptyFanoutJ16Hot(const CyclesPerNanosecond &cal) {
-  return buildTable(/*participants=*/16, "j16_hot", cal);
-}
-
-/// Bench runner for the j=8 hot variant; covers the canonical mid-tier
-/// representative shape so the harness's multi-`j` story is exercised
-/// end-to-end.
-BenchTable runEmptyFanoutJ8Hot(const CyclesPerNanosecond &cal) {
-  return buildTable(/*participants=*/8, "j8_hot", cal);
-}
-
-/// Bench runner for the j=2 hot variant. Sanity check that small-pool
-/// dispatch latency does not regress under the same harness.
-BenchTable runEmptyFanoutJ2Hot(const CyclesPerNanosecond &cal) {
-  return buildTable(/*participants=*/2, "j2_hot", cal);
+/// Templated runner over `JParticipants`. The host-core guard runs before any
+/// pool construction so the bench driver prints a SKIPPED line on undersized
+/// hosts.
+template <std::size_t JParticipants>
+BenchTable runCell(const CyclesPerNanosecond &cal) {
+  static_assert(JParticipants == 2 || JParticipants == 8 ||
+                    JParticipants == 16 || JParticipants == 32 ||
+                    JParticipants == 48 || JParticipants == 96,
+                "unsupported j-value");
+  constexpr const char *jSuffix = []() -> const char * {
+    if constexpr (JParticipants == 2) {
+      return "j2_hot";
+    } else if constexpr (JParticipants == 8) {
+      return "j8_hot";
+    } else if constexpr (JParticipants == 16) {
+      return "j16_hot";
+    } else if constexpr (JParticipants == 32) {
+      return "j32_hot";
+    } else if constexpr (JParticipants == 48) {
+      return "j48_hot";
+    } else {
+      return "j96_hot";
+    }
+  }();
+  if (!hasEnoughPhysicalCores(JParticipants)) {
+    throw std::runtime_error("needs " + std::to_string(JParticipants) +
+                             " physical cores");
+  }
+  return buildTable(JParticipants, jSuffix, cal);
 }
 
 /// File-scope registrar; runs at TU initialization, registering the workloads
 /// with the bench driver in registration order.
 struct EmptyFanoutRegistrar {
   EmptyFanoutRegistrar() {
-    registerWorkload(
-        {.name = "empty_fan_out_j2_hot", .run = &runEmptyFanoutJ2Hot});
-    registerWorkload(
-        {.name = "empty_fan_out_j8_hot", .run = &runEmptyFanoutJ8Hot});
-    registerWorkload(
-        {.name = "empty_fan_out_j16_hot", .run = &runEmptyFanoutJ16Hot});
+    registerWorkload({.name = "empty_fan_out_j2_hot", .run = &runCell<2>});
+    registerWorkload({.name = "empty_fan_out_j8_hot", .run = &runCell<8>});
+    registerWorkload({.name = "empty_fan_out_j16_hot", .run = &runCell<16>});
+    registerWorkload({.name = "empty_fan_out_j32_hot", .run = &runCell<32>});
+    registerWorkload({.name = "empty_fan_out_j48_hot", .run = &runCell<48>});
+    registerWorkload({.name = "empty_fan_out_j96_hot", .run = &runCell<96>});
   }
 };
 
