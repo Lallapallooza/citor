@@ -46,18 +46,12 @@ declare -A SKU=(
   [amd]=c7a.metal-48xl
   [intel]=c7i.metal-24xl
 )
-# Core mask. AMD c7a.metal-48xl has 96 cores across 2 NUMA nodes
-# (48 cores per node); intel c7i.metal-24xl is one socket with 48 cores.
-# We pin to the first 16 physical cores on NUMA node 0 in both cases to
-# match the citor target topology of one Zen CCD-equivalent.
-declare -A CORE_MASK=(
-  [amd]="0-15"
-  [intel]="0-15"
-)
-declare -A NUMA_NODE=(
-  [amd]="0"
-  [intel]="0"
-)
+# Bench runs unpinned across the whole instance. c7i.metal-24xl exposes
+# 48 physical cores (single Sapphire Rapids socket); c7a.metal-48xl
+# exposes 96 across 2 Genoa NUMA nodes. The high-j cells (j=32/48/96)
+# need that full width to clear the bench's `hasEnoughPhysicalCores`
+# guard. A `taskset -c 0-15` mask here matches the local 9950X3D
+# CCD-scale protocol but defeats the purpose of paying for bare metal.
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SHA="$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD)"
@@ -147,14 +141,21 @@ remote_bench_script() {
 set -euo pipefail
 sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-  build-essential cmake ninja-build git curl numactl util-linux \
-  gcc-14 g++-14 libtbb-dev libomp-14-dev pkg-config \
-  python3 python3-pip linux-tools-common linux-tools-generic >/dev/null
-# We build with gcc-14 instead of clang-18. Clang-18 has an OpenMP
+  ca-certificates wget gnupg >/dev/null
+# Ubuntu 24.04's default repos cap at clang-18, which has an OpenMP
 # frontend bug that rejects structured-binding capture in TUs that mix
-# OpenMP competitor wrappers with citor's templated dispatch headers
-# (the bench has both). gcc-14 handles it correctly. citor's own CI
-# uses both compilers; gcc-14 here keeps the bench build honest.
+# `#pragma omp` with citor's templated dispatch (the bench has both).
+# Pull clang-19 from apt.llvm.org; CI uses the same build path.
+sudo install -d -m 0755 /etc/apt/keyrings
+wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/llvm.gpg
+echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" \
+  | sudo tee /etc/apt/sources.list.d/llvm.list >/dev/null
+sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+  build-essential cmake ninja-build git curl numactl util-linux \
+  clang-19 lld-19 libomp-19-dev libtbb-dev pkg-config \
+  python3 linux-tools-common linux-tools-generic >/dev/null
 # CPU governor to performance for honest numbers (no fight with cpufreq).
 if [ -d /sys/devices/system/cpu/cpu0/cpufreq ]; then
   echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor >/dev/null || true
@@ -162,7 +163,7 @@ fi
 mkdir -p /tmp/citor
 tar -xzf /tmp/citor.tar.gz -C /tmp/citor
 cd /tmp/citor
-export CC=gcc-14 CXX=g++-14
+export CC=clang-19 CXX=clang++-19
 cmake -S . -B build -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCITOR_BUILD_BENCHMARK=ON \
@@ -170,12 +171,10 @@ cmake -S . -B build -G Ninja \
   -DCITOR_ENABLE_CLANG_TIDY=OFF >&2
 cmake --build build --target parallel_bench -j >&2
 mkdir -p /tmp/out
-# Pin to NUMA node 0 + first 16 cores on it.
-numactl --cpunodebind="$NUMA_NODE" --membind="$NUMA_NODE" \
-  taskset -c "$CORE_MASK" \
-  ./build/benchmark/parallel_bench \
-    ${FILTER:+--filter "$FILTER"} \
-    --export /tmp/out/results.json
+# Unpinned: lets the bench's per-cell j sweep exercise the whole box.
+./build/benchmark/parallel_bench \
+  ${FILTER:+--filter "$FILTER"} \
+  --export /tmp/out/results.json
 # Capture host provenance for the JSON sidecar.
 {
   echo "{"
@@ -183,9 +182,7 @@ numactl --cpunodebind="$NUMA_NODE" --membind="$NUMA_NODE" \
   echo "  \"kernel\": \"$(uname -r)\","
   echo "  \"cpu_model\": \"$(grep -m1 'model name' /proc/cpuinfo | sed 's/^[^:]*: //')\","
   echo "  \"physical_cores\": $(grep -c '^processor' /proc/cpuinfo),"
-  echo "  \"numa_nodes\": $(numactl --hardware | grep -c '^node ' || echo 0),"
-  echo "  \"core_mask\": \"$CORE_MASK\","
-  echo "  \"numa_node\": \"$NUMA_NODE\","
+  echo "  \"numa_nodes\": $(numactl --hardware 2>/dev/null | grep -c '^node ' || echo 0),"
   echo "  \"sku\": \"$INSTANCE_TYPE\","
   echo "  \"region\": \"$REGION\","
   echo "  \"governor\": \"$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)\""
@@ -198,14 +195,12 @@ REMOTE
 run_arch() {
   local arch="$1"
   local sku="${SKU[$arch]}"
-  local core_mask="${CORE_MASK[$arch]}"
-  local numa_node="${NUMA_NODE[$arch]}"
   local out_dir="$REPO_ROOT/bench_out/replication/${arch}-${SHA}-${TS}"
   mkdir -p "$out_dir"
   local log_file="$out_dir/run.log"
   exec 4>"$log_file"
 
-  log "=== arch=$arch sku=$sku core_mask=$core_mask numa_node=$numa_node ==="
+  log "=== arch=$arch sku=$sku (unpinned) ==="
   log "output dir: $out_dir"
 
   local ami sg_id sir_id instance_id host
@@ -290,7 +285,7 @@ run_arch() {
   log "running bench remotely (this takes ~1 h on the slow tail; live progress lands in run.log)..."
   ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -i "$SSH_KEY_FILE" ubuntu@"$host" \
-    "SHA='$SHA' INSTANCE_TYPE='$sku' REGION='$REGION' CORE_MASK='$core_mask' NUMA_NODE='$numa_node' FILTER='${FILTER:-}' bash $remote_script" \
+    "SHA='$SHA' INSTANCE_TYPE='$sku' REGION='$REGION' FILTER='${FILTER:-}' bash $remote_script" \
     2>&1 | tee -a "$log_file"
 
   log "pulling results ..."
