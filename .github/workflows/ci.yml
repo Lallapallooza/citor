@@ -120,7 +120,10 @@ jobs:
       - name: CPM source cache
         uses: actions/cache@v4
         with:
-          path: ~/.cache/CPM
+          # Path must match `CPM_SOURCE_CACHE` env in the Configure step
+          # below; otherwise the cache action saves/restores an empty home
+          # directory and CPM repopulates the workspace path every run.
+          path: ${{ github.workspace }}/.cache/CPM
           key: cpm-${{ runner.os }}-${{ hashFiles('cmake/CPM.cmake', 'cmake/GTestDep.cmake') }}
           restore-keys: |
             cpm-${{ runner.os }}-
@@ -193,7 +196,10 @@ jobs:
       - name: CPM source cache
         uses: actions/cache@v4
         with:
-          path: ~/.cache/CPM
+          # Path must match `CPM_SOURCE_CACHE` env in the Configure step
+          # below; otherwise the cache action saves/restores an empty home
+          # directory and CPM repopulates the workspace path every run.
+          path: ${{ github.workspace }}/.cache/CPM
           key: cpm-${{ runner.os }}-${{ hashFiles('cmake/CPM.cmake', 'cmake/GTestDep.cmake') }}
           restore-keys: |
             cpm-${{ runner.os }}-
@@ -240,7 +246,10 @@ jobs:
       - name: CPM source cache
         uses: actions/cache@v4
         with:
-          path: ~/AppData/Local/.cache/CPM
+          # Path must match `CPM_SOURCE_CACHE` env in the MSVC Configure
+          # step below; the home-directory path was a no-op cache (see
+          # Linux jobs above for the same fix).
+          path: ${{ github.workspace }}\.cache\CPM
           key: cpm-windows-${{ hashFiles('cmake/CPM.cmake', 'cmake/GTestDep.cmake') }}
           restore-keys: |
             cpm-windows-
@@ -283,7 +292,10 @@ jobs:
       - name: CPM source cache
         uses: actions/cache@v4
         with:
-          path: ~/.cache/CPM
+          # Path must match `CPM_SOURCE_CACHE` env in the Configure step
+          # below; otherwise the cache action saves/restores an empty home
+          # directory and CPM repopulates the workspace path every run.
+          path: ${{ github.workspace }}/.cache/CPM
           key: cpm-${{ runner.os }}-${{ hashFiles('cmake/CPM.cmake', 'cmake/GTestDep.cmake') }}
           restore-keys: |
             cpm-${{ runner.os }}-

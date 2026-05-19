@@ -594,23 +594,25 @@ template <class Pool, class EnqueueFn>
   BenchRow row = measureLoop(
       "dispenso::scan_two_wave", cal,
       [&] {
-        runTwoWaveScan(d, participants,
-                       [&](std::size_t blocks, auto blockBody) {
-                         dispenso::TaskSet ts(*pool);
-                         for (std::size_t b = 0; b < blocks; ++b) {
-                           const auto [lo, hi] = blockRange(b, blocks);
-                           if (lo == hi) {
-                             continue;
-                           }
-                           // `pool` is the return of `CompetitorTraits::make`,
-                           // which never returns null; the analyzer cannot
-                           // prove that.
-                           ts.schedule([b, lo, hi, &blockBody] {
-                             blockBody(b, lo, hi);
-                           }); // NOLINT(clang-analyzer-core.NullDereference)
-                         }
-                         ts.wait();
-                       });
+        runTwoWaveScan(
+            d, participants, [&](std::size_t blocks, auto blockBody) {
+              dispenso::TaskSet ts(*pool);
+              for (std::size_t b = 0; b < blocks; ++b) {
+                const auto [lo, hi] = blockRange(b, blocks);
+                if (lo == hi) {
+                  continue;
+                }
+                // `pool` is the return of `CompetitorTraits::make`,
+                // which never returns null, and `blockBody` is a
+                // captured stack callable that outlives every
+                // scheduled task. The analyzer cannot prove either
+                // across `dispenso::TaskSet::schedule`.
+                // NOLINTBEGIN(clang-analyzer-core.NullDereference)
+                ts.schedule([b, lo, hi, &blockBody] { blockBody(b, lo, hi); });
+                // NOLINTEND(clang-analyzer-core.NullDereference)
+              }
+              ts.wait();
+            });
       },
       validate);
   (void)d.out[kN - 1];
