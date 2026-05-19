@@ -323,11 +323,14 @@ jobs:
       # Curated subset that exercises the pool's concurrency surfaces under
       # TSan without picking up the long-running stress, fuzz, and
       # cross-run-determinism tests whose worst-case slowdown under TSan
-      # exceeds the per-test timeout.
+      # exceeds the per-test timeout. `gtest_discover_tests` names each
+      # ctest entry after its gtest case (e.g. `ParallelForCpoEquivalence.
+      # MemberCall...`), not after the executable, so the regex matches
+      # gtest case-name prefixes.
       - name: Test
         run: |
           ctest --test-dir build --output-on-failure -j \
-            -R '(parallel_for_cpo|parallel_for_partition|parallel_for_tsan|parallel_reduce_cpo|parallel_chain_basic|parallel_chain_cpo|inclusive_scan_cpo|fork_join_spawn_sync|run_plex_cpo|submit_detached_dispatch|cancellation_token)_test$'
+            -R '^(ParallelForCpo|ParallelForPartition|ParallelForTsan|ParallelReduceCpo|ParallelChainBasic|ParallelChainCpo|InclusiveScanCpo|ForkJoinSpawnSync|RunPlexCpo|SubmitDetachedDispatch|ParallelCancellationToken)'
 
   pre-commit:
     runs-on: ubuntu-24.04
