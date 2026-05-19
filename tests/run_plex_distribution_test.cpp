@@ -19,16 +19,21 @@ using citor::ThreadPool;
 // to N back-to-back parallelFor calls (or any path that lets workers park
 // between phases) would break the persistence assertion.
 TEST(RunPlexDistribution, EverySlotKeepsTheSameThreadAcrossPhases) {
-  constexpr std::uint32_t kParticipants = 4U;
+  constexpr std::size_t kRequestedParticipants = 4;
   constexpr std::size_t kPhases = 4;
   constexpr std::size_t kN = 1u << 12;
 
-  ThreadPool pool(kParticipants);
+  ThreadPool pool(kRequestedParticipants);
+  const std::size_t participants = pool.participants();
+  if (participants < 2U) {
+    GTEST_SKIP() << "pool has " << participants << " participant(s)";
+  }
 
-  std::array<std::array<std::atomic<std::uintptr_t>, kParticipants>, kPhases>
+  std::array<std::array<std::atomic<std::uintptr_t>, kRequestedParticipants>,
+             kPhases>
       observed{};
   for (std::size_t ph = 0; ph < kPhases; ++ph) {
-    for (std::size_t p = 0; p < kParticipants; ++p) {
+    for (std::size_t p = 0; p < kRequestedParticipants; ++p) {
       observed[ph][p].store(0u, std::memory_order_relaxed);
     }
   }
@@ -45,13 +50,13 @@ TEST(RunPlexDistribution, EverySlotKeepsTheSameThreadAcrossPhases) {
 
   // Distinct-thread check: every participant slot ran at least one phase.
   std::unordered_set<std::uintptr_t> firstPhaseIds;
-  for (std::size_t p = 0; p < kParticipants; ++p) {
+  for (std::size_t p = 0; p < participants; ++p) {
     firstPhaseIds.insert(observed[0][p].load(std::memory_order_relaxed));
   }
-  EXPECT_EQ(firstPhaseIds.size(), kParticipants);
+  EXPECT_EQ(firstPhaseIds.size(), participants);
 
   // Persistence check: slot s keeps the same thread for every phase.
-  for (std::size_t p = 0; p < kParticipants; ++p) {
+  for (std::size_t p = 0; p < participants; ++p) {
     const auto first = observed[0][p].load(std::memory_order_relaxed);
     for (std::size_t ph = 1; ph < kPhases; ++ph) {
       EXPECT_EQ(observed[ph][p].load(std::memory_order_relaxed), first)

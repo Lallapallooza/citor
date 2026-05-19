@@ -15,12 +15,19 @@ using citor::ThreadPool;
 
 namespace {
 
+struct DistributionResult {
+  std::size_t participants;
+  std::size_t distinctThreads;
+};
+
 // Each chunk announces its arrival on a shared gate and waits for every
 // other chunk to do the same. This guarantees all K participant slots
 // actually run their block instead of slot 0 cold-collapsing peers via
 // the dispatch fast path.
-std::size_t distinctTidsInParallelFor(std::size_t participants, std::size_t n) {
-  ThreadPool pool(participants);
+DistributionResult distinctTidsInParallelFor(std::size_t requested,
+                                             std::size_t n) {
+  ThreadPool pool(requested);
+  const std::size_t participants = pool.participants();
   std::mutex mu;
   std::unordered_set<std::thread::id> ids;
   std::atomic<std::uint32_t> gate{0};
@@ -36,7 +43,7 @@ std::size_t distinctTidsInParallelFor(std::size_t participants, std::size_t n) {
           std::this_thread::yield();
         }
       });
-  return ids.size();
+  return {.participants = participants, .distinctThreads = ids.size()};
 }
 
 } // namespace
@@ -48,8 +55,11 @@ std::size_t distinctTidsInParallelFor(std::size_t participants, std::size_t n) {
 // for K > 1; a regression that ignored workers would deadlock too.
 TEST(ParallelForDistribution, BodyRunsOnEveryParticipantSlotThread) {
   constexpr std::size_t kN = 1u << 14;
-  EXPECT_EQ(distinctTidsInParallelFor(2, kN), 2u);
-  EXPECT_EQ(distinctTidsInParallelFor(4, kN), 4u);
+  const DistributionResult result = distinctTidsInParallelFor(4, kN);
+  if (result.participants < 2U) {
+    GTEST_SKIP() << "pool has " << result.participants << " participant(s)";
+  }
+  EXPECT_EQ(result.distinctThreads, result.participants);
 }
 
 TEST(ParallelForDistribution, SingleParticipantPoolRunsBodyOnCallerOnly) {

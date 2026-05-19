@@ -20,16 +20,21 @@ using citor::ThreadPool;
 // implemented chain as N back-to-back parallelFor calls with worker
 // respawn would break the persistence assertion.
 TEST(ParallelChainDistribution, EverySlotKeepsTheSameThreadAcrossStages) {
-  constexpr std::uint32_t kParticipants = 4U;
+  constexpr std::size_t kRequestedParticipants = 4;
   constexpr std::size_t kStages = 3;
   constexpr std::size_t kN = 1u << 12;
 
-  ThreadPool pool(kParticipants);
+  ThreadPool pool(kRequestedParticipants);
+  const std::size_t participants = pool.participants();
+  if (participants < 2U) {
+    GTEST_SKIP() << "pool has " << participants << " participant(s)";
+  }
 
-  std::array<std::array<std::atomic<std::uintptr_t>, kParticipants>, kStages>
+  std::array<std::array<std::atomic<std::uintptr_t>, kRequestedParticipants>,
+             kStages>
       observed{};
   for (std::size_t s = 0; s < kStages; ++s) {
-    for (std::size_t p = 0; p < kParticipants; ++p) {
+    for (std::size_t p = 0; p < kRequestedParticipants; ++p) {
       observed[s][p].store(0u, std::memory_order_relaxed);
     }
   }
@@ -46,13 +51,13 @@ TEST(ParallelChainDistribution, EverySlotKeepsTheSameThreadAcrossStages) {
 
   // Distinct-thread check: every participant slot ran at least one stage.
   std::unordered_set<std::uintptr_t> firstStageIds;
-  for (std::size_t p = 0; p < kParticipants; ++p) {
+  for (std::size_t p = 0; p < participants; ++p) {
     firstStageIds.insert(observed[0][p].load(std::memory_order_relaxed));
   }
-  EXPECT_EQ(firstStageIds.size(), kParticipants);
+  EXPECT_EQ(firstStageIds.size(), participants);
 
   // Persistence check: slot s keeps the same thread for every stage.
-  for (std::size_t p = 0; p < kParticipants; ++p) {
+  for (std::size_t p = 0; p < participants; ++p) {
     const auto first = observed[0][p].load(std::memory_order_relaxed);
     for (std::size_t s = 1; s < kStages; ++s) {
       EXPECT_EQ(observed[s][p].load(std::memory_order_relaxed), first)

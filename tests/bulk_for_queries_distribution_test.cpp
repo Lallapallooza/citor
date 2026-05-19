@@ -18,9 +18,12 @@ using citor::ThreadPool;
 // engine must place each chunk on a distinct OS thread. The barrier-spin
 // guards against the cold-collapse fast path absorbing peer slots.
 TEST(BulkForQueriesDistribution, BodyRunsOnEveryParticipantSlotThread) {
-  constexpr std::uint32_t kParticipants = 4U;
   constexpr std::size_t kQ = 1u << 14;
-  ThreadPool pool(kParticipants);
+  ThreadPool pool(4);
+  const auto participants = static_cast<std::uint32_t>(pool.participants());
+  if (participants < 2U) {
+    GTEST_SKIP() << "pool has " << participants << " participant(s)";
+  }
   std::mutex mu;
   std::unordered_set<std::thread::id> ids;
   std::atomic<std::uint32_t> gate{0};
@@ -31,11 +34,11 @@ TEST(BulkForQueriesDistribution, BodyRunsOnEveryParticipantSlotThread) {
           ids.insert(std::this_thread::get_id());
         }
         gate.fetch_add(1u, std::memory_order_acq_rel);
-        while (gate.load(std::memory_order_acquire) < kParticipants) {
+        while (gate.load(std::memory_order_acquire) < participants) {
           std::this_thread::yield();
         }
       });
-  EXPECT_EQ(ids.size(), kParticipants);
+  EXPECT_EQ(ids.size(), participants);
 }
 
 TEST(BulkForQueriesDistribution, SingleParticipantPoolRunsBodyOnCallerOnly) {

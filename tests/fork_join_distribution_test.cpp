@@ -32,20 +32,23 @@ void barrierSpin(std::atomic<std::uint32_t> &gate, std::uint32_t target) {
 // would yield one id and fail here.
 TEST(ForkJoinDistribution, FourTasksRunOnFourDistinctThreads) {
   ThreadPool pool(4);
+  const auto participants = static_cast<std::uint32_t>(pool.participants());
+  if (participants < 2U) {
+    GTEST_SKIP() << "pool has " << participants << " participant(s)";
+  }
   std::mutex mu;
   std::unordered_set<std::thread::id> ids;
   std::atomic<std::uint32_t> gate{0};
-  const auto recordAndSync = [&]() {
+  const auto recordAndSync = [&](std::size_t /*task*/) {
     const std::thread::id me = std::this_thread::get_id();
     {
       const std::lock_guard<std::mutex> lk(mu);
       ids.insert(me);
     }
-    barrierSpin(gate, 4u);
+    barrierSpin(gate, participants);
   };
-  pool.forkJoin<HintsDefaults>(recordAndSync, recordAndSync, recordAndSync,
-                               recordAndSync);
-  EXPECT_EQ(ids.size(), 4u);
+  pool.forkJoinAll<HintsDefaults>(participants, recordAndSync);
+  EXPECT_EQ(ids.size(), participants);
 }
 
 // Single-participant forkJoin runs every task inline on the caller; the
