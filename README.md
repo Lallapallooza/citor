@@ -555,9 +555,11 @@ void bulkForQueries(std::size_t q, QueryFn &&fn,
                     CancellationToken tok = {});
 ```
 
-**When to use it**: spatial-index lookups, batched key/value gets, KD-tree or BVH ray queries. Per-query depth varies and `Balance::DynamicChunked` (the default for `bulkForQueries`) amortises the skew. Use `parallelFor` when the per-item cost is uniform.
+**Current implementation**: a thin forward to `parallelFor(0, q, fn, tok)` with the `DynamicChunked` balance default. Parallelism is **across queries only**; the body receives `(qFirstChunk, qLastChunk)` and the caller's loop processes each query in the chunk serially. A 2D fan that also parallelises within a single query is on the [Future work](#future-work) list.
 
-**Nesting**: same-pool reentrancy falls through to inline-on-caller. If a single query body itself wants fan-out, prefer `forkJoin` inside it over another `bulkForQueries`.
+**When to use it**: spatial-index lookups, batched key/value gets, KD-tree or BVH ray queries. Per-query depth varies and `Balance::DynamicChunked` (the default for `bulkForQueries`) amortises the skew across queries. Use `parallelFor` when the per-item cost is uniform.
+
+**Nesting**: same-pool reentrancy falls through to inline-on-caller. If a single query body itself wants fan-out, nest `parallelFor` or `forkJoin` inside it.
 
 ### `forkJoin`
 
@@ -1258,6 +1260,7 @@ Known gaps where citor leaves performance on the table:
 - **Per-CCD aggregation in the done-epoch barrier.** The producer's join is currently a per-slot acquire-load scan, linear in participant count. The cluster machinery present in `parallelScan` (`clusterIdOfSlot`, `clusterTotals`, `clusterPrefixes`) could be reused so the producer reads one aggregate per CCD instead of one per slot.
 - **Adaptive partitioning for `parallelReduce` on heavy-tailed bodies.** `parallelReduce` partitions into static contiguous chunks and a worker stops after its local range, with no work-stealing after local completion. An opt-in adaptive-bisect mode, gated by hint so the uniform-reduce hot path is unchanged, is the missing primitive shape.
 - **Coroutine-native fork-join.** `include/citor/coro.h` queues each call on a per-pool driver thread. A continuation-stealing scheduler would be a separate engine.
+- **`bulkForQueries` 2D fan.** Today the primitive parallelises across queries only and forwards to `parallelFor(0, q, fn)`. A true 2D fan that also splits a single deep query across workers would lift the worst cases (heavy-tail queries that stall one worker for the whole call), at the cost of an items-per-query parameter in the body signature.
 
 ## Contributing
 
