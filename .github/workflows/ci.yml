@@ -254,6 +254,17 @@ jobs:
           restore-keys: |
             cpm-windows-
 
+      - name: sccache
+        # MSVC has no native ccache equivalent; without this step every
+        # build pays the full `cl.exe` compile cost from scratch.
+        # `SCCACHE_GHA_ENABLED=true` makes sccache use the GHA cache
+        # backend automatically. `CMAKE_*_COMPILER_LAUNCHER` requires
+        # CMake 3.27+; the runner ships 3.31+.
+        uses: mozilla-actions/sccache-action@v0.0.6
+      - name: Enable sccache GHA backend
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> $env:GITHUB_ENV
+
       - name: Configure (MSVC, x64)
         # The Visual Studio 2022 generator picks the MSVC toolchain by
         # default and pulls in `cl.exe` through CMake's `vcvars` discovery.
@@ -264,7 +275,9 @@ jobs:
         run: |
           cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
             -DCITOR_BUILD_BENCHMARK=OFF `
-            -DCITOR_ENABLE_CLANG_TIDY=OFF
+            -DCITOR_ENABLE_CLANG_TIDY=OFF `
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache `
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
       - name: Build (Release)
         run: cmake --build build --config Release -j
