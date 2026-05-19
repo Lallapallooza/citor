@@ -16,6 +16,7 @@ set(_citor_tests
     bench_format_test
     bulk_for_queries_cancellation_test
     bulk_for_queries_cpo_test
+    bulk_for_queries_distribution_test
     bulk_for_queries_exception_test
     bulk_for_queries_partition_test
     cancellation_deadline_test
@@ -29,6 +30,7 @@ set(_citor_tests
     fork_join_affinity_test
     fork_join_cancellation_test
     fork_join_determinism_test
+    fork_join_distribution_test
     fork_join_edge_test
     fork_join_errors_test
     fork_join_spawn_sync_test
@@ -39,12 +41,14 @@ set(_citor_tests
     parallel_chain_basic_test
     parallel_chain_cancellation_test
     parallel_chain_cpo_test
+    parallel_chain_distribution_test
     parallel_chain_exceptions_test
     parallel_chain_inline_fallback_test
     parallel_chain_partition_test
     parallel_for_blocking_test
     parallel_for_cancellation_test
     parallel_for_cpo_test
+    parallel_for_distribution_test
     parallel_for_exceptions_test
     parallel_for_inline_fallback_test
     parallel_for_nesting_test
@@ -60,9 +64,11 @@ set(_citor_tests
     parallel_reduce_cross_run_determinism_test
     parallel_reduce_determinism_main_test
     parallel_reduce_determinism_test
+    parallel_reduce_distribution_test
     parallel_reduce_exceptions_test
     parallel_scan_cancellation_test
     parallel_scan_correctness_test
+    parallel_scan_distribution_test
     parallel_scan_edge_cases_test
     parallel_scan_exception_safety_test
     pool_group_arena_test
@@ -87,6 +93,7 @@ set(_citor_tests
     run_plex_basic_test
     run_plex_cancellation_test
     run_plex_cpo_test
+    run_plex_distribution_test
     run_plex_exceptions_test
     run_plex_inline_fallback_test
     run_plex_partition_test
