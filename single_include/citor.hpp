@@ -2,8 +2,6 @@
 //
 // citor -- header-only C++20 thread pool
 // version: 0.4.4
-// commit:  7f411c5691e13b0f2077fa2debe33e0fdd00f240
-// generated: 2026-05-19
 //
 // GENERATED FILE -- DO NOT EDIT.
 // Run `python tools/amalgamate.py` to regenerate.

@@ -189,9 +189,15 @@ foreach(_t IN LISTS _citor_tests)
     # FAIL_REGULAR_EXPRESSION reach CTest verbatim (the property is itself
     # a CMake list, and forwarding via `list(APPEND)` + `${var}` splits on
     # the embedded semicolons).
+    #
+    # `DISCOVERY_TIMEOUT 60` overrides the GoogleTest default of 5s. On
+    # Windows the runner's AV scan of a fresh `.exe` plus the MSVC CRT
+    # initialisation can push past 5s before `--gtest_list_tests` returns,
+    # which fails the build at the discovery step.
     if(CITOR_BUILD_WITH_SANITIZER)
         gtest_discover_tests(
             ${_t}
+            DISCOVERY_TIMEOUT 60
             PROPERTIES
                 TIMEOUT 120
                 PROCESSORS 9
@@ -200,6 +206,10 @@ foreach(_t IN LISTS _citor_tests)
                     "WARNING: ThreadSanitizer\;ThreadSanitizer: data race\;ThreadSanitizer: lock-order-inversion\;ThreadSanitizer: thread leak"
         )
     else()
-        gtest_discover_tests(${_t} PROPERTIES TIMEOUT 120 PROCESSORS 9)
+        gtest_discover_tests(
+            ${_t}
+            DISCOVERY_TIMEOUT 60
+            PROPERTIES TIMEOUT 120 PROCESSORS 9
+        )
     endif()
 endforeach()
