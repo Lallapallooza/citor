@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 //
 // citor -- header-only C++20 thread pool
-// version: 0.4.1
-// commit:  3b316a908fdcaad7dcda8b291262fede245b7010
-// generated: 2026-05-18
+// version: 0.4.2
+// commit:  da24074b6af08a6ef704a9ce77175f0cdf078014
+// generated: 2026-05-19
 //
 // GENERATED FILE -- DO NOT EDIT.
 // Run `python tools/amalgamate.py` to regenerate.
@@ -7692,6 +7692,11 @@ public:
     auto *fnAddr =
         const_cast<void *>(static_cast<const void *>(std::addressof(fn)));
 
+    // Acquire-load the per-worker mailboxes for any cold-stamped slot from a
+    // prior dispatch; the worker's ack fetch_or happens-before the desc
+    // writes below.
+    drainColdStampedAcks();
+
     // Piggyback same-command reuse detection on the existing write-elision
     // guards: each guard already compares; if every guard takes the "no-write"
     // branch the dispatch's parameters match the previous one and we can
@@ -12055,6 +12060,48 @@ private:
     bool m_skipped = false;
   };
 
+  /// Drain cold-stamped slots before the producer writes the next dispatch's
+  /// `JobDescriptor`. Each pending worker's mailbox is acquire-loaded; the
+  /// matching ack-side `fetch_or(kAckedBit, release)` orders the worker's
+  /// prior desc reads before the producer's subsequent writes.
+  [[gnu::always_inline]] void drainColdStampedAcks() noexcept {
+    std::uint64_t mask = m_coldStampedMask.load(std::memory_order_acquire);
+    if (mask == 0U) [[likely]] {
+      return;
+    }
+    auto *workersBase = m_workers.get();
+    const bool lowLatencyActive =
+        m_control.hotSpinDepth.load(std::memory_order_acquire) != 0U;
+    while (mask != 0U) {
+      std::uint64_t scan = mask;
+      std::uint64_t stillPending = 0U;
+      while (scan != 0U) {
+        const auto bit = detail::ctzll(scan);
+        scan &= scan - 1U;
+        auto *w = workersBase + bit;
+        if ((w->mailbox.load(std::memory_order_acquire) &
+             detail::PoolControl::kAckedBit) == 0U) {
+          stillPending |= std::uint64_t{1} << bit;
+        }
+      }
+      const std::uint64_t cleared = mask & ~stillPending;
+      if (cleared != 0U) {
+        m_coldStampedMask.fetch_and(~cleared, std::memory_order_release);
+      }
+      if (stillPending == 0U) {
+        break;
+      }
+      if (!lowLatencyActive) {
+        const std::uint32_t nextFutex =
+            m_control.futexWord.load(std::memory_order_relaxed) + 1U;
+        m_control.futexWord.store(nextFutex, std::memory_order_release);
+        (void)detail::futexWakePrivate(&m_control.futexWord, 2);
+      }
+      detail::cpuRelax();
+      mask = m_coldStampedMask.load(std::memory_order_acquire);
+    }
+  }
+
   /// Static-balance dispatch entry. Acquires a `DispatchLease` and
   /// forwards into `dispatchOneStaticLockedBody`.
   template <Balance BalanceV>
@@ -12223,9 +12270,12 @@ private:
       // publish would then spin here forever. Wake while waiting
       // because the worker we need an ack from may already be parked;
       // a pure cpuRelax spin would not resolve.
-      if (m_coldStampedMask != 0U) [[unlikely]] {
-        while (m_coldStampedMask != 0U) {
-          std::uint64_t scan = m_coldStampedMask;
+      // Cold-stamped ack drain for primitives sharing this body that did not
+      // call `drainColdStampedAcks` at their entry.
+      std::uint64_t mask = m_coldStampedMask.load(std::memory_order_acquire);
+      if (mask != 0U) [[unlikely]] {
+        while (mask != 0U) {
+          std::uint64_t scan = mask;
           std::uint64_t stillPending = 0U;
           while (scan != 0U) {
             const auto bit = detail::ctzll(scan);
@@ -12236,11 +12286,13 @@ private:
               stillPending |= std::uint64_t{1} << bit;
             }
           }
+          const std::uint64_t cleared = mask & ~stillPending;
+          if (cleared != 0U) {
+            m_coldStampedMask.fetch_and(~cleared, std::memory_order_release);
+          }
           if (stillPending == 0U) {
-            m_coldStampedMask = 0U;
             break;
           }
-          m_coldStampedMask = stillPending;
           if (!lowLatencyActive) {
             const std::uint32_t nextFutex =
                 m_control.futexWord.load(std::memory_order_relaxed) + 1U;
@@ -12248,6 +12300,7 @@ private:
             (void)detail::futexWakePrivate(&m_control.futexWord, 2);
           }
           detail::cpuRelax();
+          mask = m_coldStampedMask.load(std::memory_order_acquire);
         }
       }
       if (reuseSafe) {
@@ -12552,7 +12605,8 @@ private:
                 expectedMb, doneSentinel, std::memory_order_release,
                 std::memory_order_acquire);
             if (stamped && !reuseSafe) {
-              m_coldStampedMask |= (1ULL << bit);
+              m_coldStampedMask.fetch_or(1ULL << bit,
+                                         std::memory_order_relaxed);
             }
             tightDone = true;
           }
@@ -12993,10 +13047,12 @@ private:
   /// the producer's pre-lease read.
   std::atomic<const detail::JobDescriptor *> m_lastPublishedDesc{nullptr};
 
-  /// Bitmask of worker slots whose mailbox the producer self-stamped on a
-  /// prior !reuseSafe cold-collapse, drained by the next dispatch's publish
-  /// path before reusing this stack frame's `JobDescriptor` storage.
-  std::uint64_t m_coldStampedMask{0};
+  /// Bitmask of worker slots the producer self-stamped on a prior
+  /// !reuseSafe cold-collapse. Drained at next-dispatch entry via
+  /// `drainColdStampedAcks` before the producer writes desc fields. Atomic
+  /// so the drain can run outside `m_dispatchMutex`; `fetch_or` on set,
+  /// `fetch_and` on clear so a concurrent stamp cannot be lost.
+  std::atomic<std::uint64_t> m_coldStampedMask{0};
 
   /// Number of `Priority::Latency` callers currently waiting on the
   /// dispatch gate. Throughput and Background callers spin on this until
@@ -13704,4 +13760,4 @@ private:
 // `#define CITOR_VERSION_PATCH 0` lose the version literal a regex can pin
 // against.
 
-#define CITOR_VERSION_STRING "0.4.1"
+#define CITOR_VERSION_STRING "0.4.2"

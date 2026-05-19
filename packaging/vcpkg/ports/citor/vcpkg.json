@@ -1,6 +1,6 @@
 {
   "name": "citor",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Header-only C++20 thread pool tuned for sub-microsecond dispatch.",
   "homepage": "https://github.com/Lallapallooza/citor",
   "license": "MIT",
