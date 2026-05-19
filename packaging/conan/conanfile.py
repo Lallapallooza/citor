@@ -44,9 +44,11 @@ class CitorConan(ConanFile):
         copy(self, "LICENSE", str(src), str(self.export_sources_folder))
 
     def validate(self):
-        if str(self.settings.os) != "Linux":
+        os_name = str(self.settings.os)
+        if os_name not in ("Linux", "Windows"):
             self.output.warning(
-                f"citor is currently Linux-only; building on {self.settings.os} is unsupported."
+                f"citor is validated on Linux and Windows; "
+                f"building on {os_name} is unsupported."
             )
         if str(self.settings.arch) not in ("x86_64",):
             self.output.warning(

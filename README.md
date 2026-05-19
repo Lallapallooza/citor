@@ -18,7 +18,7 @@
 | Distribution | header-only |
 | CMake target | `citor::citor` (INTERFACE) |
 | Validated target | Linux x86_64 + AVX2; Windows x86_64 |
-| Compilers | GCC 14, Clang 18 (Linux). MSVC 2022 (Windows). All CI-backed. |
+| Compilers | GCC 14 + Clang 19 (Linux, primary matrix); Clang 18 (sanitizer + packaging jobs). MSVC 2022 (Windows). All CI-backed. |
 | C++ standard | C++20 |
 | Runtime deps | `Threads::Threads` / pthread |
 | License | MIT |
@@ -1198,7 +1198,7 @@ Workload families in the bench tree:
 
 ## Supported targets
 
-- **Linux x86_64 + AVX2 (CI)**: Ubuntu 24.04 with GCC 14 and Clang 18, C++20. Every push on `main` runs the GTest suite, ASan + UBSan, TSan smoke, clang-tidy (diff-gated), and pre-commit hooks via `.github/workflows/ci.yml`. The latency contract is validated only on this configuration.
+- **Linux x86_64 + AVX2 (CI)**: Ubuntu 24.04 with GCC 14 and Clang 19 in the primary matrix; Clang 18 in the ASan/UBSan, TSan smoke, and packaging jobs. C++20. Every push on `main` runs the GTest suite, ASan + UBSan, TSan smoke, clang-tidy (diff-gated), and pre-commit hooks via `.github/workflows/ci.yml`. The latency contract is validated only on this configuration.
 - **Windows x86_64 (CI)**: Windows Server 2022 with MSVC 17 2022, `/std:c++20`. The `windows-msvc-2022` job builds the tree and runs the GTest suite. Latency numbers are not validated here; treat dispatch-floor measurements on Windows as indicative. The port maps each Linux primitive to its Win32 counterpart:
 
   | concern               | Win32 API                                              |

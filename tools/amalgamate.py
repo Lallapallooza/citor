@@ -21,9 +21,7 @@
 # Run with the repo root as CWD or pass `--repo-root` to override.
 
 import argparse
-import datetime
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -148,16 +146,6 @@ def project_version(repo_root: Path) -> str:
     return m.group(1)
 
 
-def git_sha(repo_root: Path) -> str:
-    try:
-        out = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=repo_root, stderr=subprocess.DEVNULL
-        )
-        return out.decode("ascii").strip()
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-        return "unknown"
-
-
 def sort_system_includes(items: list[str]) -> list[str]:
     # Two groups, matching the project's IncludeCategories:
     #   Group A: C-style headers (`*.h`) -> sorted, emitted first.
@@ -172,16 +160,12 @@ def render(
     include_dir: Path,
     system_set: set[str],
     version: str,
-    sha: str,
 ) -> str:
-    today = datetime.date.today().isoformat()
     parts: list[str] = []
     parts.append("// SPDX-License-Identifier: MIT")
     parts.append("//")
     parts.append("// citor -- header-only C++20 thread pool")
     parts.append(f"// version: {version}")
-    parts.append(f"// commit:  {sha}")
-    parts.append(f"// generated: {today}")
     parts.append("//")
     parts.append("// GENERATED FILE -- DO NOT EDIT.")
     parts.append("// Run `python tools/amalgamate.py` to regenerate.")
@@ -234,7 +218,6 @@ def main() -> int:
         include_dir,
         system_set,
         project_version(repo_root),
-        git_sha(repo_root),
     )
 
     if args.check:

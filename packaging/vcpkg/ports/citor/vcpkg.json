@@ -4,7 +4,7 @@
   "description": "Header-only C++20 thread pool tuned for sub-microsecond dispatch.",
   "homepage": "https://github.com/Lallapallooza/citor",
   "license": "MIT",
-  "supports": "linux & x64",
+  "supports": "(linux | windows) & x64",
   "dependencies": [
     {
       "name": "vcpkg-cmake",
