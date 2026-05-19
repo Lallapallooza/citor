@@ -11,4 +11,4 @@
 // `#define CITOR_VERSION_PATCH 0` lose the version literal a regex can pin
 // against.
 
-#define CITOR_VERSION_STRING "0.4.2"
+#define CITOR_VERSION_STRING "0.4.3"

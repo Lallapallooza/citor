@@ -14,7 +14,7 @@
 
 | | |
 |---|---|
-| Version | `0.4.2` |
+| Version | `0.4.3` |
 | Distribution | header-only |
 | CMake target | `citor::citor` (INTERFACE) |
 | Validated target | Linux x86_64 + AVX2; Windows x86_64 |
@@ -226,7 +226,7 @@ Pick whichever path matches your project's existing dependency story.
 
 ```bash
 curl -L -o third_party/citor.hpp \
-  https://raw.githubusercontent.com/Lallapallooza/citor/v0.4.2/single_include/citor.hpp
+  https://raw.githubusercontent.com/Lallapallooza/citor/v0.4.3/single_include/citor.hpp
 ```
 
 ```cpp
@@ -241,7 +241,7 @@ Compile with `-std=c++20 -pthread` and (recommended) `-mavx2 -mfma -DCITOR_USE_A
 include(FetchContent)
 FetchContent_Declare(citor
   GIT_REPOSITORY https://github.com/Lallapallooza/citor.git
-  GIT_TAG        v0.4.2)
+  GIT_TAG        v0.4.3)
 FetchContent_MakeAvailable(citor)
 
 target_link_libraries(my_app PRIVATE citor::citor)
@@ -250,7 +250,7 @@ target_link_libraries(my_app PRIVATE citor::citor)
 ### 3. CPM
 
 ```cmake
-CPMAddPackage("gh:Lallapallooza/citor#v0.4.2")
+CPMAddPackage("gh:Lallapallooza/citor#v0.4.3")
 target_link_libraries(my_app PRIVATE citor::citor)
 ```
 
@@ -266,8 +266,8 @@ Point vcpkg at this repo's `packaging/vcpkg/ports/` directory.
 ### 5. Conan (Conan 2.x)
 
 ```bash
-conan create packaging/conan --version 0.4.2
-conan install --requires=citor/0.4.2 --build=missing
+conan create packaging/conan --version 0.4.3
+conan install --requires=citor/0.4.3 --build=missing
 ```
 
 The recipe is `package_type = "header-library"`, `no_copy_source = True`, `package_id().clear()`.
@@ -281,7 +281,7 @@ sudo cmake --install build
 ```
 
 ```cmake
-find_package(citor 0.4.2 REQUIRED)
+find_package(citor 0.4.3 REQUIRED)
 target_link_libraries(my_app PRIVATE citor::citor)
 ```
 
