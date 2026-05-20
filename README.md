@@ -1196,6 +1196,12 @@ Workload families in the bench tree:
 - `bulk_for_queries/`: variable-cost query batches.
 - `differential/`, `two_pool/`: cross-cell differential reductions and two-pool BLAS coexistence.
 
+### External benchmarks
+
+citor is part of [tzcnt/runtime-benchmarks](https://github.com/tzcnt/runtime-benchmarks), an independent cross-runtime suite maintained outside this project. It compares fork-join runtimes (libfork, TooManyCooks, oneTBB, Taskflow, cppcoro, and others) on recursive workloads: skynet, nqueens, fib, and divide-and-conquer matmul. That is one slice of citor's surface; the suite does not exercise the dispatch-floor, reduction, scan, or `runPlex` paths.
+
+As of May 2026 citor tops the suite's recursive fork-join summary on the maintainer's 64-core host. Numbers move as runtimes and revisions update; the live table is the source of truth: [fleetcode.com/runtime-benchmarks](https://fleetcode.com/runtime-benchmarks/).
+
 ## Supported targets
 
 - **Linux x86_64 + AVX2 (CI)**: Ubuntu 24.04 with GCC 14 and Clang 19 in the primary matrix; Clang 18 in the ASan/UBSan, TSan smoke, and packaging jobs. C++20. Every push on `main` runs the GTest suite, ASan + UBSan, TSan smoke, clang-tidy (diff-gated), and pre-commit hooks via `.github/workflows/ci.yml`. The latency contract is validated only on this configuration.
