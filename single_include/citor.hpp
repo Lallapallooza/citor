@@ -503,7 +503,7 @@ enum class BarrierKind : std::uint8_t {
 /// the static-constexpr members of `HintsDefaults` one-for-one, so the two
 /// dispatch paths run the same engine.
 struct Hints {
-  Balance balance = Balance::StaticUniform;
+  Balance balance = Balance::DynamicChunked;
   Determinism determinism = Determinism::FixedBlockOrder;
   Affinity affinity = Affinity::PerCluster;
   StealPolicy stealPolicy = StealPolicy::ClusterLocal;
@@ -537,10 +537,11 @@ struct Hints {
 ///
 ///
 /// Fields mirror `Hints` one-for-one. The defaults are conservative:
-/// `StaticUniform` balance, `FixedBlockOrder` reductions, no affinity,
-/// `Throughput` priority, no estimated cost (the inline-fallback gate is
-/// disabled by default), 5us minimum task, derived chunk, and cancellation
-/// polls on. Override down for hot loops that have already verified the path.
+/// `DynamicChunked` balance, `FixedBlockOrder` reductions, `PerCluster`
+/// affinity, `Throughput` priority, no estimated cost (the inline-fallback
+/// gate is disabled by default), zero minimum task, derived chunk, and
+/// cancellation polls on. Override down for hot loops that have already
+/// verified the path.
 struct HintsDefaults {
   // DynamicChunked is the default: workers race for blocks via a shared atomic
   // counter, so a slow or descheduled worker does not gate the join on its

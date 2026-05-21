@@ -89,7 +89,7 @@ TEST(ParallelHints,
 // Runtime Hints POD must be default-constructible with the documented defaults.
 TEST(ParallelHints, RuntimeHintsStructHasEveryDocumentedDefaultValue) {
   const Hints h{};
-  EXPECT_EQ(h.balance, Balance::StaticUniform);
+  EXPECT_EQ(h.balance, Balance::DynamicChunked);
   EXPECT_EQ(h.determinism, Determinism::FixedBlockOrder);
   EXPECT_EQ(h.affinity, Affinity::PerCluster);
   EXPECT_EQ(h.stealPolicy, StealPolicy::ClusterLocal);

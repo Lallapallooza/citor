@@ -61,3 +61,21 @@ TEST(RegressionRuntimeHints,
   // the requested 4 (for example on a CI runner with two physical cores).
   EXPECT_EQ(calls.load(), static_cast<int>(pool.participants()));
 }
+
+// The runtime `Hints` POD mirrors the compile-time `HintsDefaults` policy
+// struct field-for-field, so a hint built at runtime and a `HintsDefaults`-
+// templated call select the same engine behavior. These asserts pin every
+// default value across the two structs.
+TEST(RegressionRuntimeHints, RuntimeHintsDefaultsMatchCompileTimeDefaults) {
+  static_assert(Hints{}.balance == HintsDefaults::balance);
+  static_assert(Hints{}.determinism == HintsDefaults::determinism);
+  static_assert(Hints{}.affinity == HintsDefaults::affinity);
+  static_assert(Hints{}.stealPolicy == HintsDefaults::stealPolicy);
+  static_assert(Hints{}.priority == HintsDefaults::priority);
+  static_assert(Hints{}.estimatedItemNs == HintsDefaults::estimatedItemNs);
+  static_assert(Hints{}.minTaskUs == HintsDefaults::minTaskUs);
+  static_assert(Hints{}.chunk == HintsDefaults::chunk);
+  static_assert(Hints{}.cancellationChecks ==
+                HintsDefaults::cancellationChecks);
+  SUCCEED();
+}
