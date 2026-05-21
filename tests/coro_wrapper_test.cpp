@@ -15,7 +15,7 @@ using citor::ThreadPool;
 TEST(CoroWrapper, AsyncReturnsValue) {
   ThreadPool pool(4);
   auto task = [&]() -> citor::coro::Task<int> {
-    int v = co_await citor::coro::async(pool, [] { return 42; });
+    const int v = co_await citor::coro::async(pool, [] { return 42; });
     co_return v;
   };
   EXPECT_EQ(citor::coro::syncWait(task()), 42);
@@ -76,7 +76,7 @@ TEST(CoroWrapper, ForkJoinRunsBothBranches) {
 TEST(CoroWrapper, ExceptionPropagates) {
   ThreadPool pool(2);
   auto task = [&]() -> citor::coro::Task<int> {
-    int v = co_await citor::coro::async(
+    const int v = co_await citor::coro::async(
         pool, []() -> int { throw std::runtime_error("boom"); });
     co_return v;
   };

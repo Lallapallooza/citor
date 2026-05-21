@@ -140,7 +140,11 @@ namespace detail {
 /// back to the stored continuation or to a no-op coroutine.
 struct FinalAwaiter {
   /// Always suspends so the continuation runs in a clean stack frame.
-  [[nodiscard]] static bool await_ready() noexcept { return false; }
+  /// Kept non-static: the coroutine protocol invokes awaiter and promise
+  /// hooks through an instance, so `static` here trips
+  /// `readability-static-accessed-through-instance` at every await site.
+  // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
+  [[nodiscard]] bool await_ready() const noexcept { return false; }
   /// Symmetric-transfers into the stored continuation, or no-op if absent.
   template <class P>
   std::coroutine_handle<> await_suspend(std::coroutine_handle<P> h) noexcept {
@@ -150,7 +154,8 @@ struct FinalAwaiter {
     return std::noop_coroutine();
   }
   /// Unreachable; the coroutine is suspended for good at final_suspend.
-  static void await_resume() noexcept {}
+  // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
+  void await_resume() const noexcept {}
 };
 
 /// Promise type for `Task<T>` with non-void payload.
@@ -169,9 +174,11 @@ public:
     return Task<T>{std::coroutine_handle<Promise>::from_promise(*this)};
   }
   /// Lazy initial suspend: the coroutine does not run until first awaited.
-  static std::suspend_always initial_suspend() noexcept { return {}; }
+  // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
+  std::suspend_always initial_suspend() noexcept { return {}; }
   /// Transfer to the continuation when the coroutine returns.
-  static FinalAwaiter final_suspend() noexcept { return {}; }
+  // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
+  FinalAwaiter final_suspend() noexcept { return {}; }
   /// Capture the returned value.
   template <class U>
   void return_value(U &&v) {
@@ -197,9 +204,11 @@ public:
     return Task<void>{std::coroutine_handle<Promise>::from_promise(*this)};
   }
   /// Lazy initial suspend: the coroutine does not run until first awaited.
-  static std::suspend_always initial_suspend() noexcept { return {}; }
+  // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
+  std::suspend_always initial_suspend() noexcept { return {}; }
   /// Transfer to the continuation when the coroutine returns.
-  static FinalAwaiter final_suspend() noexcept { return {}; }
+  // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
+  FinalAwaiter final_suspend() noexcept { return {}; }
   /// No payload to capture.
   void return_void() noexcept {}
   /// Capture an exception thrown from the body.
@@ -275,7 +284,7 @@ private:
       if (m_queue.empty()) {
         return;
       }
-      Task t = std::move(m_queue.front());
+      const Task t = std::move(m_queue.front());
       m_queue.pop_front();
       lk.unlock();
       t();
@@ -329,7 +338,8 @@ struct PoolAwaiter {
                                          : std::shared_ptr<SyncWaitGate>{}};
 
   /// Always suspends; the body runs on a worker.
-  [[nodiscard]] static bool await_ready() noexcept { return false; }
+  // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
+  [[nodiscard]] bool await_ready() const noexcept { return false; }
 
   /// Enqueues the body on the pool's driver thread and resumes the
   /// coroutine when the body returns.
@@ -499,6 +509,9 @@ template <class HintsT = HintsDefaults, class F>
 template <class T>
 T syncWait(Task<T> task) {
   std::exception_ptr exc;
+  // The non-void instantiation mutates `result` through `result.set()`;
+  // `misc-const-correctness` sees only the void instantiation's dead branch.
+  // NOLINTNEXTLINE(misc-const-correctness)
   detail::ResultStorage<T> result;
   auto gate = std::make_shared<detail::SyncWaitGate>();
 
@@ -521,7 +534,7 @@ T syncWait(Task<T> task) {
   };
 
   auto *savedTL = std::exchange(detail::tlSyncWaitGate, &gate);
-  Task<void> outer = wrapper();
+  const Task<void> outer = wrapper();
   outer.handle().resume();
   detail::tlSyncWaitGate = savedTL;
 

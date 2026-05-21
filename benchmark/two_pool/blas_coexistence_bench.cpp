@@ -110,8 +110,8 @@ struct AlignedFloatDeleter {
 // `unique_ptr<T[]>` is the only owning-dynamic-array spelling the standard
 // offers; the check below is misfiring.
 using AlignedFloatBuffer =
-    std::unique_ptr<float[],
-                    AlignedFloatDeleter>; // NOLINT(modernize-avoid-c-arrays)
+    std::unique_ptr<float[], // NOLINT(modernize-avoid-c-arrays)
+                    AlignedFloatDeleter>;
 
 [[nodiscard]] AlignedFloatBuffer allocateAlignedFloats(std::size_t count) {
   const std::size_t bytes = ((count * sizeof(float) + 63U) / 64U) * 64U;
