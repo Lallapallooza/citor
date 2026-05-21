@@ -58,7 +58,6 @@ struct ExportContext {
   std::string compiler;
   std::string compilerVersion;
   std::string buildType;
-  bool avx2 = false;
   double tscCyclesPerNs = 0.0;
   std::string tasksetCpus;
   std::vector<GateResult> checklist;
@@ -349,9 +348,6 @@ probeContext(const CyclesPerNanosecond &cal) {
   c.compiler = export_detail::detectCompiler();
   c.compilerVersion = export_detail::detectCompilerVersion();
   c.buildType = export_detail::detectBuildType();
-#ifdef CITOR_USE_AVX2
-  c.avx2 = true;
-#endif
   c.tscCyclesPerNs = cal.value;
   c.tasksetCpus = export_detail::readTasksetCpus();
   c.checklist = {probeGovernor(), probeBoost(),   probeSmt(),
@@ -420,8 +416,6 @@ inline bool writeJsonExport(const std::string &path,
   out << indent2
       << "\"build_type\": " << export_detail::escapeJson(context.buildType)
       << ',' << nl;
-  out << indent2 << "\"avx2\": " << (context.avx2 ? "true" : "false") << ','
-      << nl;
   out << indent2 << "\"tsc_cycles_per_ns\": ";
   export_detail::writeNumber(out, context.tscCyclesPerNs);
   out << ',' << nl;

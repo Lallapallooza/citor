@@ -17,7 +17,7 @@
 | Version | `0.4.5` |
 | Distribution | header-only |
 | CMake target | `citor::citor` (INTERFACE) |
-| Validated target | Linux x86_64 + AVX2; Windows x86_64 |
+| Validated target | Linux x86_64; Windows x86_64 |
 | Compilers | GCC 14 + Clang 19 (Linux, primary matrix); Clang 18 (sanitizer + packaging jobs). MSVC 2022 (Windows). All CI-backed. |
 | C++ standard | C++20 |
 | Runtime deps | `Threads::Threads` / pthread |
@@ -233,7 +233,10 @@ curl -L -o third_party/citor.hpp \
 #include "third_party/citor.hpp"
 ```
 
-Compile with `-std=c++20 -pthread` and (recommended) `-mavx2 -mfma -DCITOR_USE_AVX2`. Works with any C++20 compiler.
+Compile with any C++20 toolchain:
+
+- GCC / Clang: `-std=c++20 -pthread`
+- MSVC: `/std:c++20` and link `Synchronization.lib` (the import library for `WaitOnAddress`)
 
 ### 2. CMake `FetchContent`
 
@@ -676,68 +679,77 @@ double portfolioNpv(citor::ThreadPool &pool,
 
 **Why this primitive.** `KahanReduceHints` selects `Determinism::KahanCompensated` on a chunk-id pairwise tree; the engine internally pins `StaticUniform` so chunk-id-to-rank mapping is stable. Most pools do not promise byte-equal results across worker counts.
 
-### Output offsets for event filtering (`parallelScan`)
+### Live-particle compaction (`parallelScan`)
 
-A telemetry consumer ingests N events per batch, filters by predicate, and writes survivors compactly into an output buffer. `parallelScan` computes the exclusive prefix of "kept" flags so each thread knows where to write.
+A particle system ages thousands of particles per frame; expired ones must be removed so the array stays dense for the next spawn and update pass. `parallelScan` computes the exclusive prefix of the "alive" flags, which is the index each surviving particle compacts to.
 
 ```cpp
-std::size_t filterEvents(citor::ThreadPool &pool,
-                         std::span<const Event> in,
-                         std::span<Event> out, EventFilter pred) {
-  std::vector<std::int64_t> mark(in.size());
-  pool.parallelFor<citor::HintsDefaults>(
-      0, in.size(),
-      [&](std::size_t lo, std::size_t hi) {
-        for (std::size_t i = lo; i < hi; ++i) mark[i] = pred(in[i]) ? 1 : 0;
-      });
+std::size_t compactParticles(citor::ThreadPool &pool,
+                             std::span<const Particle> in,
+                             std::span<Particle> out) {
+  std::vector<std::int64_t> alive(in.size());
+  std::vector<std::int64_t> slot(in.size());
 
-  std::vector<std::int64_t> off(in.size());
+  // Phase 1: flag particles still within their lifetime.
+  auto flagAlive = [&](std::size_t lo, std::size_t hi) {
+    for (std::size_t i = lo; i < hi; ++i)
+      alive[i] = in[i].age < in[i].lifetime ? 1 : 0;
+  };
+  pool.parallelFor<citor::HintsDefaults>(0, in.size(), flagAlive);
+
+  // Phase 2: exclusive prefix of `alive` gives each survivor its slot.
+  // The two-pass scan body sweeps each chunk twice: `chunkTotal` returns the
+  // chunk's running total, `writeSlots` writes per-element indices given the
+  // chunk's exclusive prefix as `initial`.
+  auto chunkTotal = [&](std::size_t lo, std::size_t hi) -> std::int64_t {
+    std::int64_t total = 0;
+    for (std::size_t i = lo; i < hi; ++i) total += alive[i];
+    return total;
+  };
+  auto writeSlots = [&](std::size_t lo, std::size_t hi,
+                        std::int64_t initial) -> std::int64_t {
+    std::int64_t running = initial;
+    for (std::size_t i = lo; i < hi; ++i) {
+      slot[i] = running;
+      running += alive[i];
+    }
+    return running - initial;
+  };
+
   if (pool.participants() == 1) {
-    std::exclusive_scan(mark.begin(), mark.end(), off.begin(),
+    std::exclusive_scan(alive.begin(), alive.end(), slot.begin(),
                         std::int64_t{0});
   } else {
-    // Canonical two-pass idiom: atomic call counter distinguishes pass 1
-    // (chunk total) from pass 2 (per-element exclusive prefix). The body's
-    // trailing pointer parameter is reserved (always nullptr); the body
-    // owns its output buffer through capture.
+    // An atomic call counter routes the first `participants()` body calls to
+    // the total sweep and the rest to the write sweep. The body's trailing
+    // pointer parameter is reserved (always nullptr).
     std::atomic<std::size_t> calls{0};
-    const std::size_t pn = pool.participants();
+    const std::size_t totalSweeps = pool.participants();
     (void)pool.parallelScan<citor::HintsDefaults>(
         in.size(), std::int64_t{0},
         [&](std::size_t /*chunkId*/, std::size_t lo, std::size_t hi,
-            std::int64_t initial,
-            std::int64_t * /*reserved*/) -> std::int64_t {
+            std::int64_t initial, std::int64_t * /*reserved*/) {
           const std::size_t call =
               calls.fetch_add(1, std::memory_order_acq_rel);
-          if (call < pn) {
-            std::int64_t s = 0;
-            for (std::size_t i = lo; i < hi; ++i) s += mark[i];
-            return s;
-          }
-          std::int64_t running = initial;
-          for (std::size_t i = lo; i < hi; ++i) {
-            off[i] = running;
-            running += mark[i];
-          }
-          return running - initial;
+          return call < totalSweeps ? chunkTotal(lo, hi)
+                                    : writeSlots(lo, hi, initial);
         },
         [](std::int64_t a, std::int64_t b) { return a + b; });
   }
 
-  std::int64_t kept = 0;
-  pool.parallelFor<citor::HintsDefaults>(
-      0, in.size(),
-      [&](std::size_t lo, std::size_t hi) {
-        for (std::size_t i = lo; i < hi; ++i)
-          if (mark[i]) out[static_cast<std::size_t>(off[i])] = in[i];
-      });
+  // Phase 3: compact survivors to the front of the output buffer.
+  auto compact = [&](std::size_t lo, std::size_t hi) {
+    for (std::size_t i = lo; i < hi; ++i)
+      if (alive[i]) out[static_cast<std::size_t>(slot[i])] = in[i];
+  };
+  pool.parallelFor<citor::HintsDefaults>(0, in.size(), compact);
 
-  if (!mark.empty()) kept = off.back() + mark.back();
-  return static_cast<std::size_t>(kept);
+  if (alive.empty()) return 0;
+  return static_cast<std::size_t>(slot.back() + alive.back());
 }
 ```
 
-**Why this primitive.** Two-pass scan: pass 1 produces per-chunk totals, the producer prefixes them in `O(participants)`, pass 2 writes per-element offsets with the chunk's exclusive prefix as `initial`. The same idiom serves stream compaction, CSV row-offset computation, and output-slot allocation in batched parsers.
+**Why this primitive.** Two-pass scan: pass 1 produces per-chunk totals, the producer prefixes them in `O(participants)`, pass 2 writes per-element indices with the chunk's exclusive prefix as `initial`. The same idiom serves any stream-compaction shape: culling dead entities, allocating output slots in batched parsers, and computing sparse-matrix row offsets.
 
 ### ML inference preprocessing pipeline (`parallelChain`)
 
@@ -1101,7 +1113,6 @@ Use counters for regression tests, benchmark context, and diagnosing unexpected 
 |---------------------------------|--------------|--------|
 | `CITOR_BUILD_TESTS`             | ON top-level | Build the GTest suite. |
 | `CITOR_BUILD_BENCHMARK`         | ON top-level | Build the comparative bench (fetches peer pools via CPM; first cold configure is slow). |
-| `CITOR_USE_AVX2`                | ON           | Compile with `-mavx2 -mfma`, define `CITOR_USE_AVX2`. Auto-detected via `check_cxx_compiler_flag`. |
 | `CITOR_BUILD_WITH_SANITIZER`    | OFF          | Build with `-fsanitize=thread -fno-omit-frame-pointer`. |
 | `CITOR_ENABLE_POOL_COUNTERS`    | OFF          | Compile in pool-level diagnostic counters. Hot path pays no extra atomics when OFF. |
 | `CITOR_WORKER_STACK_KIB`        | `8192`       | Per-worker pthread stack size (KiB). |
@@ -1116,10 +1127,11 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 
 # Single test binary:
-ctest --test-dir build --output-on-failure -R parallel_for_test
+ctest --test-dir build --output-on-failure -R parallel_for_partition_test
 
 # Single GTest case:
-./build/tests/parallel_for_test --gtest_filter='ParallelFor.SmallRange*'
+./build/tests/parallel_for_partition_test \
+  --gtest_filter='ParallelForPartition.InvokesBodyForEveryIndexInRangeExactlyOnce'
 ```
 
 ### Formatting and linting
@@ -1204,7 +1216,7 @@ As of May 2026 citor tops the suite's recursive fork-join summary on the maintai
 
 ## Supported targets
 
-- **Linux x86_64 + AVX2 (CI)**: Ubuntu 24.04 with GCC 14 and Clang 19 in the primary matrix; Clang 18 in the ASan/UBSan, TSan smoke, and packaging jobs. C++20. Every push on `main` runs the GTest suite, ASan + UBSan, TSan smoke, clang-tidy (diff-gated), and pre-commit hooks via `.github/workflows/ci.yml`. The latency contract is validated only on this configuration.
+- **Linux x86_64 (CI)**: Ubuntu 24.04 with GCC 14 and Clang 19 in the primary matrix; Clang 18 in the ASan/UBSan, TSan smoke, and packaging jobs. C++20. Every push on `main` runs the GTest suite, ASan + UBSan, TSan smoke, clang-tidy (diff-gated), and pre-commit hooks via `.github/workflows/ci.yml`. The latency contract is validated only on this configuration.
 - **Windows x86_64 (CI)**: Windows Server 2022 with MSVC 17 2022, `/std:c++20`. The `windows-msvc-2022` job builds the tree and runs the GTest suite. Latency numbers are not validated here; treat dispatch-floor measurements on Windows as indicative. The port maps each Linux primitive to its Win32 counterpart:
 
   | concern               | Win32 API                                              |
@@ -1228,12 +1240,10 @@ As of May 2026 citor tops the suite's recursive fork-join summary on the maintai
   | CPM                                | `packaging-cpm`              |
   | vcpkg overlay                      | not covered in CI |
 - **Kernel**: Linux 6.x with `futex` and sysfs `cpu/cpuX/cache/index*` for the CI configuration. Windows 8+ for the Windows port (`WaitOnAddress` lives in `Synchronization.lib`).
-- **AVX2**: auto-detected via `check_cxx_compiler_flag`; the pool builds without it but loses the AVX2-tuned code paths.
 
 Implementation notes for non-validated paths:
 
 - x86_64 uses TSC-based deadline checks and `_mm_pause` for spin hints. Non-x86 collapses `Deadline` factories to the never-expires sentinel and uses a compiler-barrier spin hint.
-- AVX2/FMA flags are added by CMake when `CITOR_USE_AVX2=ON` and the compiler accepts them; the flag is an optimization toggle, not part of the support contract.
 
 ## Repository layout
 

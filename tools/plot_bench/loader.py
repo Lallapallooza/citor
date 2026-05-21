@@ -32,7 +32,6 @@ class Context:
     compiler: str
     compiler_version: str
     build_type: str
-    avx2: bool
     tsc_cycles_per_ns: float
     taskset_cpus: str
     checklist: tuple[GateResult, ...] = field(default_factory=tuple)
@@ -91,7 +90,6 @@ def _context_from_dict(d: dict[str, Any]) -> Context:
         compiler=str(d.get("compiler", "")),
         compiler_version=str(d.get("compiler_version", "")),
         build_type=str(d.get("build_type", "")),
-        avx2=bool(d.get("avx2", False)),
         tsc_cycles_per_ns=float(d.get("tsc_cycles_per_ns", 0.0)),
         taskset_cpus=str(d.get("taskset_cpus", "")),
         checklist=gates,

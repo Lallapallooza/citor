@@ -1,8 +1,7 @@
 # Defines the public `citor` INTERFACE target and its `citor::citor` alias.
 #
-# Picks up include paths, C++20 feature requirement, pthread, optional AVX2
-# compile options, the worker stack-size define, and the optional pool
-# diagnostic counters define.
+# Picks up include paths, C++20 feature requirement, pthread, the worker
+# stack-size define, and the optional pool diagnostic counters define.
 
 add_library(citor INTERFACE)
 add_library(citor::citor ALIAS citor)
@@ -25,24 +24,6 @@ target_link_libraries(citor INTERFACE Threads::Threads)
 # warning at all.
 if(MSVC)
     target_compile_options(citor INTERFACE /wd4324)
-endif()
-
-if(CITOR_USE_AVX2)
-    include(CheckCXXCompilerFlag)
-    if(MSVC)
-        # MSVC: /arch:AVX2 implies FMA; there is no separate /arch:FMA flag.
-        check_cxx_compiler_flag("/arch:AVX2" CITOR_HAS_ARCH_AVX2)
-        if(CITOR_HAS_ARCH_AVX2)
-            target_compile_options(citor INTERFACE /arch:AVX2)
-            target_compile_definitions(citor INTERFACE CITOR_USE_AVX2)
-        endif()
-    else()
-        check_cxx_compiler_flag("-mavx2" CITOR_HAS_MAVX2)
-        if(CITOR_HAS_MAVX2)
-            target_compile_options(citor INTERFACE -mavx2 -mfma)
-            target_compile_definitions(citor INTERFACE CITOR_USE_AVX2)
-        endif()
-    endif()
 endif()
 
 target_compile_definitions(

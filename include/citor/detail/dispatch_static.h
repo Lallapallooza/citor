@@ -640,7 +640,7 @@ inline void typedStaticUniformWorkerEntry(JobDescriptor *desc,
                                                       generation);
 }
 
-/// Typed worker entry for `Balance::StaticContiguous`. Each rank runs a
+/// Typed worker entry for the static contiguous partition. Each rank runs a
 /// contiguous block span computed from its rank id; no claim CAS, no
 /// atomic counter touch.
 template <class HintsT, class F>

@@ -459,7 +459,7 @@ jobs:
         # so the previously-wired `--check` step would fail on every
         # docs/CI commit. The release pipeline owns the regen instead.
         run: |
-          clang++-18 -std=c++20 -O2 -pthread -mavx2 -mfma -DCITOR_USE_AVX2 \
+          clang++-18 -std=c++20 -O2 -pthread \
             -I single_include \
             packaging/test/consumer_single_header/main.cpp \
             -o /tmp/single-header-consumer

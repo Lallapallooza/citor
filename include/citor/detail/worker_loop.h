@@ -94,10 +94,9 @@ inline void runActiveJobStatic(JobDescriptor &desc,
   if constexpr (BalanceV == Balance::StaticUniform) {
     runStaticPartition(desc, rank);
   } else {
-    // Dynamic counter handles `DynamicChunked` directly; the work-stealing
-    // tiers (`Steal`, `Recursive`) are reserved for opt-in primitives and
-    // fall back here so the call still completes deterministically until
-    // the deque-based tier ships.
+    // `DynamicChunked` runs through the relaxed `nextBlock` counter: each
+    // worker claims the next block via `fetch_add` so a slow worker does not
+    // gate the join on a pre-assigned share.
     runDynamicCounter(desc, rank);
   }
 }

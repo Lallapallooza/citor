@@ -40,7 +40,7 @@ namespace citor::detail {
 // NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
 struct alignas(kCacheLine) JobDescriptor {
   /// Generation value the producer published this descriptor under; workers
-  /// stamp `doneEpoch` with the same value once their share completes so the
+  /// stamp `mailbox = generation | kDoneBit` once their share completes so the
   /// producer's join can rendezvous.
   std::uint64_t generation = 0;
 
@@ -72,8 +72,8 @@ struct alignas(kCacheLine) JobDescriptor {
 
   /// Opt-in flag for the producer-side hot-completion probe in
   /// `dispatchOneStaticLockedBody`. When `true`, the producer briefly probes
-  /// every background worker's `doneEpoch` after publishing the new generation;
-  /// if every background worker has already stamped the new epoch (i.e.
+  /// every background worker's `mailbox` after publishing the new generation;
+  /// if every background worker has already stamped the DONE bit (i.e.
   /// spinning workers picked up the dispatch and finished an empty / trivial
   /// body before the probe ran), the producer skips the futex-word bump and the
   /// `FUTEX_WAKE_PRIVATE(INT_MAX)` syscall entirely. Independent one-shot

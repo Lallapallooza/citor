@@ -62,17 +62,16 @@ struct alignas(kCacheLine) ChainDynamicStageCounter {
 /// call. The trailing per-worker `done` slots are NOT owned by `ChainState`:
 /// the pool pre-allocates a contiguous `ChainDoneSlot` block once at
 /// construction time (sized `participants()`), and every chain call borrows
-/// that block via `doneSlots`. The producer zero-resets each slot at entry to
-/// honour the chain's "fresh epoch per call" contract; this avoids `operator
-/// new` / `operator delete` on the dispatch hot path, which the spec's <= 2 us
-/// target rules out.
+/// that block via `doneSlots`. Each call reserves a fresh interval in the
+/// pool's monotonically-advancing epoch counter (see `epochBase`) instead of
+/// zero-resetting the slots, with no `operator new` / `operator delete` on the
+/// dispatch hot path.
 ///
 /// The Global rendezvous is fully decentralized: every slot (including slot 0)
 /// stamps `done[slot] = s + 1` (release) after running stage `s`, and every
 /// slot's pre-stage barrier is an independent scan over `done[w] >= s + 1` for
 /// every other slot `w`. No participant acts as a serial gate; the wait loops
-/// execute in parallel across all workers, mirroring the `runPlex` per-slot
-/// done-epoch pattern documented in `plex_state.h`. The cancellation handshake
+/// execute in parallel across all workers. The cancellation handshake
 /// is encoded by stamping `done = nStages` on the cancelled slot's line, which
 /// satisfies any active stage's wait condition unconditionally and lets the
 /// spin loop drop a per-iteration `chainCancelled` poll.

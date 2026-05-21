@@ -55,9 +55,10 @@ struct alignas(kCacheLine) ScanDoneSlot {
 /// pre-allocates a contiguous `ChainDoneSlot` block once at construction time
 /// (sized `participants()`), and every scan call borrows that block via
 /// `doneSlots`, reinterpreting each `ChainDoneSlot::done` as a
-/// `ScanDoneSlot::done` epoch ladder. The producer zero-resets each slot at
-/// entry to honour the scan's "fresh epoch per call" contract; this avoids
-/// `operator new` / `operator delete` on the dispatch hot path.
+/// `ScanDoneSlot::done` epoch ladder. Each call reserves a fresh interval in
+/// the pool's monotonically-advancing epoch counter (see `epochBase`) instead
+/// of zero-resetting the slots, with no `operator new` / `operator delete` on
+/// the dispatch hot path.
 ///
 /// The rendezvous between Pass 1 and the sequential reduce is fully
 /// decentralized: every slot stamps `done[slot] = 1` (release) after writing

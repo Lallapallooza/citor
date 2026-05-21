@@ -597,7 +597,7 @@ private:
                               "ThreadPool: pthread_attr_init");
     }
     // Worker pthread stack size. Build-time configurable via the
-    // `CITOR_WORKER_STACK_KIB` CMake option (default 1024 KiB). Sized for
+    // `CITOR_WORKER_STACK_KIB` CMake option (default 8192 KiB). Sized for
     // recursive forkJoin bodies under TSan/ASan shadow stacks
     // -- a 256 KiB default historically overflowed UTS-style workloads under
     // sanitizer. Production builds with shallow recursion can drop this knob to
@@ -756,10 +756,10 @@ private:
     // ratio); resolving them here turns the per-call topology resolution in
     // `runScanParallel` into O(1) field reads.
     initScanScratch(effective);
-    // Best-effort lock the WorkerState array into RAM. The hot-path `mailbox` /
-    // `doneEpoch` lines must never page-fault: a fault on the producer's
-    // acquire-spin would replace cache traffic with a kernel round-trip and the
-    // join would silently stall. The locked region is small enough for normal
+    // Best-effort lock the WorkerState array into RAM. The hot-path `mailbox`
+    // lines must never page-fault: a fault on the producer's acquire-spin would
+    // replace cache traffic with a kernel round-trip and the join would
+    // silently stall. The locked region is small enough for normal
     // process limits. EPERM (no CAP_IPC_LOCK) and ENOMEM (rlimit exhausted) are
     // non-fatal: the pool runs correctly without the lock, just exposed to the
     // page-fault tail risk.
@@ -1294,7 +1294,7 @@ public:
   ///
   /// - `Balance::StaticUniform` runs the worker-strided block partition (no
   ///   atomics on the hot path); `Balance::DynamicChunked` races on the
-  ///   relaxed `nextBlock` counter; the other two tiers fall back to dynamic.
+  ///   relaxed `nextBlock` counter.
   /// - `chunk == 0` derives a default from `(last - first) / participants`.
   /// - `n * estimatedItemNs * 1e-3 < minTaskUs * participants` runs the body
   ///   inline on the producer's thread; no worker is woken.
@@ -1679,7 +1679,8 @@ public:
   ///   `n`-determined.
   /// - Workers write only to their own `partials[chunkId]` slots; the
   ///   producer's join-loop establishes happens-before via the acquire-load on
-  ///   `doneEpoch` so reading partials post-join is race-free.
+  ///   each worker's `mailbox` DONE bit so reading partials post-join is
+  ///   race-free.
   /// - Combining in chunk-id pairwise tree order makes parallel FP reduction
   ///   bit-reproducible (Demmel-Nguyen TOMS 2014).
   ///
@@ -1969,9 +1970,10 @@ public:
     }
   }
 
-  /// No-token convenience overload for `forkJoin`. Forwards to the four-arg
-  /// overload with a default-constructed `CancellationToken` so call sites
-  /// that do not need cancellation pay no syntactic cost.
+  /// No-token convenience overload for `forkJoin`. Forwards to
+  /// `forkJoinImpl<HintsT, HasToken=false>` with a default-constructed
+  /// `CancellationToken` so call sites that do not need cancellation pay no
+  /// syntactic cost.
   template <class HintsT, class... TaskFns>
   void forkJoin(TaskFns &&...fns) {
     // No token passed: route through the compile-time `HasToken=false` impl so
@@ -2334,8 +2336,8 @@ public:
   /// The `std::atomic<int>` captured by reference is the only race-free way
   /// to thread a pass index through the body, since multiple workers run
   /// each pass concurrently. A plain `int` counter captured by reference is
-  /// a data race; use the atomic shape above. See `parallel_scan_test.cpp`
-  /// for a working example.
+  /// a data race; use the atomic shape above. See
+  /// `parallel_scan_correctness_test.cpp` for a working example.
   ///
   /// Alternative, brittle: branch on `initial != identity`. Slot 0's Pass 2
   /// receives `initial = identity` (its exclusive prefix IS identity), so
@@ -4808,9 +4810,9 @@ private:
   /// background workers via the standard generation-publish protocol. Each
   /// task is pushed onto slot 0's deque, the descriptor is published so
   /// background workers wake and enter the drain loop, the producer runs its
-  /// own drain loop as slot 0, and the call joins when every worker's
-  /// `doneEpoch` reaches the new generation. The first captured exception
-  /// (if any) is rethrown after the join.
+  /// own drain loop as slot 0, and the call joins when every worker has
+  /// stamped the DONE bit on its `mailbox` for the new generation. The first
+  /// captured exception (if any) is rethrown after the join.
   template <bool HasToken = true>
   void runForkJoinOuter(detail::Task *tasks, std::size_t nTasks,
                         CancellationToken tok, StealPolicy stealPolicy) {
@@ -5364,10 +5366,10 @@ private:
 
   /// Common job-publish/join helper used by the reduce paths. Builds a
   /// `JobDescriptor` with the supplied static chunk shape, dispatches via
-  /// `dispatchOne`, and returns once every worker has stamped its
-  /// `doneEpoch`. The caller reads the partials array after this returns;
-  /// the join's acquire-load on `doneEpoch` establishes happens-before for
-  /// the partial writes.
+  /// `dispatchOne`, and returns once every worker has stamped the DONE bit
+  /// on its `mailbox`. The caller reads the partials array after this
+  /// returns; the join's acquire-load on each worker's `mailbox` establishes
+  /// happens-before for the partial writes.
   void dispatchReduceJob(std::size_t first, std::size_t last,
                          FunctionRef<void(std::size_t, std::size_t)> body,
                          CancellationToken tok, std::size_t participants,
@@ -5660,8 +5662,8 @@ private:
   ///    every parked worker.
   /// 6. Producer participates as slot 0 by running its share of the job
   ///    inline.
-  /// 7. Acquire-load each background worker's `doneEpoch` until all reach
-  ///    the new generation.
+  /// 7. Acquire-load each background worker's `mailbox` until all carry the
+  ///    DONE bit for the new generation.
   /// 8. Release-store `nullptr` into `activeJob` so the slot is empty for
   ///    the next dispatch.
   /// 9. Release the priority gate.
@@ -5916,7 +5918,7 @@ private:
 
   /// Inner body of the locked dispatch path. Publishes the new
   /// generation, wakes parked workers, runs slot 0 inline, joins on
-  /// every worker's `doneEpoch`, and rethrows the captured first
+  /// every worker's `mailbox` DONE bit, and rethrows the captured first
   /// exception (if any). `Slot0Body` and `Slot0Hints` carry typed slot-0
   /// information when the caller passed a typed entry; `ContiguousRank`
   /// selects the static-contiguous worker path.
@@ -6054,17 +6056,17 @@ private:
     // Pre-wake hot-completion probe: when the descriptor's primitive is a
     // simple one-shot (parallelFor / parallelReduce / bulkForQueries), every
     // spinning background worker can observe the new mailbox, run a trivial
-    // body, and stamp `doneEpoch == nextGen` in a handful of nanoseconds. If
-    // all background workers have already stamped done by the time the producer
-    // is about to bump `futexWord`, the syscall is unnecessary because there
-    // are no parked workers to wake. The probe is bounded to a small number of
-    // acquire-load sweeps so a probe miss adds at most a few hundred
-    // nanoseconds before falling through to the unconditional wake. Skipping
-    // the futex word bump on probe success is safe: a worker that parks between
-    // this dispatch and the next will observe a stale `futexWord` value, but
-    // the next dispatch's probe fails (parked worker has not stamped the next
-    // epoch) and the unconditional wake bumps the word, releasing the parked
-    // worker.
+    // body, and stamp the DONE bit on its `mailbox` in a handful of
+    // nanoseconds. If all background workers have already stamped done by the
+    // time the producer is about to bump `futexWord`, the syscall is
+    // unnecessary because there are no parked workers to wake. The probe is
+    // bounded to a small number of acquire-load sweeps so a probe miss adds at
+    // most a few hundred nanoseconds before falling through to the
+    // unconditional wake. Skipping the futex word bump on probe success is
+    // safe: a worker that parks between this dispatch and the next will
+    // observe a stale `futexWord` value, but the next dispatch's probe fails
+    // (parked worker has not stamped DONE for the new generation) and the
+    // unconditional wake bumps the word, releasing the parked worker.
     bool preWakeAllDone = false;
     // Worker preserves all flag bits from `publishedMb` when stamping DONE on
     // its mailbox, so the producer's join waits for `publishedMb | kDoneBit`
@@ -6111,7 +6113,6 @@ private:
       // each woken worker fires futex_wake(N=2) on its post-park branch
       // (see `workerMainLoop`), doubling the chain at logarithmic depth.
       (void)detail::futexWakePrivate(&m_control.futexWord, 2);
-      m_recentDispatchTsc = detail::readTsc();
     }
 
     // Producer participates as slot 0. Install the slot-0 TLS context once for
@@ -6158,16 +6159,16 @@ private:
       }
     }
 
-    // Join: sweep every pending background worker's done-epoch each round,
+    // Join: sweep every pending background worker's `mailbox` each round,
     // count quiet rounds where no slot advanced, and yield to the scheduler
     // after a bounded number of quiet rounds. Yielding matters at
     // j=participants where the producer can displace a pinned worker on the
-    // same CPU; spinning-only on a single slot's done line then prevents that
-    // worker from ever stamping its epoch.
+    // same CPU; spinning-only on a single slot's mailbox then prevents that
+    // worker from ever stamping its DONE bit.
     //
-    // Acquire load on doneEpoch is preserved -- it pairs with the worker's
-    // release store and is the visibility edge that lets the producer observe
-    // writes the worker performed inside its body.
+    // The acquire-load on the worker's `mailbox` pairs with the worker's
+    // release store of the DONE bit and is the visibility edge that lets the
+    // producer observe writes the worker performed inside its body.
     //
     // Reuse `participantsLocal` from the pre-wake probe block above; the field
     // is non-atomic and constant for the pool's lifetime, so re-reading it
@@ -6177,7 +6178,7 @@ private:
       auto *workersBase = m_workers.get();
       // Yield-only-on-CPU-collision: if a pending worker is pinned to the same
       // CPU the producer is currently running on, pure spinning cannot make
-      // progress because only that worker can write its own done-epoch line.
+      // progress because only that worker can write its own mailbox line.
       // Detect via `sched_getcpu` and yield to the scheduler. The probe is
       // gated by quietRounds to amortize the syscall.
       //
@@ -6599,16 +6600,6 @@ private:
   /// happens under the dispatch gate that already serializes chain / scan
   /// dispatches.
   std::uint64_t m_chainEpochBase = 0;
-
-  /// TSC of the most recent dispatch's publish window, written by
-  /// `dispatchOneStaticLockedBody` under `m_dispatchMutex` (single-writer).
-  /// Used as a hot-cadence predicate to skip the `futex_wake` syscall when
-  /// the previous dispatch was within a worker's spin-budget ago: in that
-  /// window no worker can have parked, so the kernel transit would find
-  /// zero waiters. Plain integral because every mutation happens under the
-  /// dispatch gate. Read by the same writer path in immediate succession,
-  /// so torn-read concerns do not apply.
-  std::uint64_t m_recentDispatchTsc = 0;
 
   /// Per-worker Chase-Lev work-stealing deques. One deque per participant;
   /// allocated at construction time so the `forkJoin` steal probe never
