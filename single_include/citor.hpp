@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //
 // citor -- header-only C++20 thread pool
-// version: 0.4.5
+// version: 0.4.6
 //
 // GENERATED FILE -- DO NOT EDIT.
 // Run `python tools/amalgamate.py` to regenerate.
@@ -13763,4 +13763,4 @@ private:
 // `#define CITOR_VERSION_PATCH 0` lose the version literal a regex can pin
 // against.
 
-#define CITOR_VERSION_STRING "0.4.5"
+#define CITOR_VERSION_STRING "0.4.6"

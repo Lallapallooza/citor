@@ -8,7 +8,7 @@ authors:
     email: vitaly.shutov1@gmail.com
 repository-code: "https://github.com/Lallapallooza/citor"
 license: MIT
-version: 0.4.5
+version: 0.4.6
 keywords:
   - thread-pool
   - concurrency
