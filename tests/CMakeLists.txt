@@ -37,6 +37,7 @@ set(_citor_tests
     function_ref_test
     hints_test
     inclusive_scan_cpo_test
+    multi_pool_coexist_test
     parallel_chain_barriers_test
     parallel_chain_basic_test
     parallel_chain_cancellation_test

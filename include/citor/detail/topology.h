@@ -526,20 +526,32 @@ inline Topology detectTopology() {
   allowed.reserve(topo.logicalCount);
 
 #ifdef __linux__
-  cpu_set_t mask;
-  CPU_ZERO(&mask);
-  if (sched_getaffinity(0, sizeof(mask), &mask) == 0) {
-    /// Cap the scan at `CPU_SETSIZE` so the fixed-size `cpu_set_t` is never
-    /// indexed past its bit range on hosts with more than `CPU_SETSIZE`
-    /// logical CPUs. Pools never need more than `physicalCores` workers so
-    /// the cap only affects affinity reporting, not scheduling.
-    const auto cpuMax = static_cast<std::uint32_t>(CPU_SETSIZE);
-    const std::uint32_t scanLimit =
-        topo.logicalCount < cpuMax ? topo.logicalCount : cpuMax;
-    for (std::uint32_t cpu = 0; cpu < scanLimit; ++cpu) {
-      if (CPU_ISSET(static_cast<std::size_t>(cpu), &mask)) {
-        allowed.push_back(cpu);
-      }
+  // The allowed-CPU set is read from a baseline captured on the first
+  // detectTopology call, not the caller's live affinity mask. A standalone pool
+  // auto-pins its producer to slot 0 for the pool's lifetime; reading the live
+  // mask would size a second pool built on that producer down to the single
+  // pinned CPU. Capturing once, before any pool pins anything, lets independent
+  // pools coexist sized to the full machine, while still respecting a genuine
+  // process affinity limit (taskset, cgroup) set before the first pool.
+  // Construction-time only; never on the dispatch hot path.
+  static const cpu_set_t baselineMask = [] {
+    cpu_set_t m;
+    CPU_ZERO(&m);
+    if (sched_getaffinity(0, sizeof(m), &m) != 0) {
+      CPU_ZERO(&m);
+    }
+    return m;
+  }();
+  // Cap the scan at `CPU_SETSIZE` so the fixed-size `cpu_set_t` is never
+  // indexed past its bit range on hosts with more than `CPU_SETSIZE` logical
+  // CPUs. Pools never need more than `physicalCores` workers so the cap only
+  // affects affinity reporting, not scheduling.
+  const auto cpuMax = static_cast<std::uint32_t>(CPU_SETSIZE);
+  const std::uint32_t scanLimit =
+      topo.logicalCount < cpuMax ? topo.logicalCount : cpuMax;
+  for (std::uint32_t cpu = 0; cpu < scanLimit; ++cpu) {
+    if (CPU_ISSET(static_cast<std::size_t>(cpu), &baselineMask)) {
+      allowed.push_back(cpu);
     }
   }
 #endif
