@@ -1,6 +1,6 @@
 [project]
 name = "citor-dev"
-version = "0.4.6"
+version = "0.5.0"
 description = "Dev-side hooks and tooling for the citor C++ library."
 requires-python = ">=3.10"
 
@@ -15,7 +15,7 @@ plot = ["matplotlib>=3.8", "numpy>=1.26", "pandas>=2.1", "pandas-stubs>=2.1"]
 
 [tool.commitizen]
 name = "cz_conventional_commits"
-version = "0.4.6"
+version = "0.5.0"
 tag_format = "v$version"
 version_scheme = "semver"
 update_changelog_on_bump = false
