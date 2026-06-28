@@ -1,14 +1,17 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <numeric>
+#include <span>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -626,6 +629,34 @@ runCoherenceProbe(const std::vector<std::uint32_t> &cpus,
   return out;
 }
 
+/// Mutex plus map backing the process-wide coherence-probe cache, keyed on
+/// the sorted-unique `cpus` vector. A single owner so `cachedCoherenceProbe`
+/// (lookup then insert) and `seedCoherenceProbeCache` (external insert) share
+/// one map instead of two function-local statics.
+struct CoherenceProbeCache {
+  /// Guards every read and write of `entries`.
+  std::mutex mutex;
+  /// Cached probe per normalised cpuset key.
+  std::map<std::vector<std::uint32_t>, CoherenceProbe> entries;
+};
+
+/// Accessor for the single process-wide `CoherenceProbeCache`.
+inline CoherenceProbeCache &coherenceProbeCache() noexcept {
+  static CoherenceProbeCache cache;
+  return cache;
+}
+
+/// Normalise a CPU list into the cache key: sorted and deduplicated so a
+/// pool's `probeCpus` and a seeded probe's embedded `cpus` map to the same
+/// entry regardless of input order.
+inline std::vector<std::uint32_t>
+coherenceProbeCacheKey(const std::vector<std::uint32_t> &cpus) {
+  std::vector<std::uint32_t> key = cpus;
+  std::sort(key.begin(), key.end());
+  key.erase(std::unique(key.begin(), key.end()), key.end());
+  return key;
+}
+
 /// Process-wide cache for `runCoherenceProbe`, keyed on the
 /// sorted-unique `cpus` vector. The latency matrix depends only on the
 /// host hardware, so repeated probes for the same set are duplicate
@@ -635,17 +666,13 @@ inline CoherenceProbe
 cachedCoherenceProbe(const std::vector<std::uint32_t> &cpus,
                      const std::vector<std::vector<std::uint32_t>> &sysfsPrior,
                      std::uint32_t roundTrips = 1024U) {
-  std::vector<std::uint32_t> key = cpus;
-  std::sort(key.begin(), key.end());
-  key.erase(std::unique(key.begin(), key.end()), key.end());
-
-  static std::mutex cacheMutex;
-  static std::map<std::vector<std::uint32_t>, CoherenceProbe> cache;
+  std::vector<std::uint32_t> key = coherenceProbeCacheKey(cpus);
+  CoherenceProbeCache &cache = coherenceProbeCache();
 
   {
-    const std::scoped_lock guard(cacheMutex);
-    const auto hit = cache.find(key);
-    if (hit != cache.end()) {
+    const std::scoped_lock guard(cache.mutex);
+    const auto hit = cache.entries.find(key);
+    if (hit != cache.entries.end()) {
       return hit->second;
     }
   }
@@ -656,8 +683,263 @@ cachedCoherenceProbe(const std::vector<std::uint32_t> &cpus,
   // first inserter's copy so identical pools see identical numbers.
   CoherenceProbe fresh = runCoherenceProbe(cpus, sysfsPrior, roundTrips);
 
-  const std::scoped_lock guard(cacheMutex);
-  return cache.emplace(std::move(key), std::move(fresh)).first->second;
+  const std::scoped_lock guard(cache.mutex);
+  return cache.entries.emplace(std::move(key), std::move(fresh)).first->second;
+}
+
+/// Insert `probe` into the process-wide cache under the normalised `cpus`
+/// key so the next pool whose worker cpuset matches that key skips the live
+/// probe. Replaces any existing entry for the key: a seed is an explicit
+/// caller decision to use this probe for that cpuset, and import is meant to
+/// run before the first pool is built, where the cache is empty.
+inline void seedCoherenceProbeCache(const std::vector<std::uint32_t> &cpus,
+                                    const CoherenceProbe &probe) {
+  std::vector<std::uint32_t> key = coherenceProbeCacheKey(cpus);
+  CoherenceProbeCache &cache = coherenceProbeCache();
+  const std::scoped_lock guard(cache.mutex);
+  cache.entries.insert_or_assign(std::move(key), probe);
+}
+
+/// Magic prefix on the self-describing probe blob. Spells 'COHP'. A blob
+/// whose first word is not this magic is rejected by `importCoherenceProbe`.
+inline constexpr std::uint32_t kCoherenceProbeMagic = 0x434F4850U;
+/// Blob layout version. Bumped when the field order or encoding changes so a
+/// blob from an incompatible citor is rejected rather than misread.
+inline constexpr std::uint32_t kCoherenceProbeFormatVersion = 1U;
+
+/// Append the raw bytes of a trivially-copyable scalar to `bytes` in native
+/// byte order. The cache is same-machine, so native endianness is fine and
+/// the magic plus version guard against cross-build corruption.
+template <typename T>
+inline void coherenceProbeWritePod(std::vector<std::byte> &bytes,
+                                   const T &value) {
+  std::array<std::byte, sizeof(T)> buf{};
+  std::memcpy(buf.data(), &value, sizeof(T));
+  bytes.insert(bytes.end(), buf.begin(), buf.end());
+}
+
+/// Write a `std::uint32_t` vector as a `std::uint64_t` length prefix followed
+/// by the elements.
+inline void coherenceProbeWriteU32Vector(std::vector<std::byte> &bytes,
+                                         const std::vector<std::uint32_t> &v) {
+  coherenceProbeWritePod(bytes, static_cast<std::uint64_t>(v.size()));
+  for (const std::uint32_t x : v) {
+    coherenceProbeWritePod(bytes, x);
+  }
+}
+
+/// Write a `double` vector as a `std::uint64_t` length prefix followed by the
+/// elements.
+inline void coherenceProbeWriteF64Vector(std::vector<std::byte> &bytes,
+                                         const std::vector<double> &v) {
+  coherenceProbeWritePod(bytes, static_cast<std::uint64_t>(v.size()));
+  for (const double x : v) {
+    coherenceProbeWritePod(bytes, x);
+  }
+}
+
+/// Write a row-major matrix as a row count followed by each row through
+/// `coherenceProbeWriteF64Vector`.
+inline void
+coherenceProbeWriteF64Matrix(std::vector<std::byte> &bytes,
+                             const std::vector<std::vector<double>> &m) {
+  coherenceProbeWritePod(bytes, static_cast<std::uint64_t>(m.size()));
+  for (const auto &row : m) {
+    coherenceProbeWriteF64Vector(bytes, row);
+  }
+}
+
+/// Serialise a `CoherenceProbe` to a self-describing binary blob: magic,
+/// format version, then every field with length-prefixed vectors and
+/// native-endian doubles.
+inline std::vector<std::byte>
+serializeCoherenceProbe(const CoherenceProbe &probe) {
+  std::vector<std::byte> bytes;
+  coherenceProbeWritePod(bytes, kCoherenceProbeMagic);
+  coherenceProbeWritePod(bytes, kCoherenceProbeFormatVersion);
+  coherenceProbeWritePod(bytes,
+                         static_cast<std::uint8_t>(probe.valid ? 1U : 0U));
+  coherenceProbeWritePod(bytes, probe.maxCrossOverIntraRatio);
+  coherenceProbeWritePod(
+      bytes, static_cast<std::uint8_t>(probe.matrix.valid ? 1U : 0U));
+  coherenceProbeWriteU32Vector(bytes, probe.matrix.cpus);
+  coherenceProbeWriteF64Matrix(bytes, probe.matrix.matrix);
+  coherenceProbeWriteU32Vector(bytes, probe.clusters.clusterIdOfCpuIndex);
+  coherenceProbeWritePod(bytes, probe.clusters.numClusters);
+  coherenceProbeWriteF64Matrix(bytes, probe.clusters.clusterDistanceNs);
+  return bytes;
+}
+
+/// Bounds-checked cursor over a byte blob. Every read first confirms the
+/// blob holds enough bytes; a short read latches `ok` to false and leaves
+/// the output untouched so a malformed blob can never read out of range.
+struct CoherenceProbeReader {
+  /// Next byte to read.
+  const std::byte *cur = nullptr;
+  /// One past the last readable byte.
+  const std::byte *end = nullptr;
+  /// False once any read ran short; latches and is never cleared.
+  bool ok = true;
+
+  /// Bytes left between `cur` and `end`.
+  [[nodiscard]] std::size_t remainingBytes() const noexcept {
+    return static_cast<std::size_t>(end - cur);
+  }
+
+  /// Copy one `T` out of the blob and advance. Returns false and latches
+  /// `ok` when fewer than `sizeof(T)` bytes remain; `out` is left untouched.
+  template <typename T>
+  bool readPod(T &out) noexcept {
+    if (!ok || remainingBytes() < sizeof(T)) {
+      ok = false;
+      return false;
+    }
+    std::memcpy(&out, cur, sizeof(T));
+    cur += sizeof(T);
+    return true;
+  }
+};
+
+/// Read a length-prefixed `std::uint32_t` vector. Rejects a length that
+/// exceeds the remaining bytes before resizing, so a hostile prefix cannot
+/// force an oversized allocation.
+inline bool coherenceProbeReadU32Vector(CoherenceProbeReader &r,
+                                        std::vector<std::uint32_t> &out) {
+  std::uint64_t count = 0;
+  if (!r.readPod(count)) {
+    return false;
+  }
+  // Divide before multiply so a hostile count cannot overflow the size
+  // check; each element occupies a fixed four bytes.
+  if (count > r.remainingBytes() / sizeof(std::uint32_t)) {
+    r.ok = false;
+    return false;
+  }
+  out.resize(static_cast<std::size_t>(count));
+  for (std::uint32_t &x : out) {
+    if (!r.readPod(x)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/// Read a length-prefixed `double` vector, with the same oversized-length
+/// guard as `coherenceProbeReadU32Vector`.
+inline bool coherenceProbeReadF64Vector(CoherenceProbeReader &r,
+                                        std::vector<double> &out) {
+  std::uint64_t count = 0;
+  if (!r.readPod(count)) {
+    return false;
+  }
+  if (count > r.remainingBytes() / sizeof(double)) {
+    r.ok = false;
+    return false;
+  }
+  out.resize(static_cast<std::size_t>(count));
+  for (double &x : out) {
+    if (!r.readPod(x)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/// Read a row count followed by that many `double` rows through
+/// `coherenceProbeReadF64Vector`. Bounds the row count by the remaining
+/// bytes since every row carries at least its own length prefix.
+inline bool coherenceProbeReadF64Matrix(CoherenceProbeReader &r,
+                                        std::vector<std::vector<double>> &out) {
+  std::uint64_t rows = 0;
+  if (!r.readPod(rows)) {
+    return false;
+  }
+  // Each row carries at least its own eight-byte length prefix, so the row
+  // count cannot exceed the remaining bytes divided by that minimum.
+  if (rows > r.remainingBytes() / sizeof(std::uint64_t)) {
+    r.ok = false;
+    return false;
+  }
+  out.resize(static_cast<std::size_t>(rows));
+  for (auto &row : out) {
+    if (!coherenceProbeReadF64Vector(r, row)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/// Parse a blob produced by `serializeCoherenceProbe` into `out`. Returns
+/// false on magic or version mismatch, truncation, or a structural
+/// inconsistency (latency matrix not NxN over the embedded cpus, cluster
+/// fields not sized to `numClusters`). `out` is written only on success.
+inline bool deserializeCoherenceProbe(std::span<const std::byte> bytes,
+                                      CoherenceProbe &out) {
+  CoherenceProbeReader r{
+      .cur = bytes.data(), .end = bytes.data() + bytes.size(), .ok = true};
+
+  std::uint32_t magic = 0;
+  std::uint32_t version = 0;
+  if (!r.readPod(magic) || !r.readPod(version)) {
+    return false;
+  }
+  if (magic != kCoherenceProbeMagic ||
+      version != kCoherenceProbeFormatVersion) {
+    return false;
+  }
+
+  CoherenceProbe probe;
+  std::uint8_t probeValid = 0;
+  if (!r.readPod(probeValid)) {
+    return false;
+  }
+  probe.valid = probeValid != 0U;
+  if (!r.readPod(probe.maxCrossOverIntraRatio)) {
+    return false;
+  }
+  std::uint8_t matrixValid = 0;
+  if (!r.readPod(matrixValid)) {
+    return false;
+  }
+  probe.matrix.valid = matrixValid != 0U;
+  if (!coherenceProbeReadU32Vector(r, probe.matrix.cpus) ||
+      !coherenceProbeReadF64Matrix(r, probe.matrix.matrix) ||
+      !coherenceProbeReadU32Vector(r, probe.clusters.clusterIdOfCpuIndex) ||
+      !r.readPod(probe.clusters.numClusters) ||
+      !coherenceProbeReadF64Matrix(r, probe.clusters.clusterDistanceNs)) {
+    return false;
+  }
+  if (!r.ok) {
+    return false;
+  }
+
+  // Structural consistency: the matrix must be NxN over the embedded cpu
+  // list, the per-cpu cluster ids must cover every cpu, and the cluster
+  // distance matrix must be numClusters x numClusters.
+  const std::size_t n = probe.matrix.cpus.size();
+  if (probe.matrix.matrix.size() != n) {
+    return false;
+  }
+  for (const auto &row : probe.matrix.matrix) {
+    if (row.size() != n) {
+      return false;
+    }
+  }
+  if (probe.clusters.clusterIdOfCpuIndex.size() != n) {
+    return false;
+  }
+  const std::size_t k = probe.clusters.numClusters;
+  if (probe.clusters.clusterDistanceNs.size() != k) {
+    return false;
+  }
+  for (const auto &row : probe.clusters.clusterDistanceNs) {
+    if (row.size() != k) {
+      return false;
+    }
+  }
+
+  out = std::move(probe);
+  return true;
 }
 
 } // namespace citor::detail

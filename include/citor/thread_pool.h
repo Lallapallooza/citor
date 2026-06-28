@@ -29,6 +29,7 @@
 #include <new>
 
 #include "citor/cancellation.h"
+#include "citor/coherence_cache.h"
 #include "citor/cpos/bulk_for_queries.h"
 #include "citor/cpos/fork_join.h"
 #include "citor/cpos/inclusive_scan.h"
@@ -1244,6 +1245,13 @@ public:
   /// always at least 1 on a host with one physical core.
   [[nodiscard]] std::uint32_t ccdCount() const noexcept {
     return m_topology.ccdCount;
+  }
+
+  /// Read-only view of the pool's one-time coherence probe. `valid` is false
+  /// for single-worker and arena pools, which skip the probe. Serialised by
+  /// @ref citor::exportCoherenceProbe.
+  [[nodiscard]] const detail::CoherenceProbe &coherenceProbe() const noexcept {
+    return m_coherenceProbe;
   }
 
   /// Origin tag of this pool: `Standalone` (user-owned) or `Arena`
@@ -6783,5 +6791,16 @@ private:
   /// reordered behind any number of higher-priority dispatches.
   std::atomic<std::uint32_t> m_throughputWaiting{0};
 };
+
+/// Definition of the accessor declared in `coherence_cache.h`; lives here so
+/// it can read the pool's probe through `coherenceProbe()`. An invalid probe
+/// serialises to an empty blob so `importCoherenceProbe` has nothing to seed.
+inline std::vector<std::byte> exportCoherenceProbe(const ThreadPool &pool) {
+  const detail::CoherenceProbe &probe = pool.coherenceProbe();
+  if (!probe.valid) {
+    return {};
+  }
+  return detail::serializeCoherenceProbe(probe);
+}
 
 } // namespace citor

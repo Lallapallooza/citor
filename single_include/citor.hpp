@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <exception>
 #include <fstream>
@@ -829,6 +830,1034 @@ serialStage([[maybe_unused]] const char *name, F &&fn) noexcept(noexcept(
 
 } // namespace citor
 
+// ===== citor/detail/cpu_relax.h =====
+
+// Spin-loop CPU hint used by every busy-wait in the engine.
+//
+// Factored out of `worker_loop.h` so headers that only need the hint
+// (`lookback_scan.h`, `coherence_probe.h`, ...) avoid pulling in the
+// full worker dispatch state.
+
+
+#if defined(__x86_64__) || defined(_M_X64)
+#include <emmintrin.h>
+#endif
+
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
+
+namespace citor::detail {
+
+/// Insert a single PAUSE / YIELD hint to back off without de-scheduling.
+///
+/// `_mm_pause` on x86-64 is the spin-loop hint of choice (P0514R4); it
+/// lets the CPU drop hyper-thread issue slots without yielding the
+/// scheduler quantum. Non-x86 builds fall through to a compiler barrier.
+inline void cpuRelax() noexcept {
+#if defined(__x86_64__) || defined(_M_X64)
+  _mm_pause();
+#else
+  std::atomic_signal_fence(std::memory_order_acq_rel);
+#endif
+}
+
+/// Index of the least-significant set bit in `x`. Behavior on `x == 0` is
+/// undefined (matches `__builtin_ctzll`); every call site already gates on
+/// a non-zero scan word.
+inline unsigned ctzll(std::uint64_t x) noexcept {
+#if defined(_MSC_VER) && !defined(__clang__)
+  unsigned long idx = 0;
+  _BitScanForward64(&idx, x);
+  return static_cast<unsigned>(idx);
+#else
+  return static_cast<unsigned>(__builtin_ctzll(x));
+#endif
+}
+
+/// Compute `a * b / c` through a 128-bit intermediate so the
+/// multiplication cannot overflow when both operands fill 64 bits.
+/// Caller guarantees the quotient fits in 64 bits; every site has
+/// `slot < participants`, so `(n*slot)/participants <= n`.
+inline std::uint64_t mulDiv64(std::uint64_t a, std::uint64_t b,
+                              std::uint64_t c) noexcept {
+#ifdef __SIZEOF_INT128__
+  __extension__ using u128 = unsigned __int128;
+  return static_cast<std::uint64_t>((static_cast<u128>(a) * b) / c);
+#elif defined(_M_X64) && defined(_MSC_VER)
+  std::uint64_t hi = 0;
+  const std::uint64_t lo = _umul128(a, b, &hi);
+  std::uint64_t rem = 0;
+  return _udiv128(hi, lo, c, &rem);
+#else
+#error "mulDiv64 needs either __int128 or x64 MSVC _umul128/_udiv128"
+#endif
+}
+
+} // namespace citor::detail
+
+// ===== citor/detail/coherence_probe.h =====
+
+
+#ifdef __linux__
+#include <pthread.h>
+#include <sched.h>
+#elif defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#endif
+
+
+namespace citor::detail {
+
+/// One-time pool-init coherence probe.
+///
+/// Builds an NxN cache-line ping-pong latency matrix between every pair of
+/// CPUs in the pool's affinity mask, then clusters CPUs into coherence
+/// groups so primitives that benefit from topology-aware partitioning
+/// (parallelScan, parallelReduce, fork/join victim selection) can size
+/// their cross-cluster work share from observed cost ratios instead of
+/// hardware-specific constants.
+///
+/// Methodology summary (from research):
+/// - Ping-pong probe: two threads, one shared `std::atomic<uint64_t>`,
+///   each side flips even/odd parity; median of N round-trips is the
+///   pair's latency in ns. (nviennot/core-to-core-latency, ChipsandCheese
+///   Microbenchmarks.)
+/// - Disjoint-pair scheduling: for N CPUs, run N-1 rounds where each
+///   round's pairs are a perfect matching of K_N. Compresses wall time
+///   from O(N^2 * probe-ms) to O(N * probe-ms).
+/// - Clustering: log-latency single-linkage agglomerative + Otsu's
+///   threshold on the off-diagonal histogram. Parameter-free,
+///   scale-invariant, falls back to the sysfs/L3 grouping prior when
+///   the histogram is unimodal (single-CCX consumer chip).
+/// - Cache nothing across pool ctors in this header; the pool may
+///   memoise the result if it wants.
+
+struct LatencyMatrix {
+  /// CPU ids (in matrix index order). `cpus.size() == matrix.size()`.
+  std::vector<std::uint32_t> cpus;
+  /// Symmetric pairwise latency in nanoseconds. `matrix[i][j]` is the
+  /// median round-trip latency between `cpus[i]` and `cpus[j]`. The
+  /// diagonal is zero (defined; not measured).
+  std::vector<std::vector<double>> matrix;
+  /// Valid if every off-diagonal cell was successfully measured.
+  bool valid = false;
+};
+
+/// Coherence-cluster assignment for the CPUs in a `LatencyMatrix`.
+struct ClusterResult {
+  /// Cluster identifier for each entry in the parent `LatencyMatrix::cpus`.
+  /// Values are `0..numClusters-1`. Empty when clustering was not
+  /// performed (single-CPU pool, probe failed, etc.).
+  std::vector<std::uint32_t> clusterIdOfCpuIndex;
+  /// Number of distinct clusters discovered.
+  std::uint32_t numClusters = 0;
+  /// Median pairwise latency between cluster pairs. `clusterDistanceNs[i][j]`
+  /// is the median over all `(cpu_a, cpu_b)` with `cluster(a)==i,
+  /// cluster(b)==j`. Diagonal entries hold the median intra-cluster
+  /// pairwise latency.
+  std::vector<std::vector<double>> clusterDistanceNs;
+};
+
+/// Combined output of a one-time coherence probe: the raw pairwise latency
+/// matrix, the derived cluster assignment, and a single ratio scalar that
+/// callers can use as a topology bias without inspecting the full matrix.
+struct CoherenceProbe {
+  /// True when the probe completed and `matrix` plus `clusters` are
+  /// populated. False on probe failure or single-CPU pools.
+  bool valid = false;
+  /// Pairwise round-trip latency matrix between every pair of CPUs in the
+  /// pool's affinity mask.
+  LatencyMatrix matrix;
+  /// Cluster assignment derived from `matrix` via Otsu's threshold on the
+  /// off-diagonal log-latency histogram.
+  ClusterResult clusters;
+  /// Worst-case (maximum) cross-cluster / intra-cluster median latency
+  /// ratio. `1.0` when there is only one cluster. This is the convenience
+  /// scalar used by primitives that want a single bias factor without
+  /// inspecting the full matrix.
+  double maxCrossOverIntraRatio = 1.0;
+};
+
+#ifdef __linux__
+/// Pins the calling thread to `|cpu|` for the duration of one probe round.
+/// Failures from `pthread_setaffinity_np` are ignored; the probe degrades
+/// to whatever scheduling the kernel chooses.
+inline void coherenceProbePin(int cpu) noexcept {
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  CPU_SET(static_cast<std::size_t>(cpu), &set);
+  (void)pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+}
+#elif defined(_WIN32)
+/// Windows peer: pin `|cpu|` via `SetThreadAffinityMask`. Failures
+/// degrade the probe to whatever scheduling Windows chooses. Single
+/// processor group only (64 logical CPUs).
+inline void coherenceProbePin(int cpu) noexcept {
+  const DWORD_PTR mask = static_cast<DWORD_PTR>(1)
+                         << (static_cast<std::uint32_t>(cpu) & 63U);
+  (void)::SetThreadAffinityMask(::GetCurrentThread(), mask);
+}
+#else
+/// No-op fallback on platforms with no first-class affinity API; the
+/// probe runs unpinned.
+inline void coherenceProbePin(int /*cpu*/) noexcept {}
+#endif
+
+/// Single-pair atomic-CAS ping-pong. Pins one helper thread to `cpuB`,
+/// pins the calling thread to `cpuA`, then runs `roundTrips` round-trips
+/// of an even/odd parity flip on a single shared cache line. Returns the
+/// MEAN round-trip time in nanoseconds; mean is fine here because the
+/// loop body is an atomic-RMW that dominates; outliers from interrupts
+/// average out across hundreds of round-trips.
+///
+/// Restores caller's pre-probe affinity mask on exit.
+inline double pingPongLatencyNs(int cpuA, int cpuB,
+                                std::uint32_t roundTrips = 1024U) noexcept {
+  alignas(kCacheLine) std::atomic<std::uint64_t> counter{0};
+  alignas(kCacheLine) std::atomic<int> ready{0};
+  alignas(kCacheLine) std::atomic<int> stop{0};
+
+#ifdef __linux__
+  cpu_set_t savedSet;
+  CPU_ZERO(&savedSet);
+  const bool savedOk =
+      pthread_getaffinity_np(pthread_self(), sizeof(savedSet), &savedSet) == 0;
+#elif defined(_WIN32)
+  // Windows has no read-only affinity accessor; round-trip
+  // `SetThreadAffinityMask(thread, ~0)` to capture the caller's mask.
+  // The brief all-CPUs window is closed by the next pin call.
+  const DWORD_PTR savedSet = ::SetThreadAffinityMask(
+      ::GetCurrentThread(), static_cast<DWORD_PTR>(~DWORD_PTR{0}));
+  const bool savedOk = (savedSet != 0U);
+#endif
+
+  std::thread helper([&, cpuB] {
+    coherenceProbePin(cpuB);
+    ready.store(1, std::memory_order_release);
+    while (stop.load(std::memory_order_acquire) == 0) {
+      const std::uint64_t observed = counter.load(std::memory_order_acquire);
+      if ((observed & 1ULL) == 1ULL) {
+        counter.store(observed + 1ULL, std::memory_order_release);
+      } else {
+        cpuRelax();
+      }
+    }
+  });
+
+  coherenceProbePin(cpuA);
+  while (ready.load(std::memory_order_acquire) == 0) {
+    cpuRelax();
+  }
+
+  // Warmup: 64 round-trips to settle the shared cache line and let the
+  // helper's first scheduler dispatch retire.
+  for (std::uint32_t i = 0; i < 64U; ++i) {
+    const std::uint64_t observed = counter.load(std::memory_order_acquire);
+    counter.store(observed + 1ULL, std::memory_order_release);
+    while ((counter.load(std::memory_order_acquire) & 1ULL) == 1ULL) {
+      cpuRelax();
+    }
+  }
+
+  const auto t0 = std::chrono::steady_clock::now();
+  for (std::uint32_t i = 0; i < roundTrips; ++i) {
+    const std::uint64_t observed = counter.load(std::memory_order_acquire);
+    counter.store(observed + 1ULL, std::memory_order_release);
+    while ((counter.load(std::memory_order_acquire) & 1ULL) == 1ULL) {
+      cpuRelax();
+    }
+  }
+  const auto t1 = std::chrono::steady_clock::now();
+
+  stop.store(1, std::memory_order_release);
+  // Helper observes `stop` on its next iter (it is currently spinning on
+  // an even counter waiting for us to flip it). To unblock cleanly we
+  // flip the counter to odd one more time, helper advances it to even,
+  // observes stop, and exits.
+  const std::uint64_t observed = counter.load(std::memory_order_acquire);
+  counter.store(observed + 1ULL, std::memory_order_release);
+  helper.join();
+
+#ifdef __linux__
+  if (savedOk) {
+    (void)pthread_setaffinity_np(pthread_self(), sizeof(savedSet), &savedSet);
+  }
+#elif defined(_WIN32)
+  if (savedOk) {
+    (void)::SetThreadAffinityMask(::GetCurrentThread(), savedSet);
+  }
+#endif
+
+  const double totalNs =
+      std::chrono::duration<double, std::nano>(t1 - t0).count();
+  return totalNs / static_cast<double>(roundTrips);
+}
+
+/// Build the round-robin disjoint-pair schedule for `N` participants.
+/// Returns `N-1` rounds when `N` is even, each round containing `N/2`
+/// pairs. For odd `N` adds a "bye" slot internally and returns `N`
+/// rounds with one bye per round; bye pairs are filtered out.
+///
+/// Each pair (i, j) appears in exactly one round, so the union of all
+/// rounds' pairs is the complete graph K_N's edge set.
+inline std::vector<std::vector<std::pair<std::uint32_t, std::uint32_t>>>
+roundRobinPairs(std::uint32_t n) {
+  std::vector<std::vector<std::pair<std::uint32_t, std::uint32_t>>> rounds;
+  if (n < 2U) {
+    return rounds;
+  }
+  const bool addBye = (n % 2U) != 0U;
+  const std::uint32_t m = addBye ? (n + 1U) : n;
+  std::vector<std::uint32_t> arr(m);
+  std::iota(arr.begin(), arr.end(), 0U);
+  rounds.reserve(m - 1U);
+  for (std::uint32_t r = 0; r < m - 1U; ++r) {
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> pairs;
+    pairs.reserve(m / 2U);
+    for (std::uint32_t i = 0; i < m / 2U; ++i) {
+      const std::uint32_t a = arr[i];
+      const std::uint32_t b = arr[m - 1U - i];
+      if (addBye && (a == n || b == n)) {
+        continue; // bye for this round's affected participant
+      }
+      pairs.emplace_back(a, b);
+    }
+    rounds.push_back(std::move(pairs));
+    // Rotate: arr[0] is the pivot, arr[1..m-1] rotate by one (last to
+    // index 1, others shift right).
+    const std::uint32_t last = arr[m - 1U];
+    for (std::uint32_t i = m - 1U; i > 1U; --i) {
+      arr[i] = arr[i - 1U];
+    }
+    arr[1U] = last;
+  }
+  return rounds;
+}
+
+/// Probe the full pairwise latency matrix for `cpus`. Uses disjoint-pair
+/// scheduling: per round, every active CPU is in at most one pair, so we
+/// can spawn one std::thread per pair (each pair has 2 threads) and
+/// collect all measurements in parallel. Total wall time is approximately
+/// `(N - 1) * single-pair-probe-time + thread-spawn-overhead`.
+///
+/// Caller's affinity is saved on entry and restored on exit.
+inline LatencyMatrix
+probeLatencyMatrix(const std::vector<std::uint32_t> &cpus,
+                   std::uint32_t roundTrips = 1024U) noexcept {
+  LatencyMatrix out;
+  if (cpus.size() < 2U) {
+    return out;
+  }
+  const auto n = static_cast<std::uint32_t>(cpus.size());
+  out.cpus = cpus;
+  out.matrix.assign(n, std::vector<double>(n, 0.0));
+
+#ifdef __linux__
+  cpu_set_t savedSet;
+  CPU_ZERO(&savedSet);
+  const bool savedOk =
+      pthread_getaffinity_np(pthread_self(), sizeof(savedSet), &savedSet) == 0;
+#elif defined(_WIN32)
+  // See `pingPongLatencyNs` for the all-CPUs round-trip used to capture
+  // the caller's affinity on Windows.
+  const DWORD_PTR savedSet = ::SetThreadAffinityMask(
+      ::GetCurrentThread(), static_cast<DWORD_PTR>(~DWORD_PTR{0}));
+  const bool savedOk = (savedSet != 0U);
+#endif
+
+  const auto schedule = roundRobinPairs(n);
+  for (const auto &round : schedule) {
+    // Spawn one thread per pair. Each pair is (cpus[a], cpus[b]). A and
+    // B in different pairs are non-overlapping CPUs (matching property),
+    // so per-pair threads do not contend with each other for the
+    // measurement window.
+    std::vector<std::thread> pairThreads;
+    pairThreads.reserve(round.size());
+    std::vector<double> roundLatencies(round.size(), 0.0);
+    for (std::size_t pi = 0; pi < round.size(); ++pi) {
+      const auto [a, b] = round[pi];
+      const int cpuA = static_cast<int>(cpus[a]);
+      const int cpuB = static_cast<int>(cpus[b]);
+      pairThreads.emplace_back([cpuA, cpuB, &roundLatencies, pi, roundTrips] {
+        roundLatencies[pi] = pingPongLatencyNs(cpuA, cpuB, roundTrips);
+      });
+    }
+    for (auto &t : pairThreads) {
+      t.join();
+    }
+    for (std::size_t pi = 0; pi < round.size(); ++pi) {
+      const auto [a, b] = round[pi];
+      out.matrix[a][b] = roundLatencies[pi];
+      out.matrix[b][a] = roundLatencies[pi];
+    }
+  }
+
+#ifdef __linux__
+  if (savedOk) {
+    (void)pthread_setaffinity_np(pthread_self(), sizeof(savedSet), &savedSet);
+  }
+#elif defined(_WIN32)
+  if (savedOk) {
+    (void)::SetThreadAffinityMask(::GetCurrentThread(), savedSet);
+  }
+#endif
+
+  out.valid = true;
+  return out;
+}
+
+/// Otsu's method for choosing a bimodal threshold on the off-diagonal
+/// log-latency histogram. Returns the threshold in log-ns, plus a
+/// `bimodality` score (between-class variance / total variance) in
+/// `[0, 1]`. Scores below ~0.4 indicate the histogram is essentially
+/// unimodal, in which case the caller should fall back to the sysfs
+/// prior rather than trust the threshold.
+/// Output of `otsuThresholdLog`.
+struct OtsuResult {
+  /// Threshold in log-ns that maximises between-class variance on the
+  /// off-diagonal log-latency histogram.
+  double threshold = 0.0;
+  /// Normalised between-class variance in `[0, 1]`. Scores below ~0.4
+  /// indicate a unimodal histogram and the threshold should be ignored.
+  double bimodality = 0.0;
+};
+
+/// Computes Otsu's threshold on the log-space histogram of `|values|` and
+/// returns the threshold plus a bimodality score the caller uses to decide
+/// whether the bipartition is trustworthy.
+inline OtsuResult otsuThresholdLog(const std::vector<double> &values) noexcept {
+  OtsuResult r;
+  if (values.size() < 2U) {
+    return r;
+  }
+  // Histogram in log-space, 64 bins.
+  constexpr std::size_t kBins = 64U;
+  double minV = std::numeric_limits<double>::infinity();
+  double maxV = -std::numeric_limits<double>::infinity();
+  for (const double v : values) {
+    if (v <= 0.0) {
+      continue;
+    }
+    const double lv = std::log(v);
+    minV = std::min(minV, lv);
+    maxV = std::max(maxV, lv);
+  }
+  if (!(maxV > minV)) {
+    return r;
+  }
+  std::vector<std::uint32_t> hist(kBins, 0U);
+  for (const double v : values) {
+    if (v <= 0.0) {
+      continue;
+    }
+    const double lv = std::log(v);
+    auto bin = static_cast<std::size_t>((lv - minV) / (maxV - minV) *
+                                        static_cast<double>(kBins - 1U));
+    if (bin >= kBins) {
+      bin = kBins - 1U;
+    }
+    hist[bin] += 1U;
+  }
+  std::uint64_t total = 0U;
+  double sumAll = 0.0;
+  for (std::size_t b = 0; b < kBins; ++b) {
+    total += hist[b];
+    sumAll += static_cast<double>(hist[b]) * static_cast<double>(b);
+  }
+  if (total == 0U) {
+    return r;
+  }
+  std::uint64_t cumCount = 0U;
+  double cumSum = 0.0;
+  double bestVar = -1.0;
+  std::size_t bestBin = 0U;
+  for (std::size_t b = 0; b < kBins; ++b) {
+    cumCount += hist[b];
+    cumSum += static_cast<double>(hist[b]) * static_cast<double>(b);
+    if (cumCount == 0U || cumCount == total) {
+      continue;
+    }
+    const double w0 =
+        static_cast<double>(cumCount) / static_cast<double>(total);
+    const double w1 = 1.0 - w0;
+    const double m0 = cumSum / static_cast<double>(cumCount);
+    const double m1 = (sumAll - cumSum) / static_cast<double>(total - cumCount);
+    const double bcv = w0 * w1 * (m0 - m1) * (m0 - m1);
+    if (bcv > bestVar) {
+      bestVar = bcv;
+      bestBin = b;
+    }
+  }
+  // Total variance.
+  const double mean = sumAll / static_cast<double>(total);
+  double tv = 0.0;
+  for (std::size_t b = 0; b < kBins; ++b) {
+    const double diff = static_cast<double>(b) - mean;
+    tv += static_cast<double>(hist[b]) * diff * diff;
+  }
+  tv /= static_cast<double>(total);
+  r.threshold = minV + (((static_cast<double>(bestBin) + 0.5) /
+                         static_cast<double>(kBins - 1U)) *
+                        (maxV - minV));
+  r.bimodality = (tv > 0.0) ? (bestVar / tv) : 0.0;
+  return r;
+}
+
+/// Cluster the matrix CPUs by latency. Builds a graph where edge `(i, j)`
+/// exists if `log(matrix[i][j]) <= threshold` (Otsu cut on the
+/// off-diagonal log-latency histogram), then finds connected components.
+/// Each component is one cluster.
+///
+/// Falls back to the `sysfsPrior` (per-CCD/L3 grouping from
+/// `topology.h`) when the histogram is essentially unimodal -- a
+/// single-CCX consumer chip will produce a unimodal histogram with no
+/// useful threshold; the sysfs grouping is the right answer there.
+///
+/// `sysfsPrior[k]` is a list of CPU ids that share an L3 cache. The
+/// function maps prior CPU ids to matrix indices and uses them as the
+/// fallback partition.
+inline ClusterResult clusterByLatency(
+    const LatencyMatrix &mat,
+    const std::vector<std::vector<std::uint32_t>> &sysfsPrior) noexcept {
+  ClusterResult out;
+  const auto n = static_cast<std::uint32_t>(mat.cpus.size());
+  if (!mat.valid || n < 2U) {
+    if (n > 0U) {
+      out.clusterIdOfCpuIndex.assign(n, 0U);
+      out.numClusters = 1U;
+      out.clusterDistanceNs.assign(1U, std::vector<double>(1U, 0.0));
+    }
+    return out;
+  }
+
+  // Off-diagonal latencies for Otsu.
+  std::vector<double> offDiag;
+  offDiag.reserve(static_cast<std::size_t>(n) * (n - 1U) / 2U);
+  for (std::uint32_t i = 0; i < n; ++i) {
+    for (std::uint32_t j = i + 1U; j < n; ++j) {
+      offDiag.push_back(mat.matrix[i][j]);
+    }
+  }
+  const OtsuResult ot = otsuThresholdLog(offDiag);
+
+  // Use Otsu cut only if the histogram is sufficiently bimodal. The
+  // threshold is the BCV/TV ratio (between-class variance over total
+  // variance, computed in log-space). For a unimodal Gaussian sample,
+  // Otsu picks the median and yields BCV/TV ~0.32; for a clearly bimodal
+  // sample with two well-separated peaks, BCV/TV approaches 1.0. The
+  // 0.55 cutoff rejects the Gaussian-noise case (single CCD on a
+  // multi-core probe) while accepting genuine multi-cluster splits;
+  // 0.555 (5/9) is the textbook bimodality-coefficient cutoff.
+  //
+  // Otsu's bimodality is unstable on tiny samples: a 4-CPU probe yields
+  // only 6 off-diagonal pairs, and ordinary timing jitter can push the
+  // BCV/TV ratio above 0.55 even on a homogeneous CCD. Require at least
+  // 10 pairs (= 5 CPUs) before trusting the histogram split; on smaller
+  // pools fall through to the sysfs prior, which on a single-CCD
+  // worker subset returns one cluster.
+  constexpr double kBimodalCutoff = 0.55;
+  constexpr std::size_t kMinOtsuPairs = 10U;
+  std::vector<std::uint32_t> clusterId(n, 0U);
+  std::uint32_t numClusters = 1U;
+
+  if (offDiag.size() >= kMinOtsuPairs && ot.bimodality >= kBimodalCutoff) {
+    // Connected-components on the "fast" graph (union-find).
+    std::vector<std::uint32_t> parent(n);
+    std::iota(parent.begin(), parent.end(), 0U);
+    auto find = [&](std::uint32_t x) {
+      while (parent[x] != x) {
+        parent[x] = parent[parent[x]];
+        x = parent[x];
+      }
+      return x;
+    };
+    auto unite = [&](std::uint32_t a, std::uint32_t b) {
+      a = find(a);
+      b = find(b);
+      if (a != b) {
+        parent[a] = b;
+      }
+    };
+    for (std::uint32_t i = 0; i < n; ++i) {
+      for (std::uint32_t j = i + 1U; j < n; ++j) {
+        if (mat.matrix[i][j] > 0.0 &&
+            std::log(mat.matrix[i][j]) <= ot.threshold) {
+          unite(i, j);
+        }
+      }
+    }
+    // Compact roots to dense cluster ids.
+    constexpr std::uint32_t kUnassigned = UINT32_MAX;
+    std::vector<std::uint32_t> rootToCluster(n, kUnassigned);
+    std::uint32_t next = 0U;
+    for (std::uint32_t i = 0; i < n; ++i) {
+      const std::uint32_t r = find(i);
+      if (rootToCluster[r] == kUnassigned) {
+        rootToCluster[r] = next;
+        ++next;
+      }
+      clusterId[i] = rootToCluster[r];
+    }
+    numClusters = next;
+  } else if (!sysfsPrior.empty()) {
+    // Sysfs prior fallback. Each probed CPU keyed into the prior keeps
+    // the prior's cluster id; any CPU absent from every prior group gets
+    // a fresh cluster id so it cannot be silently merged with cluster 0.
+    std::uint32_t maxCpu = 0U;
+    for (const auto &group : sysfsPrior) {
+      for (auto c : group) {
+        maxCpu = std::max(maxCpu, c);
+      }
+    }
+    std::vector<std::int32_t> sysfsCluster(maxCpu + 1U, -1);
+    for (std::size_t k = 0; k < sysfsPrior.size(); ++k) {
+      for (auto c : sysfsPrior[k]) {
+        sysfsCluster[c] = static_cast<std::int32_t>(k);
+      }
+    }
+    auto nextOrphanId = static_cast<std::uint32_t>(sysfsPrior.size());
+    std::uint32_t maxSeen = 0U;
+    for (std::uint32_t i = 0; i < n; ++i) {
+      const auto cpu = mat.cpus[i];
+      if (cpu < sysfsCluster.size() && sysfsCluster[cpu] >= 0) {
+        clusterId[i] = static_cast<std::uint32_t>(sysfsCluster[cpu]);
+      } else {
+        clusterId[i] = nextOrphanId;
+        ++nextOrphanId;
+      }
+      maxSeen = std::max(maxSeen, clusterId[i]);
+    }
+    numClusters = maxSeen + 1U;
+  }
+
+  out.clusterIdOfCpuIndex = std::move(clusterId);
+  out.numClusters = numClusters;
+  out.clusterDistanceNs.assign(numClusters,
+                               std::vector<double>(numClusters, 0.0));
+  // Median pairwise per-cluster-pair distance.
+  std::vector<std::vector<std::vector<double>>> bucket(
+      numClusters, std::vector<std::vector<double>>(numClusters));
+  for (std::uint32_t i = 0; i < n; ++i) {
+    for (std::uint32_t j = i; j < n; ++j) {
+      const std::uint32_t ci = out.clusterIdOfCpuIndex[i];
+      const std::uint32_t cj = out.clusterIdOfCpuIndex[j];
+      if (i == j) {
+        continue;
+      }
+      bucket[ci][cj].push_back(mat.matrix[i][j]);
+      if (ci != cj) {
+        bucket[cj][ci].push_back(mat.matrix[i][j]);
+      }
+    }
+  }
+  for (std::uint32_t a = 0; a < numClusters; ++a) {
+    for (std::uint32_t b = 0; b < numClusters; ++b) {
+      if (bucket[a][b].empty()) {
+        continue;
+      }
+      std::sort(bucket[a][b].begin(), bucket[a][b].end());
+      out.clusterDistanceNs[a][b] = bucket[a][b][bucket[a][b].size() / 2U];
+    }
+  }
+  return out;
+}
+
+/// Top-level: build the latency matrix, cluster, populate
+/// `CoherenceProbe`. `cpus` is the flat list of CPU ids the pool is
+/// allowed to schedule on (typically the union of the sysfs CCD groups
+/// intersected with the process affinity mask). `sysfsPrior` is the
+/// per-CCD CPU grouping from `detail::detectTopology()`; used only as
+/// a fallback when the latency histogram is unimodal.
+inline CoherenceProbe
+runCoherenceProbe(const std::vector<std::uint32_t> &cpus,
+                  const std::vector<std::vector<std::uint32_t>> &sysfsPrior,
+                  std::uint32_t roundTrips = 1024U) noexcept {
+  CoherenceProbe out;
+  if (cpus.size() < 2U) {
+    return out;
+  }
+  out.matrix = probeLatencyMatrix(cpus, roundTrips);
+  if (!out.matrix.valid) {
+    return out;
+  }
+  out.clusters = clusterByLatency(out.matrix, sysfsPrior);
+  out.valid = !out.clusters.clusterIdOfCpuIndex.empty();
+
+  // Convenience scalar: max(cluster i to cluster j median) / max(cluster
+  // i intra median). Intra is the diagonal of `clusterDistanceNs`. If
+  // there is only one cluster the ratio is 1.0.
+  double maxCross = 0.0;
+  double maxIntra = 0.0;
+  for (std::uint32_t a = 0; a < out.clusters.numClusters; ++a) {
+    maxIntra = std::max(maxIntra, out.clusters.clusterDistanceNs[a][a]);
+    for (std::uint32_t b = 0; b < out.clusters.numClusters; ++b) {
+      if (a == b) {
+        continue;
+      }
+      maxCross = std::max(maxCross, out.clusters.clusterDistanceNs[a][b]);
+    }
+  }
+  if (maxIntra > 0.0 && maxCross > 0.0) {
+    out.maxCrossOverIntraRatio = maxCross / maxIntra;
+  }
+  return out;
+}
+
+/// Mutex plus map backing the process-wide coherence-probe cache, keyed on
+/// the sorted-unique `cpus` vector. A single owner so `cachedCoherenceProbe`
+/// (lookup then insert) and `seedCoherenceProbeCache` (external insert) share
+/// one map instead of two function-local statics.
+struct CoherenceProbeCache {
+  /// Guards every read and write of `entries`.
+  std::mutex mutex;
+  /// Cached probe per normalised cpuset key.
+  std::map<std::vector<std::uint32_t>, CoherenceProbe> entries;
+};
+
+/// Accessor for the single process-wide `CoherenceProbeCache`.
+inline CoherenceProbeCache &coherenceProbeCache() noexcept {
+  static CoherenceProbeCache cache;
+  return cache;
+}
+
+/// Normalise a CPU list into the cache key: sorted and deduplicated so a
+/// pool's `probeCpus` and a seeded probe's embedded `cpus` map to the same
+/// entry regardless of input order.
+inline std::vector<std::uint32_t>
+coherenceProbeCacheKey(const std::vector<std::uint32_t> &cpus) {
+  std::vector<std::uint32_t> key = cpus;
+  std::sort(key.begin(), key.end());
+  key.erase(std::unique(key.begin(), key.end()), key.end());
+  return key;
+}
+
+/// Process-wide cache for `runCoherenceProbe`, keyed on the
+/// sorted-unique `cpus` vector. The latency matrix depends only on the
+/// host hardware, so repeated probes for the same set are duplicate
+/// work; test suites, bench harnesses, and `PoolGroup` arenas reuse a
+/// single matrix per process.
+inline CoherenceProbe
+cachedCoherenceProbe(const std::vector<std::uint32_t> &cpus,
+                     const std::vector<std::vector<std::uint32_t>> &sysfsPrior,
+                     std::uint32_t roundTrips = 1024U) {
+  std::vector<std::uint32_t> key = coherenceProbeCacheKey(cpus);
+  CoherenceProbeCache &cache = coherenceProbeCache();
+
+  {
+    const std::scoped_lock guard(cache.mutex);
+    const auto hit = cache.entries.find(key);
+    if (hit != cache.entries.end()) {
+      return hit->second;
+    }
+  }
+
+  // Run the probe outside the lock so a concurrent caller probing a
+  // different key is not blocked. A duplicate-probe race for the same
+  // key is harmless: the second insertion is dropped, and we return the
+  // first inserter's copy so identical pools see identical numbers.
+  CoherenceProbe fresh = runCoherenceProbe(cpus, sysfsPrior, roundTrips);
+
+  const std::scoped_lock guard(cache.mutex);
+  return cache.entries.emplace(std::move(key), std::move(fresh)).first->second;
+}
+
+/// Insert `probe` into the process-wide cache under the normalised `cpus`
+/// key so the next pool whose worker cpuset matches that key skips the live
+/// probe. Replaces any existing entry for the key: a seed is an explicit
+/// caller decision to use this probe for that cpuset, and import is meant to
+/// run before the first pool is built, where the cache is empty.
+inline void seedCoherenceProbeCache(const std::vector<std::uint32_t> &cpus,
+                                    const CoherenceProbe &probe) {
+  std::vector<std::uint32_t> key = coherenceProbeCacheKey(cpus);
+  CoherenceProbeCache &cache = coherenceProbeCache();
+  const std::scoped_lock guard(cache.mutex);
+  cache.entries.insert_or_assign(std::move(key), probe);
+}
+
+/// Magic prefix on the self-describing probe blob. Spells 'COHP'. A blob
+/// whose first word is not this magic is rejected by `importCoherenceProbe`.
+inline constexpr std::uint32_t kCoherenceProbeMagic = 0x434F4850U;
+/// Blob layout version. Bumped when the field order or encoding changes so a
+/// blob from an incompatible citor is rejected rather than misread.
+inline constexpr std::uint32_t kCoherenceProbeFormatVersion = 1U;
+
+/// Append the raw bytes of a trivially-copyable scalar to `bytes` in native
+/// byte order. The cache is same-machine, so native endianness is fine and
+/// the magic plus version guard against cross-build corruption.
+template <typename T>
+inline void coherenceProbeWritePod(std::vector<std::byte> &bytes,
+                                   const T &value) {
+  std::array<std::byte, sizeof(T)> buf{};
+  std::memcpy(buf.data(), &value, sizeof(T));
+  bytes.insert(bytes.end(), buf.begin(), buf.end());
+}
+
+/// Write a `std::uint32_t` vector as a `std::uint64_t` length prefix followed
+/// by the elements.
+inline void coherenceProbeWriteU32Vector(std::vector<std::byte> &bytes,
+                                         const std::vector<std::uint32_t> &v) {
+  coherenceProbeWritePod(bytes, static_cast<std::uint64_t>(v.size()));
+  for (const std::uint32_t x : v) {
+    coherenceProbeWritePod(bytes, x);
+  }
+}
+
+/// Write a `double` vector as a `std::uint64_t` length prefix followed by the
+/// elements.
+inline void coherenceProbeWriteF64Vector(std::vector<std::byte> &bytes,
+                                         const std::vector<double> &v) {
+  coherenceProbeWritePod(bytes, static_cast<std::uint64_t>(v.size()));
+  for (const double x : v) {
+    coherenceProbeWritePod(bytes, x);
+  }
+}
+
+/// Write a row-major matrix as a row count followed by each row through
+/// `coherenceProbeWriteF64Vector`.
+inline void
+coherenceProbeWriteF64Matrix(std::vector<std::byte> &bytes,
+                             const std::vector<std::vector<double>> &m) {
+  coherenceProbeWritePod(bytes, static_cast<std::uint64_t>(m.size()));
+  for (const auto &row : m) {
+    coherenceProbeWriteF64Vector(bytes, row);
+  }
+}
+
+/// Serialise a `CoherenceProbe` to a self-describing binary blob: magic,
+/// format version, then every field with length-prefixed vectors and
+/// native-endian doubles.
+inline std::vector<std::byte>
+serializeCoherenceProbe(const CoherenceProbe &probe) {
+  std::vector<std::byte> bytes;
+  coherenceProbeWritePod(bytes, kCoherenceProbeMagic);
+  coherenceProbeWritePod(bytes, kCoherenceProbeFormatVersion);
+  coherenceProbeWritePod(bytes,
+                         static_cast<std::uint8_t>(probe.valid ? 1U : 0U));
+  coherenceProbeWritePod(bytes, probe.maxCrossOverIntraRatio);
+  coherenceProbeWritePod(
+      bytes, static_cast<std::uint8_t>(probe.matrix.valid ? 1U : 0U));
+  coherenceProbeWriteU32Vector(bytes, probe.matrix.cpus);
+  coherenceProbeWriteF64Matrix(bytes, probe.matrix.matrix);
+  coherenceProbeWriteU32Vector(bytes, probe.clusters.clusterIdOfCpuIndex);
+  coherenceProbeWritePod(bytes, probe.clusters.numClusters);
+  coherenceProbeWriteF64Matrix(bytes, probe.clusters.clusterDistanceNs);
+  return bytes;
+}
+
+/// Bounds-checked cursor over a byte blob. Every read first confirms the
+/// blob holds enough bytes; a short read latches `ok` to false and leaves
+/// the output untouched so a malformed blob can never read out of range.
+struct CoherenceProbeReader {
+  /// Next byte to read.
+  const std::byte *cur = nullptr;
+  /// One past the last readable byte.
+  const std::byte *end = nullptr;
+  /// False once any read ran short; latches and is never cleared.
+  bool ok = true;
+
+  /// Bytes left between `cur` and `end`.
+  [[nodiscard]] std::size_t remainingBytes() const noexcept {
+    return static_cast<std::size_t>(end - cur);
+  }
+
+  /// Copy one `T` out of the blob and advance. Returns false and latches
+  /// `ok` when fewer than `sizeof(T)` bytes remain; `out` is left untouched.
+  template <typename T>
+  bool readPod(T &out) noexcept {
+    if (!ok || remainingBytes() < sizeof(T)) {
+      ok = false;
+      return false;
+    }
+    std::memcpy(&out, cur, sizeof(T));
+    cur += sizeof(T);
+    return true;
+  }
+};
+
+/// Read a length-prefixed `std::uint32_t` vector. Rejects a length that
+/// exceeds the remaining bytes before resizing, so a hostile prefix cannot
+/// force an oversized allocation.
+inline bool coherenceProbeReadU32Vector(CoherenceProbeReader &r,
+                                        std::vector<std::uint32_t> &out) {
+  std::uint64_t count = 0;
+  if (!r.readPod(count)) {
+    return false;
+  }
+  // Divide before multiply so a hostile count cannot overflow the size
+  // check; each element occupies a fixed four bytes.
+  if (count > r.remainingBytes() / sizeof(std::uint32_t)) {
+    r.ok = false;
+    return false;
+  }
+  out.resize(static_cast<std::size_t>(count));
+  for (std::uint32_t &x : out) {
+    if (!r.readPod(x)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/// Read a length-prefixed `double` vector, with the same oversized-length
+/// guard as `coherenceProbeReadU32Vector`.
+inline bool coherenceProbeReadF64Vector(CoherenceProbeReader &r,
+                                        std::vector<double> &out) {
+  std::uint64_t count = 0;
+  if (!r.readPod(count)) {
+    return false;
+  }
+  if (count > r.remainingBytes() / sizeof(double)) {
+    r.ok = false;
+    return false;
+  }
+  out.resize(static_cast<std::size_t>(count));
+  for (double &x : out) {
+    if (!r.readPod(x)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/// Read a row count followed by that many `double` rows through
+/// `coherenceProbeReadF64Vector`. Bounds the row count by the remaining
+/// bytes since every row carries at least its own length prefix.
+inline bool coherenceProbeReadF64Matrix(CoherenceProbeReader &r,
+                                        std::vector<std::vector<double>> &out) {
+  std::uint64_t rows = 0;
+  if (!r.readPod(rows)) {
+    return false;
+  }
+  // Each row carries at least its own eight-byte length prefix, so the row
+  // count cannot exceed the remaining bytes divided by that minimum.
+  if (rows > r.remainingBytes() / sizeof(std::uint64_t)) {
+    r.ok = false;
+    return false;
+  }
+  out.resize(static_cast<std::size_t>(rows));
+  for (auto &row : out) {
+    if (!coherenceProbeReadF64Vector(r, row)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/// Parse a blob produced by `serializeCoherenceProbe` into `out`. Returns
+/// false on magic or version mismatch, truncation, or a structural
+/// inconsistency (latency matrix not NxN over the embedded cpus, cluster
+/// fields not sized to `numClusters`). `out` is written only on success.
+inline bool deserializeCoherenceProbe(std::span<const std::byte> bytes,
+                                      CoherenceProbe &out) {
+  CoherenceProbeReader r{
+      .cur = bytes.data(), .end = bytes.data() + bytes.size(), .ok = true};
+
+  std::uint32_t magic = 0;
+  std::uint32_t version = 0;
+  if (!r.readPod(magic) || !r.readPod(version)) {
+    return false;
+  }
+  if (magic != kCoherenceProbeMagic ||
+      version != kCoherenceProbeFormatVersion) {
+    return false;
+  }
+
+  CoherenceProbe probe;
+  std::uint8_t probeValid = 0;
+  if (!r.readPod(probeValid)) {
+    return false;
+  }
+  probe.valid = probeValid != 0U;
+  if (!r.readPod(probe.maxCrossOverIntraRatio)) {
+    return false;
+  }
+  std::uint8_t matrixValid = 0;
+  if (!r.readPod(matrixValid)) {
+    return false;
+  }
+  probe.matrix.valid = matrixValid != 0U;
+  if (!coherenceProbeReadU32Vector(r, probe.matrix.cpus) ||
+      !coherenceProbeReadF64Matrix(r, probe.matrix.matrix) ||
+      !coherenceProbeReadU32Vector(r, probe.clusters.clusterIdOfCpuIndex) ||
+      !r.readPod(probe.clusters.numClusters) ||
+      !coherenceProbeReadF64Matrix(r, probe.clusters.clusterDistanceNs)) {
+    return false;
+  }
+  if (!r.ok) {
+    return false;
+  }
+
+  // Structural consistency: the matrix must be NxN over the embedded cpu
+  // list, the per-cpu cluster ids must cover every cpu, and the cluster
+  // distance matrix must be numClusters x numClusters.
+  const std::size_t n = probe.matrix.cpus.size();
+  if (probe.matrix.matrix.size() != n) {
+    return false;
+  }
+  for (const auto &row : probe.matrix.matrix) {
+    if (row.size() != n) {
+      return false;
+    }
+  }
+  if (probe.clusters.clusterIdOfCpuIndex.size() != n) {
+    return false;
+  }
+  const std::size_t k = probe.clusters.numClusters;
+  if (probe.clusters.clusterDistanceNs.size() != k) {
+    return false;
+  }
+  for (const auto &row : probe.clusters.clusterDistanceNs) {
+    if (row.size() != k) {
+      return false;
+    }
+  }
+
+  out = std::move(probe);
+  return true;
+}
+
+} // namespace citor::detail
+
+// ===== citor/coherence_cache.h =====
+
+
+
+namespace citor {
+
+class ThreadPool;
+
+/// Serialise a pool's one-time coherence probe to a portable blob. The blob
+/// embeds the probe's worker cpuset, which is the key `importCoherenceProbe`
+/// seeds under, so a short-lived process can persist it and replay it on the
+/// next run to let a matching pool skip the live probe. Returns an empty
+/// vector when the pool has no valid probe (single-worker and arena pools
+/// never run it).
+std::vector<std::byte> exportCoherenceProbe(const ThreadPool &pool);
+
+/// Seed the process-wide probe cache from a blob produced by
+/// @ref citor::exportCoherenceProbe. The next `ThreadPool` whose worker cpuset
+/// matches the blob's embedded key returns the seeded probe instead of running
+/// the live calibration; a cpuset that does not match is a harmless miss that
+/// re-probes. Returns false, with no effect and without throwing, on a magic
+/// or version mismatch, truncation, or a structural inconsistency.
+inline bool importCoherenceProbe(std::span<const std::byte> bytes) {
+  detail::CoherenceProbe probe;
+  if (!detail::deserializeCoherenceProbe(bytes, probe)) {
+    return false;
+  }
+  detail::seedCoherenceProbeCache(probe.matrix.cpus, probe);
+  return true;
+}
+
+} // namespace citor
+
 // ===== citor/cpos/bulk_for_queries.h =====
 
 
@@ -1499,72 +2528,6 @@ inline constexpr detail::SubmitDetachedFn submitDetached{};
 
 } // namespace citor
 
-// ===== citor/detail/cpu_relax.h =====
-
-// Spin-loop CPU hint used by every busy-wait in the engine.
-//
-// Factored out of `worker_loop.h` so headers that only need the hint
-// (`lookback_scan.h`, `coherence_probe.h`, ...) avoid pulling in the
-// full worker dispatch state.
-
-
-#if defined(__x86_64__) || defined(_M_X64)
-#include <emmintrin.h>
-#endif
-
-#ifdef _MSC_VER
-#include <intrin.h>
-#endif
-
-namespace citor::detail {
-
-/// Insert a single PAUSE / YIELD hint to back off without de-scheduling.
-///
-/// `_mm_pause` on x86-64 is the spin-loop hint of choice (P0514R4); it
-/// lets the CPU drop hyper-thread issue slots without yielding the
-/// scheduler quantum. Non-x86 builds fall through to a compiler barrier.
-inline void cpuRelax() noexcept {
-#if defined(__x86_64__) || defined(_M_X64)
-  _mm_pause();
-#else
-  std::atomic_signal_fence(std::memory_order_acq_rel);
-#endif
-}
-
-/// Index of the least-significant set bit in `x`. Behavior on `x == 0` is
-/// undefined (matches `__builtin_ctzll`); every call site already gates on
-/// a non-zero scan word.
-inline unsigned ctzll(std::uint64_t x) noexcept {
-#if defined(_MSC_VER) && !defined(__clang__)
-  unsigned long idx = 0;
-  _BitScanForward64(&idx, x);
-  return static_cast<unsigned>(idx);
-#else
-  return static_cast<unsigned>(__builtin_ctzll(x));
-#endif
-}
-
-/// Compute `a * b / c` through a 128-bit intermediate so the
-/// multiplication cannot overflow when both operands fill 64 bits.
-/// Caller guarantees the quotient fits in 64 bits; every site has
-/// `slot < participants`, so `(n*slot)/participants <= n`.
-inline std::uint64_t mulDiv64(std::uint64_t a, std::uint64_t b,
-                              std::uint64_t c) noexcept {
-#ifdef __SIZEOF_INT128__
-  __extension__ using u128 = unsigned __int128;
-  return static_cast<std::uint64_t>((static_cast<u128>(a) * b) / c);
-#elif defined(_M_X64) && defined(_MSC_VER)
-  std::uint64_t hi = 0;
-  const std::uint64_t lo = _umul128(a, b, &hi);
-  std::uint64_t rem = 0;
-  return _udiv128(hi, lo, c, &rem);
-#else
-#error "mulDiv64 needs either __int128 or x64 MSVC _umul128/_udiv128"
-#endif
-}
-
-} // namespace citor::detail
-
 // ===== citor/detail/chain_state.h =====
 
 
@@ -2099,656 +3062,6 @@ private:
   /// Singly-linked freelist of retired arrays; reaped at destruction time.
   alignas(kCacheLine) std::atomic<Array *> m_freelist{nullptr};
 };
-
-} // namespace citor::detail
-
-// ===== citor/detail/coherence_probe.h =====
-
-
-#ifdef __linux__
-#include <pthread.h>
-#include <sched.h>
-#elif defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <Windows.h>
-#endif
-
-
-namespace citor::detail {
-
-/// One-time pool-init coherence probe.
-///
-/// Builds an NxN cache-line ping-pong latency matrix between every pair of
-/// CPUs in the pool's affinity mask, then clusters CPUs into coherence
-/// groups so primitives that benefit from topology-aware partitioning
-/// (parallelScan, parallelReduce, fork/join victim selection) can size
-/// their cross-cluster work share from observed cost ratios instead of
-/// hardware-specific constants.
-///
-/// Methodology summary (from research):
-/// - Ping-pong probe: two threads, one shared `std::atomic<uint64_t>`,
-///   each side flips even/odd parity; median of N round-trips is the
-///   pair's latency in ns. (nviennot/core-to-core-latency, ChipsandCheese
-///   Microbenchmarks.)
-/// - Disjoint-pair scheduling: for N CPUs, run N-1 rounds where each
-///   round's pairs are a perfect matching of K_N. Compresses wall time
-///   from O(N^2 * probe-ms) to O(N * probe-ms).
-/// - Clustering: log-latency single-linkage agglomerative + Otsu's
-///   threshold on the off-diagonal histogram. Parameter-free,
-///   scale-invariant, falls back to the sysfs/L3 grouping prior when
-///   the histogram is unimodal (single-CCX consumer chip).
-/// - Cache nothing across pool ctors in this header; the pool may
-///   memoise the result if it wants.
-
-struct LatencyMatrix {
-  /// CPU ids (in matrix index order). `cpus.size() == matrix.size()`.
-  std::vector<std::uint32_t> cpus;
-  /// Symmetric pairwise latency in nanoseconds. `matrix[i][j]` is the
-  /// median round-trip latency between `cpus[i]` and `cpus[j]`. The
-  /// diagonal is zero (defined; not measured).
-  std::vector<std::vector<double>> matrix;
-  /// Valid if every off-diagonal cell was successfully measured.
-  bool valid = false;
-};
-
-/// Coherence-cluster assignment for the CPUs in a `LatencyMatrix`.
-struct ClusterResult {
-  /// Cluster identifier for each entry in the parent `LatencyMatrix::cpus`.
-  /// Values are `0..numClusters-1`. Empty when clustering was not
-  /// performed (single-CPU pool, probe failed, etc.).
-  std::vector<std::uint32_t> clusterIdOfCpuIndex;
-  /// Number of distinct clusters discovered.
-  std::uint32_t numClusters = 0;
-  /// Median pairwise latency between cluster pairs. `clusterDistanceNs[i][j]`
-  /// is the median over all `(cpu_a, cpu_b)` with `cluster(a)==i,
-  /// cluster(b)==j`. Diagonal entries hold the median intra-cluster
-  /// pairwise latency.
-  std::vector<std::vector<double>> clusterDistanceNs;
-};
-
-/// Combined output of a one-time coherence probe: the raw pairwise latency
-/// matrix, the derived cluster assignment, and a single ratio scalar that
-/// callers can use as a topology bias without inspecting the full matrix.
-struct CoherenceProbe {
-  /// True when the probe completed and `matrix` plus `clusters` are
-  /// populated. False on probe failure or single-CPU pools.
-  bool valid = false;
-  /// Pairwise round-trip latency matrix between every pair of CPUs in the
-  /// pool's affinity mask.
-  LatencyMatrix matrix;
-  /// Cluster assignment derived from `matrix` via Otsu's threshold on the
-  /// off-diagonal log-latency histogram.
-  ClusterResult clusters;
-  /// Worst-case (maximum) cross-cluster / intra-cluster median latency
-  /// ratio. `1.0` when there is only one cluster. This is the convenience
-  /// scalar used by primitives that want a single bias factor without
-  /// inspecting the full matrix.
-  double maxCrossOverIntraRatio = 1.0;
-};
-
-#ifdef __linux__
-/// Pins the calling thread to `|cpu|` for the duration of one probe round.
-/// Failures from `pthread_setaffinity_np` are ignored; the probe degrades
-/// to whatever scheduling the kernel chooses.
-inline void coherenceProbePin(int cpu) noexcept {
-  cpu_set_t set;
-  CPU_ZERO(&set);
-  CPU_SET(static_cast<std::size_t>(cpu), &set);
-  (void)pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
-}
-#elif defined(_WIN32)
-/// Windows peer: pin `|cpu|` via `SetThreadAffinityMask`. Failures
-/// degrade the probe to whatever scheduling Windows chooses. Single
-/// processor group only (64 logical CPUs).
-inline void coherenceProbePin(int cpu) noexcept {
-  const DWORD_PTR mask = static_cast<DWORD_PTR>(1)
-                         << (static_cast<std::uint32_t>(cpu) & 63U);
-  (void)::SetThreadAffinityMask(::GetCurrentThread(), mask);
-}
-#else
-/// No-op fallback on platforms with no first-class affinity API; the
-/// probe runs unpinned.
-inline void coherenceProbePin(int /*cpu*/) noexcept {}
-#endif
-
-/// Single-pair atomic-CAS ping-pong. Pins one helper thread to `cpuB`,
-/// pins the calling thread to `cpuA`, then runs `roundTrips` round-trips
-/// of an even/odd parity flip on a single shared cache line. Returns the
-/// MEAN round-trip time in nanoseconds; mean is fine here because the
-/// loop body is an atomic-RMW that dominates; outliers from interrupts
-/// average out across hundreds of round-trips.
-///
-/// Restores caller's pre-probe affinity mask on exit.
-inline double pingPongLatencyNs(int cpuA, int cpuB,
-                                std::uint32_t roundTrips = 1024U) noexcept {
-  alignas(kCacheLine) std::atomic<std::uint64_t> counter{0};
-  alignas(kCacheLine) std::atomic<int> ready{0};
-  alignas(kCacheLine) std::atomic<int> stop{0};
-
-#ifdef __linux__
-  cpu_set_t savedSet;
-  CPU_ZERO(&savedSet);
-  const bool savedOk =
-      pthread_getaffinity_np(pthread_self(), sizeof(savedSet), &savedSet) == 0;
-#elif defined(_WIN32)
-  // Windows has no read-only affinity accessor; round-trip
-  // `SetThreadAffinityMask(thread, ~0)` to capture the caller's mask.
-  // The brief all-CPUs window is closed by the next pin call.
-  const DWORD_PTR savedSet = ::SetThreadAffinityMask(
-      ::GetCurrentThread(), static_cast<DWORD_PTR>(~DWORD_PTR{0}));
-  const bool savedOk = (savedSet != 0U);
-#endif
-
-  std::thread helper([&, cpuB] {
-    coherenceProbePin(cpuB);
-    ready.store(1, std::memory_order_release);
-    while (stop.load(std::memory_order_acquire) == 0) {
-      const std::uint64_t observed = counter.load(std::memory_order_acquire);
-      if ((observed & 1ULL) == 1ULL) {
-        counter.store(observed + 1ULL, std::memory_order_release);
-      } else {
-        cpuRelax();
-      }
-    }
-  });
-
-  coherenceProbePin(cpuA);
-  while (ready.load(std::memory_order_acquire) == 0) {
-    cpuRelax();
-  }
-
-  // Warmup: 64 round-trips to settle the shared cache line and let the
-  // helper's first scheduler dispatch retire.
-  for (std::uint32_t i = 0; i < 64U; ++i) {
-    const std::uint64_t observed = counter.load(std::memory_order_acquire);
-    counter.store(observed + 1ULL, std::memory_order_release);
-    while ((counter.load(std::memory_order_acquire) & 1ULL) == 1ULL) {
-      cpuRelax();
-    }
-  }
-
-  const auto t0 = std::chrono::steady_clock::now();
-  for (std::uint32_t i = 0; i < roundTrips; ++i) {
-    const std::uint64_t observed = counter.load(std::memory_order_acquire);
-    counter.store(observed + 1ULL, std::memory_order_release);
-    while ((counter.load(std::memory_order_acquire) & 1ULL) == 1ULL) {
-      cpuRelax();
-    }
-  }
-  const auto t1 = std::chrono::steady_clock::now();
-
-  stop.store(1, std::memory_order_release);
-  // Helper observes `stop` on its next iter (it is currently spinning on
-  // an even counter waiting for us to flip it). To unblock cleanly we
-  // flip the counter to odd one more time, helper advances it to even,
-  // observes stop, and exits.
-  const std::uint64_t observed = counter.load(std::memory_order_acquire);
-  counter.store(observed + 1ULL, std::memory_order_release);
-  helper.join();
-
-#ifdef __linux__
-  if (savedOk) {
-    (void)pthread_setaffinity_np(pthread_self(), sizeof(savedSet), &savedSet);
-  }
-#elif defined(_WIN32)
-  if (savedOk) {
-    (void)::SetThreadAffinityMask(::GetCurrentThread(), savedSet);
-  }
-#endif
-
-  const double totalNs =
-      std::chrono::duration<double, std::nano>(t1 - t0).count();
-  return totalNs / static_cast<double>(roundTrips);
-}
-
-/// Build the round-robin disjoint-pair schedule for `N` participants.
-/// Returns `N-1` rounds when `N` is even, each round containing `N/2`
-/// pairs. For odd `N` adds a "bye" slot internally and returns `N`
-/// rounds with one bye per round; bye pairs are filtered out.
-///
-/// Each pair (i, j) appears in exactly one round, so the union of all
-/// rounds' pairs is the complete graph K_N's edge set.
-inline std::vector<std::vector<std::pair<std::uint32_t, std::uint32_t>>>
-roundRobinPairs(std::uint32_t n) {
-  std::vector<std::vector<std::pair<std::uint32_t, std::uint32_t>>> rounds;
-  if (n < 2U) {
-    return rounds;
-  }
-  const bool addBye = (n % 2U) != 0U;
-  const std::uint32_t m = addBye ? (n + 1U) : n;
-  std::vector<std::uint32_t> arr(m);
-  std::iota(arr.begin(), arr.end(), 0U);
-  rounds.reserve(m - 1U);
-  for (std::uint32_t r = 0; r < m - 1U; ++r) {
-    std::vector<std::pair<std::uint32_t, std::uint32_t>> pairs;
-    pairs.reserve(m / 2U);
-    for (std::uint32_t i = 0; i < m / 2U; ++i) {
-      const std::uint32_t a = arr[i];
-      const std::uint32_t b = arr[m - 1U - i];
-      if (addBye && (a == n || b == n)) {
-        continue; // bye for this round's affected participant
-      }
-      pairs.emplace_back(a, b);
-    }
-    rounds.push_back(std::move(pairs));
-    // Rotate: arr[0] is the pivot, arr[1..m-1] rotate by one (last to
-    // index 1, others shift right).
-    const std::uint32_t last = arr[m - 1U];
-    for (std::uint32_t i = m - 1U; i > 1U; --i) {
-      arr[i] = arr[i - 1U];
-    }
-    arr[1U] = last;
-  }
-  return rounds;
-}
-
-/// Probe the full pairwise latency matrix for `cpus`. Uses disjoint-pair
-/// scheduling: per round, every active CPU is in at most one pair, so we
-/// can spawn one std::thread per pair (each pair has 2 threads) and
-/// collect all measurements in parallel. Total wall time is approximately
-/// `(N - 1) * single-pair-probe-time + thread-spawn-overhead`.
-///
-/// Caller's affinity is saved on entry and restored on exit.
-inline LatencyMatrix
-probeLatencyMatrix(const std::vector<std::uint32_t> &cpus,
-                   std::uint32_t roundTrips = 1024U) noexcept {
-  LatencyMatrix out;
-  if (cpus.size() < 2U) {
-    return out;
-  }
-  const auto n = static_cast<std::uint32_t>(cpus.size());
-  out.cpus = cpus;
-  out.matrix.assign(n, std::vector<double>(n, 0.0));
-
-#ifdef __linux__
-  cpu_set_t savedSet;
-  CPU_ZERO(&savedSet);
-  const bool savedOk =
-      pthread_getaffinity_np(pthread_self(), sizeof(savedSet), &savedSet) == 0;
-#elif defined(_WIN32)
-  // See `pingPongLatencyNs` for the all-CPUs round-trip used to capture
-  // the caller's affinity on Windows.
-  const DWORD_PTR savedSet = ::SetThreadAffinityMask(
-      ::GetCurrentThread(), static_cast<DWORD_PTR>(~DWORD_PTR{0}));
-  const bool savedOk = (savedSet != 0U);
-#endif
-
-  const auto schedule = roundRobinPairs(n);
-  for (const auto &round : schedule) {
-    // Spawn one thread per pair. Each pair is (cpus[a], cpus[b]). A and
-    // B in different pairs are non-overlapping CPUs (matching property),
-    // so per-pair threads do not contend with each other for the
-    // measurement window.
-    std::vector<std::thread> pairThreads;
-    pairThreads.reserve(round.size());
-    std::vector<double> roundLatencies(round.size(), 0.0);
-    for (std::size_t pi = 0; pi < round.size(); ++pi) {
-      const auto [a, b] = round[pi];
-      const int cpuA = static_cast<int>(cpus[a]);
-      const int cpuB = static_cast<int>(cpus[b]);
-      pairThreads.emplace_back([cpuA, cpuB, &roundLatencies, pi, roundTrips] {
-        roundLatencies[pi] = pingPongLatencyNs(cpuA, cpuB, roundTrips);
-      });
-    }
-    for (auto &t : pairThreads) {
-      t.join();
-    }
-    for (std::size_t pi = 0; pi < round.size(); ++pi) {
-      const auto [a, b] = round[pi];
-      out.matrix[a][b] = roundLatencies[pi];
-      out.matrix[b][a] = roundLatencies[pi];
-    }
-  }
-
-#ifdef __linux__
-  if (savedOk) {
-    (void)pthread_setaffinity_np(pthread_self(), sizeof(savedSet), &savedSet);
-  }
-#elif defined(_WIN32)
-  if (savedOk) {
-    (void)::SetThreadAffinityMask(::GetCurrentThread(), savedSet);
-  }
-#endif
-
-  out.valid = true;
-  return out;
-}
-
-/// Otsu's method for choosing a bimodal threshold on the off-diagonal
-/// log-latency histogram. Returns the threshold in log-ns, plus a
-/// `bimodality` score (between-class variance / total variance) in
-/// `[0, 1]`. Scores below ~0.4 indicate the histogram is essentially
-/// unimodal, in which case the caller should fall back to the sysfs
-/// prior rather than trust the threshold.
-/// Output of `otsuThresholdLog`.
-struct OtsuResult {
-  /// Threshold in log-ns that maximises between-class variance on the
-  /// off-diagonal log-latency histogram.
-  double threshold = 0.0;
-  /// Normalised between-class variance in `[0, 1]`. Scores below ~0.4
-  /// indicate a unimodal histogram and the threshold should be ignored.
-  double bimodality = 0.0;
-};
-
-/// Computes Otsu's threshold on the log-space histogram of `|values|` and
-/// returns the threshold plus a bimodality score the caller uses to decide
-/// whether the bipartition is trustworthy.
-inline OtsuResult otsuThresholdLog(const std::vector<double> &values) noexcept {
-  OtsuResult r;
-  if (values.size() < 2U) {
-    return r;
-  }
-  // Histogram in log-space, 64 bins.
-  constexpr std::size_t kBins = 64U;
-  double minV = std::numeric_limits<double>::infinity();
-  double maxV = -std::numeric_limits<double>::infinity();
-  for (const double v : values) {
-    if (v <= 0.0) {
-      continue;
-    }
-    const double lv = std::log(v);
-    minV = std::min(minV, lv);
-    maxV = std::max(maxV, lv);
-  }
-  if (!(maxV > minV)) {
-    return r;
-  }
-  std::vector<std::uint32_t> hist(kBins, 0U);
-  for (const double v : values) {
-    if (v <= 0.0) {
-      continue;
-    }
-    const double lv = std::log(v);
-    auto bin = static_cast<std::size_t>((lv - minV) / (maxV - minV) *
-                                        static_cast<double>(kBins - 1U));
-    if (bin >= kBins) {
-      bin = kBins - 1U;
-    }
-    hist[bin] += 1U;
-  }
-  std::uint64_t total = 0U;
-  double sumAll = 0.0;
-  for (std::size_t b = 0; b < kBins; ++b) {
-    total += hist[b];
-    sumAll += static_cast<double>(hist[b]) * static_cast<double>(b);
-  }
-  if (total == 0U) {
-    return r;
-  }
-  std::uint64_t cumCount = 0U;
-  double cumSum = 0.0;
-  double bestVar = -1.0;
-  std::size_t bestBin = 0U;
-  for (std::size_t b = 0; b < kBins; ++b) {
-    cumCount += hist[b];
-    cumSum += static_cast<double>(hist[b]) * static_cast<double>(b);
-    if (cumCount == 0U || cumCount == total) {
-      continue;
-    }
-    const double w0 =
-        static_cast<double>(cumCount) / static_cast<double>(total);
-    const double w1 = 1.0 - w0;
-    const double m0 = cumSum / static_cast<double>(cumCount);
-    const double m1 = (sumAll - cumSum) / static_cast<double>(total - cumCount);
-    const double bcv = w0 * w1 * (m0 - m1) * (m0 - m1);
-    if (bcv > bestVar) {
-      bestVar = bcv;
-      bestBin = b;
-    }
-  }
-  // Total variance.
-  const double mean = sumAll / static_cast<double>(total);
-  double tv = 0.0;
-  for (std::size_t b = 0; b < kBins; ++b) {
-    const double diff = static_cast<double>(b) - mean;
-    tv += static_cast<double>(hist[b]) * diff * diff;
-  }
-  tv /= static_cast<double>(total);
-  r.threshold = minV + (((static_cast<double>(bestBin) + 0.5) /
-                         static_cast<double>(kBins - 1U)) *
-                        (maxV - minV));
-  r.bimodality = (tv > 0.0) ? (bestVar / tv) : 0.0;
-  return r;
-}
-
-/// Cluster the matrix CPUs by latency. Builds a graph where edge `(i, j)`
-/// exists if `log(matrix[i][j]) <= threshold` (Otsu cut on the
-/// off-diagonal log-latency histogram), then finds connected components.
-/// Each component is one cluster.
-///
-/// Falls back to the `sysfsPrior` (per-CCD/L3 grouping from
-/// `topology.h`) when the histogram is essentially unimodal -- a
-/// single-CCX consumer chip will produce a unimodal histogram with no
-/// useful threshold; the sysfs grouping is the right answer there.
-///
-/// `sysfsPrior[k]` is a list of CPU ids that share an L3 cache. The
-/// function maps prior CPU ids to matrix indices and uses them as the
-/// fallback partition.
-inline ClusterResult clusterByLatency(
-    const LatencyMatrix &mat,
-    const std::vector<std::vector<std::uint32_t>> &sysfsPrior) noexcept {
-  ClusterResult out;
-  const auto n = static_cast<std::uint32_t>(mat.cpus.size());
-  if (!mat.valid || n < 2U) {
-    if (n > 0U) {
-      out.clusterIdOfCpuIndex.assign(n, 0U);
-      out.numClusters = 1U;
-      out.clusterDistanceNs.assign(1U, std::vector<double>(1U, 0.0));
-    }
-    return out;
-  }
-
-  // Off-diagonal latencies for Otsu.
-  std::vector<double> offDiag;
-  offDiag.reserve(static_cast<std::size_t>(n) * (n - 1U) / 2U);
-  for (std::uint32_t i = 0; i < n; ++i) {
-    for (std::uint32_t j = i + 1U; j < n; ++j) {
-      offDiag.push_back(mat.matrix[i][j]);
-    }
-  }
-  const OtsuResult ot = otsuThresholdLog(offDiag);
-
-  // Use Otsu cut only if the histogram is sufficiently bimodal. The
-  // threshold is the BCV/TV ratio (between-class variance over total
-  // variance, computed in log-space). For a unimodal Gaussian sample,
-  // Otsu picks the median and yields BCV/TV ~0.32; for a clearly bimodal
-  // sample with two well-separated peaks, BCV/TV approaches 1.0. The
-  // 0.55 cutoff rejects the Gaussian-noise case (single CCD on a
-  // multi-core probe) while accepting genuine multi-cluster splits;
-  // 0.555 (5/9) is the textbook bimodality-coefficient cutoff.
-  //
-  // Otsu's bimodality is unstable on tiny samples: a 4-CPU probe yields
-  // only 6 off-diagonal pairs, and ordinary timing jitter can push the
-  // BCV/TV ratio above 0.55 even on a homogeneous CCD. Require at least
-  // 10 pairs (= 5 CPUs) before trusting the histogram split; on smaller
-  // pools fall through to the sysfs prior, which on a single-CCD
-  // worker subset returns one cluster.
-  constexpr double kBimodalCutoff = 0.55;
-  constexpr std::size_t kMinOtsuPairs = 10U;
-  std::vector<std::uint32_t> clusterId(n, 0U);
-  std::uint32_t numClusters = 1U;
-
-  if (offDiag.size() >= kMinOtsuPairs && ot.bimodality >= kBimodalCutoff) {
-    // Connected-components on the "fast" graph (union-find).
-    std::vector<std::uint32_t> parent(n);
-    std::iota(parent.begin(), parent.end(), 0U);
-    auto find = [&](std::uint32_t x) {
-      while (parent[x] != x) {
-        parent[x] = parent[parent[x]];
-        x = parent[x];
-      }
-      return x;
-    };
-    auto unite = [&](std::uint32_t a, std::uint32_t b) {
-      a = find(a);
-      b = find(b);
-      if (a != b) {
-        parent[a] = b;
-      }
-    };
-    for (std::uint32_t i = 0; i < n; ++i) {
-      for (std::uint32_t j = i + 1U; j < n; ++j) {
-        if (mat.matrix[i][j] > 0.0 &&
-            std::log(mat.matrix[i][j]) <= ot.threshold) {
-          unite(i, j);
-        }
-      }
-    }
-    // Compact roots to dense cluster ids.
-    constexpr std::uint32_t kUnassigned = UINT32_MAX;
-    std::vector<std::uint32_t> rootToCluster(n, kUnassigned);
-    std::uint32_t next = 0U;
-    for (std::uint32_t i = 0; i < n; ++i) {
-      const std::uint32_t r = find(i);
-      if (rootToCluster[r] == kUnassigned) {
-        rootToCluster[r] = next;
-        ++next;
-      }
-      clusterId[i] = rootToCluster[r];
-    }
-    numClusters = next;
-  } else if (!sysfsPrior.empty()) {
-    // Sysfs prior fallback. Each probed CPU keyed into the prior keeps
-    // the prior's cluster id; any CPU absent from every prior group gets
-    // a fresh cluster id so it cannot be silently merged with cluster 0.
-    std::uint32_t maxCpu = 0U;
-    for (const auto &group : sysfsPrior) {
-      for (auto c : group) {
-        maxCpu = std::max(maxCpu, c);
-      }
-    }
-    std::vector<std::int32_t> sysfsCluster(maxCpu + 1U, -1);
-    for (std::size_t k = 0; k < sysfsPrior.size(); ++k) {
-      for (auto c : sysfsPrior[k]) {
-        sysfsCluster[c] = static_cast<std::int32_t>(k);
-      }
-    }
-    auto nextOrphanId = static_cast<std::uint32_t>(sysfsPrior.size());
-    std::uint32_t maxSeen = 0U;
-    for (std::uint32_t i = 0; i < n; ++i) {
-      const auto cpu = mat.cpus[i];
-      if (cpu < sysfsCluster.size() && sysfsCluster[cpu] >= 0) {
-        clusterId[i] = static_cast<std::uint32_t>(sysfsCluster[cpu]);
-      } else {
-        clusterId[i] = nextOrphanId;
-        ++nextOrphanId;
-      }
-      maxSeen = std::max(maxSeen, clusterId[i]);
-    }
-    numClusters = maxSeen + 1U;
-  }
-
-  out.clusterIdOfCpuIndex = std::move(clusterId);
-  out.numClusters = numClusters;
-  out.clusterDistanceNs.assign(numClusters,
-                               std::vector<double>(numClusters, 0.0));
-  // Median pairwise per-cluster-pair distance.
-  std::vector<std::vector<std::vector<double>>> bucket(
-      numClusters, std::vector<std::vector<double>>(numClusters));
-  for (std::uint32_t i = 0; i < n; ++i) {
-    for (std::uint32_t j = i; j < n; ++j) {
-      const std::uint32_t ci = out.clusterIdOfCpuIndex[i];
-      const std::uint32_t cj = out.clusterIdOfCpuIndex[j];
-      if (i == j) {
-        continue;
-      }
-      bucket[ci][cj].push_back(mat.matrix[i][j]);
-      if (ci != cj) {
-        bucket[cj][ci].push_back(mat.matrix[i][j]);
-      }
-    }
-  }
-  for (std::uint32_t a = 0; a < numClusters; ++a) {
-    for (std::uint32_t b = 0; b < numClusters; ++b) {
-      if (bucket[a][b].empty()) {
-        continue;
-      }
-      std::sort(bucket[a][b].begin(), bucket[a][b].end());
-      out.clusterDistanceNs[a][b] = bucket[a][b][bucket[a][b].size() / 2U];
-    }
-  }
-  return out;
-}
-
-/// Top-level: build the latency matrix, cluster, populate
-/// `CoherenceProbe`. `cpus` is the flat list of CPU ids the pool is
-/// allowed to schedule on (typically the union of the sysfs CCD groups
-/// intersected with the process affinity mask). `sysfsPrior` is the
-/// per-CCD CPU grouping from `detail::detectTopology()`; used only as
-/// a fallback when the latency histogram is unimodal.
-inline CoherenceProbe
-runCoherenceProbe(const std::vector<std::uint32_t> &cpus,
-                  const std::vector<std::vector<std::uint32_t>> &sysfsPrior,
-                  std::uint32_t roundTrips = 1024U) noexcept {
-  CoherenceProbe out;
-  if (cpus.size() < 2U) {
-    return out;
-  }
-  out.matrix = probeLatencyMatrix(cpus, roundTrips);
-  if (!out.matrix.valid) {
-    return out;
-  }
-  out.clusters = clusterByLatency(out.matrix, sysfsPrior);
-  out.valid = !out.clusters.clusterIdOfCpuIndex.empty();
-
-  // Convenience scalar: max(cluster i to cluster j median) / max(cluster
-  // i intra median). Intra is the diagonal of `clusterDistanceNs`. If
-  // there is only one cluster the ratio is 1.0.
-  double maxCross = 0.0;
-  double maxIntra = 0.0;
-  for (std::uint32_t a = 0; a < out.clusters.numClusters; ++a) {
-    maxIntra = std::max(maxIntra, out.clusters.clusterDistanceNs[a][a]);
-    for (std::uint32_t b = 0; b < out.clusters.numClusters; ++b) {
-      if (a == b) {
-        continue;
-      }
-      maxCross = std::max(maxCross, out.clusters.clusterDistanceNs[a][b]);
-    }
-  }
-  if (maxIntra > 0.0 && maxCross > 0.0) {
-    out.maxCrossOverIntraRatio = maxCross / maxIntra;
-  }
-  return out;
-}
-
-/// Process-wide cache for `runCoherenceProbe`, keyed on the
-/// sorted-unique `cpus` vector. The latency matrix depends only on the
-/// host hardware, so repeated probes for the same set are duplicate
-/// work; test suites, bench harnesses, and `PoolGroup` arenas reuse a
-/// single matrix per process.
-inline CoherenceProbe
-cachedCoherenceProbe(const std::vector<std::uint32_t> &cpus,
-                     const std::vector<std::vector<std::uint32_t>> &sysfsPrior,
-                     std::uint32_t roundTrips = 1024U) {
-  std::vector<std::uint32_t> key = cpus;
-  std::sort(key.begin(), key.end());
-  key.erase(std::unique(key.begin(), key.end()), key.end());
-
-  static std::mutex cacheMutex;
-  static std::map<std::vector<std::uint32_t>, CoherenceProbe> cache;
-
-  {
-    const std::scoped_lock guard(cacheMutex);
-    const auto hit = cache.find(key);
-    if (hit != cache.end()) {
-      return hit->second;
-    }
-  }
-
-  // Run the probe outside the lock so a concurrent caller probing a
-  // different key is not blocked. A duplicate-probe race for the same
-  // key is harmless: the second insertion is dropped, and we return the
-  // first inserter's copy so identical pools see identical numbers.
-  CoherenceProbe fresh = runCoherenceProbe(cpus, sysfsPrior, roundTrips);
-
-  const std::scoped_lock guard(cacheMutex);
-  return cache.emplace(std::move(key), std::move(fresh)).first->second;
-}
 
 } // namespace citor::detail
 
@@ -7530,6 +7843,13 @@ public:
   /// always at least 1 on a host with one physical core.
   [[nodiscard]] std::uint32_t ccdCount() const noexcept {
     return m_topology.ccdCount;
+  }
+
+  /// Read-only view of the pool's one-time coherence probe. `valid` is false
+  /// for single-worker and arena pools, which skip the probe. Serialised by
+  /// @ref citor::exportCoherenceProbe.
+  [[nodiscard]] const detail::CoherenceProbe &coherenceProbe() const noexcept {
+    return m_coherenceProbe;
   }
 
   /// Origin tag of this pool: `Standalone` (user-owned) or `Arena`
@@ -13069,6 +13389,17 @@ private:
   /// reordered behind any number of higher-priority dispatches.
   std::atomic<std::uint32_t> m_throughputWaiting{0};
 };
+
+/// Definition of the accessor declared in `coherence_cache.h`; lives here so
+/// it can read the pool's probe through `coherenceProbe()`. An invalid probe
+/// serialises to an empty blob so `importCoherenceProbe` has nothing to seed.
+inline std::vector<std::byte> exportCoherenceProbe(const ThreadPool &pool) {
+  const detail::CoherenceProbe &probe = pool.coherenceProbe();
+  if (!probe.valid) {
+    return {};
+  }
+  return detail::serializeCoherenceProbe(probe);
+}
 
 } // namespace citor
 
