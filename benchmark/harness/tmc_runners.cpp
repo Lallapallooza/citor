@@ -32,8 +32,6 @@
 #include <string>
 #include <vector>
 
-#include "citor/always_assert.h"
-
 #include "aligned_alloc.h"
 #include "tmc_runners.h"
 

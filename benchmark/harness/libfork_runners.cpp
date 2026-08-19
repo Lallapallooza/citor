@@ -35,8 +35,6 @@
 
 #include "libfork.hpp"
 
-#include "citor/always_assert.h"
-
 #include "aligned_alloc.h"
 #include "libfork_runners.h"
 

@@ -30,8 +30,6 @@
 #include "competitor_traits.h"
 #include "cycle_clock.h"
 
-#include "citor/always_assert.h"
-
 namespace citor::bench {
 namespace {
 

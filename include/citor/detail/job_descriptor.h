@@ -20,19 +20,21 @@ namespace citor::detail {
 /// (producer fills, then publishes), many-reader (workers consume).
 ///
 /// Layout:
-/// - The first cache line holds the immutable descriptor body (range bounds,
-/// chunk shape,
-///   participants, balance / priority, body / token). Workers acquire-load
-///   these once after observing the matching generation.
-/// - The contended atomics (`nextBlock`, `firstException`, `exceptionWorkerId`)
-/// sit on dedicated
-///   `kCacheLine`-sized lines so concurrent dynamic-counter increments and
-///   exception CAS attempts do not invalidate the immutable body.
+/// - The immutable descriptor body (range bounds, chunk shape, participants,
+///   balance / priority, body / token) leads the struct. Workers acquire-load
+///   it once after observing the matching generation.
+/// - `firstException` and `exceptionWorkerId` sit on the same secondary
+///   publication line as `token`. That way a worker's per-block exception
+///   probe and cancellation poll share one fetch. Both fields are cold: only a
+///   throwing body writes them.
+/// - `nextBlock` gets its own `kCacheLine`-sized line, because concurrent
+///   dynamic-counter increments would otherwise invalidate the body on every
+///   block claim.
 ///
 /// The descriptor's `body` is a `FunctionRef` pointing into a closure that
-/// lives on the producer's stack. Because every primitive in v1 is synchronous
-/// (the producer joins before returning), the closure outlives the descriptor
-/// by construction.
+/// lives on the producer's stack. Because every fan-out primitive is
+/// synchronous (the producer joins before returning), the closure outlives the
+/// descriptor by construction.
 ///
 /// The padding overhead trades several hundred bytes of stack against
 /// MESI cache-coherency traffic on the contended atomics, which is the dominant
@@ -76,14 +78,11 @@ struct alignas(kCacheLine) JobDescriptor {
   /// if every background worker has already stamped the DONE bit (i.e.
   /// spinning workers picked up the dispatch and finished an empty / trivial
   /// body before the probe ran), the producer skips the futex-word bump and the
-  /// `FUTEX_WAKE_PRIVATE(INT_MAX)` syscall entirely. Independent one-shot
-  /// primitives
-  /// (`parallelFor`, `parallelReduce`, `bulkForQueries`) opt in;
-  /// protocol-driving primitives
-  /// (`parallelChain`, `parallelScan`, `runPlex`, `forkJoin`) leave the flag
-  /// default-`false` because their wrapper bodies must run to completion
-  /// regardless of when the producer observes done. Sits inside the existing
-  /// 16-bit padding before `body`, so it adds no descriptor size.
+  /// `FUTEX_WAKE_PRIVATE(INT_MAX)` syscall entirely. The independent one-shot
+  /// primitives (`parallelFor`, `parallelReduce`, `bulkForQueries`) opt in.
+  /// The protocol-driving ones (`parallelChain`, `parallelScan`, `runPlex`,
+  /// `forkJoin`) leave the flag default-`false`. Their wrapper bodies must run
+  /// to completion no matter when the producer observes done.
   bool preWakeCompletionProbe = false;
 
   /// Non-owning reference to the user's closure. Lives on the producer's stack
@@ -96,7 +95,8 @@ struct alignas(kCacheLine) JobDescriptor {
 
   /// Direct pointer to the user's callable. Set by `parallelFor<HintsT,F>` so
   /// the typed `workerEntry` runner can recover `F*` and call it without going
-  /// through `desc.body`'s FunctionRef indirection. Null for legacy primitives.
+  /// through `desc.body`'s FunctionRef indirection. Null for primitives that
+  /// dispatch through the untyped runner.
   void *fnPtr = nullptr;
 
   /// Optional monomorphized worker entry. When non-null, workers call this
@@ -111,10 +111,10 @@ struct alignas(kCacheLine) JobDescriptor {
   /// non-null, the worker entry CAS-races the producer's join path on
   /// `WorkerState[rank].claimedAt`; whoever wins runs rank R's blocks, the
   /// loser stamps mailbox=doneSentinel without re-running the work. When null,
-  /// the legacy "every worker runs its own blocks" protocol holds (used by
-  /// parallelReduce / parallelScan / runPlex / forkJoin which need rank-keyed
-  /// partial outputs). The pointer is a `void*` so this header does not have to
-  /// pull in `worker_state.h`.
+  /// the plain "every worker runs its own blocks" protocol holds.
+  /// `parallelReduce`, `parallelScan`, `runPlex`, and `forkJoin` need that
+  /// protocol for their rank-keyed partial outputs. The pointer is a `void*`
+  /// so this header does not have to include `worker_state.h`.
   void *workerStateBase = nullptr;
 
   /// First-exception capture slot. Workers `compare_exchange` this from null to

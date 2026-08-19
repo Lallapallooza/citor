@@ -43,7 +43,6 @@
 #include <oneapi/tbb/task_group.h>
 #endif
 
-#include "citor/always_assert.h"
 #include "citor/hints.h"
 #include "citor/thread_pool.h"
 

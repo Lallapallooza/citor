@@ -40,20 +40,13 @@ struct ParallelScanFn {
   /// two-pass scan produces at the right edge, and gives callers a single value
   /// to consume without a follow-up reduction.
   ///
-  /// HintsT   Hint type whose `static constexpr` members drive compile-time
-  /// policy. Pool     Executor type. T        Reduction value type. BodyFn
-  /// Per-chunk body callable: `T(std::size_t chunkId, std::size_t lo,
-  ///                  std::size_t hi, T initial, T* out)`.
-  /// PrefixFn Binary cross-chunk reduction operator: `T(T a, T b)`.
-  /// pool     Executor instance.
-  /// n        Range length; partitioned across slots as `[n*slot/P,
-  /// n*(slot+1)/P)`. identity Identity value seeded into the first chunk's
-  /// `initial` and returned for `n==0`. body     Per-chunk body callable
-  /// invoked twice per slot (Pass 1 with `initial=identity`, Pass 2 with
-  /// `initial=exclusivePrefix[slot]`). prefix   Binary combiner producing the
-  /// cross-chunk exclusive-prefix sequence. tok      Cancellation token
-  /// observed at pass boundaries. The inclusive prefix accumulator at the right
-  /// edge of the scan.
+  /// |n| is the range length, partitioned across slots as
+  /// `[n*slot/P, n*(slot+1)/P)`. |identity| seeds the first chunk's `initial`
+  /// and is the result for `n == 0`. The engine invokes |body| as
+  /// `T(chunkId, lo, hi, initial, out)`, twice per slot: Pass 1 with
+  /// `initial = identity`, Pass 2 with `initial = exclusivePrefix[slot]`.
+  /// |prefix| is the binary combiner that produces the cross-chunk
+  /// exclusive-prefix sequence. Workers read |tok| at pass boundaries.
   template <class HintsT, class Pool, class T, class BodyFn, class PrefixFn>
   [[nodiscard]] T
   operator()(Pool &pool, std::size_t n, T identity, BodyFn &&body,
@@ -67,7 +60,7 @@ struct ParallelScanFn {
 
 } // namespace detail
 
-/// Customization-point object for the Blelloch two-pass parallel prefix scan.
+/// Customization-point object for the two-pass parallel prefix scan.
 ///
 /// Calling `parallelScan<HintsT>(pool, n, identity, body, prefix)` dispatches
 /// through unqualified `tag_invoke`; the executor's overload runs the scan
@@ -76,11 +69,14 @@ struct ParallelScanFn {
 /// inline-fallback parameters) so every overload can specialize without runtime
 /// branching.
 ///
-/// The two-pass shape avoids the `n^2/p` sequential bottleneck of a naive
-/// split-recombine: Pass 1 computes per-chunk partial sums in parallel, the
-/// producer computes the chunk-level exclusive prefixes serially in
-/// `O(participants)`, and Pass 2 re-runs the body with each chunk's exclusive
-/// prefix as `initial` to write the final scan output.
+/// The reduce-then-scan shape avoids the `n^2/p` sequential bottleneck of a
+/// naive split-recombine:
+///
+///   1. Pass 1 computes per-chunk partial sums in parallel.
+///   2. The producer computes the chunk-level exclusive prefixes serially in
+///      `O(participants)`.
+///   3. Pass 2 re-runs the body with each chunk's exclusive prefix as
+///      `initial` to write the final scan output.
 inline constexpr detail::ParallelScanFn parallelScan{};
 
 } // namespace citor

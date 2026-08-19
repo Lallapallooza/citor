@@ -35,12 +35,9 @@ struct ParallelForFn {
   /// site (mirroring the member-template surface) so the executor's overload
   /// can specialize on it via `if constexpr` or a regular template parameter.
   ///
-  /// HintsT Hint type whose `static constexpr` members drive compile-time
-  /// policy. Pool   Executor type. F      Callable type invoked once per block
-  /// as `F(std::size_t lo, std::size_t hi)`. pool   Executor instance. first
-  /// Inclusive lower bound of the iteration range. last   Exclusive upper bound
-  /// of the iteration range. fn     Callable invoked over each block. tok
-  /// Cancellation token observed at chunk boundaries.
+  /// |HintsT| carries the compile-time policy. The engine invokes |fn| once
+  /// per block as `fn(lo, hi)` over the half-open range `[first, last)`.
+  /// Workers read |tok| at chunk boundaries.
   template <class HintsT, class Pool, class F>
   void operator()(Pool &pool, std::size_t first, std::size_t last, F &&fn,
                   CancellationToken tok = CancellationToken{}) const {

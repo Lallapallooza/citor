@@ -40,10 +40,9 @@ namespace citor::detail {
 // array remains valid for the rest of its current steal attempt because the
 // freelist never frees mid-flight (Le 2013 section 3 footnote 2).
 //
-// Termination: at deque destruction, every owned `Array` (including any
-// superseded ones pinned by an outstanding stealer) is freed via
-// `reapAllArrays`. The owner is responsible for draining all in-flight steals
-// before destroying the deque; the synchronous primitive that owns the deque
+// Termination: the destructor frees the active `Array` and every superseded
+// one still pinned on the freelist. The owner must drain all in-flight steals
+// before it destroys the deque. The synchronous primitive that owns the deque
 // joins on every worker before the deque goes out of scope.
 template <class T>
 class ChaseLevDeque {

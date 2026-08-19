@@ -23,10 +23,8 @@ namespace detail {
 ///
 /// The `HintsT` template parameter is a *type*, not a value: that lets the
 /// friend overload on `ThreadPool` template on the same `HintsT` and
-/// monomorphize identically to the member-template call. The hint type is
-/// reserved for future routing decisions (priority class, affinity), but is
-/// unused on the current shape since detached submission has no partition /
-/// chunk schedule.
+/// monomorphize identically to the member-template call. Detached submission
+/// has no partition or chunk schedule, so the engine reads no field off it.
 struct SubmitDetachedFn {
   /// Forward to the executor's `tag_invoke` overload, supplying a default
   /// `HintsT{}` value.
@@ -35,11 +33,8 @@ struct SubmitDetachedFn {
   /// site (mirroring the member-template surface) so the executor's overload
   /// can specialize on it via `if constexpr` or a regular template parameter.
   ///
-  /// HintsT Hint type whose `static constexpr` members drive compile-time
-  /// policy. Pool   Executor type. TaskFn Task callable, invocable as
-  /// `void(void)`. pool   Executor instance. fn     Task body the executor runs
-  /// without joining. tok    Cancellation token observed cooperatively by the
-  /// body.
+  /// |fn| is the task body, invocable as `void()`, which the executor runs
+  /// without joining. |tok| is observed cooperatively by the body.
   template <class HintsT, class Pool, class TaskFn>
   void operator()(Pool &pool, TaskFn &&fn,
                   CancellationToken tok = CancellationToken{}) const {

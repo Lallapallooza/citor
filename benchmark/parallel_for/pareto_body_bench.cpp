@@ -36,8 +36,6 @@
 #include <utility>
 #include <vector>
 
-#include "citor/always_assert.h"
-
 #include "bench_format.h"
 #include "bench_registry.h"
 #include "competitor_traits.h"

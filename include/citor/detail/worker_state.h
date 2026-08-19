@@ -8,23 +8,13 @@
 
 namespace citor::detail {
 
-/// Reserved slot for the per-worker Chase-Lev work-stealing deque. Holds a
-/// `void *` placeholder so the `WorkerState` layout, sizing, and alignment
-/// remain stable. The deque type owns the heap-allocated payload pointed to
-/// by `storage`; the `void *` width keeps `WorkerState` trivially-zeroed
-/// without coupling the engine to the deque header.
-struct ChaseLevDequeSlot {
-  /// Pointer to the heap-allocated deque payload, owned by the
-  /// work-stealing deque type.
-  void *storage = nullptr;
-};
-
 /// Per-worker state owned by the pool, one instance per participant.
 ///
-/// `WorkerState` carries the worker's identity, mailbox publish/ack slot,
-/// observability counters, and a pointer to the deque. Every contended
-/// atomic sits on its own `kCacheLine`-sized line so a write on the
-/// mailbox does not invalidate the worker's identity or counters.
+/// `WorkerState` carries the worker's identity, mailbox publish/ack slot, and
+/// observability counters. Every contended atomic sits on its own
+/// `kCacheLine`-sized line so a write on the mailbox does not invalidate the
+/// worker's identity or counters. The pool owns the fork-join work-stealing
+/// deques separately. This struct does not hold them.
 ///
 /// Counters are relaxed-atomic so workers can update them on the hot path
 /// without synchronizing other state; readers (telemetry, tests) accept
@@ -34,8 +24,8 @@ struct WorkerState {
   /// as the worker's same-line DONE ack via `PoolControl::kDoneBit`.
   ///
   /// Producer publishes a new dispatch by writing this slot's mailbox to
-  /// the dispatch's phase counter (bit 0 = shutdown, bits 2..63 = monotonic
-  /// phase, matching `PoolControl::generation`'s layout). The worker spins
+  /// the dispatch's phase counter, matching `PoolControl::generation`'s flag
+  /// and phase layout. The worker spins
   /// on its own mailbox instead of the shared `generation`, eliminating the
   /// N-readers-on-one-line coherence storm under fan-out.
   ///
@@ -48,8 +38,7 @@ struct WorkerState {
   ///
   /// After running its share the worker stamps `mailbox |= kDoneBit` (release)
   /// so the producer's join reads done state on the same cache line it just
-  /// published the dispatch on. One line per worker on the join path replaces
-  /// the old two-line publish + done-epoch protocol.
+  /// published the dispatch on: one line per worker on the join path.
   ///
   /// Lives alone on a 128-byte line because the producer writes it on
   /// every dispatch and the worker reads it every spin iteration.
@@ -111,9 +100,6 @@ struct WorkerState {
   /// Default value `0` is below any real generation (workers' first
   /// dispatch sees gen >= `kPhaseStep` > 0).
   alignas(kCacheLine) std::atomic<std::uint64_t> claimedAt{0};
-
-  /// Reserved deque slot.
-  alignas(kCacheLine) ChaseLevDequeSlot deque{};
 };
 
 // Hot-path offsets must stay pinned: the dispatch loop indexes `mailbox`
@@ -128,10 +114,9 @@ static_assert(offsetof(WorkerState, hotSpinEpoch) == kCacheLine * 5);
 static_assert(offsetof(WorkerState, stealAttempts) == kCacheLine * 6);
 static_assert(offsetof(WorkerState, stealSuccesses) == kCacheLine * 7);
 static_assert(offsetof(WorkerState, claimedAt) == kCacheLine * 8);
-static_assert(offsetof(WorkerState, deque) == kCacheLine * 9);
 
-// The full struct must fit comfortably in L2 across the worker fleet
-// (16 workers x 4 KiB = 64 KiB).
+// The full struct must stay small enough that the whole worker fleet's state
+// fits in L2 alongside the working set.
 static_assert(sizeof(WorkerState) <= 4096);
 
 } // namespace citor::detail

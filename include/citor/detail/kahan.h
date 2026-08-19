@@ -25,14 +25,11 @@ struct KahanPair {
 /// Add a scalar |x| to a running `KahanPair` accumulator using Kahan
 /// compensation.
 ///
-/// Implements one step of the textbook compensated summation. The compensation
-/// term |a|.c is subtracted from |x| to recover the previously lost low bits
-/// before the running sum is bumped; the new compensation captures the rounding
-/// error introduced by this step.
-///
-/// a Current accumulator.
-/// x Scalar to add.
-/// New accumulator with |x| folded in.
+/// Implements one step of the textbook compensated summation. |a| is the
+/// current accumulator and |x| the scalar to add. The step subtracts the
+/// accumulator's compensation term from |x| to recover the lost low bits,
+/// then bumps the running sum. The new compensation captures the rounding
+/// error this step introduces. Returns the accumulator with |x| folded in.
 [[nodiscard]] inline KahanPair kahanAdd(KahanPair a, double x) noexcept {
   const double y = x - a.c;
   const double t = a.sum + y;
@@ -46,13 +43,11 @@ struct KahanPair {
 ///
 /// Used at every interior node of the chunk-id pairwise reduction tree: each
 /// subtree's partial sum is itself a `KahanPair`, and combining two siblings
-/// preserves the compensation contract. The implementation folds |b|.sum into
-/// |a| via `kahanAdd`, then folds |b|.c (the right child's compensation) so the
-/// residual carried into the parent is the sum of both children's residuals.
-///
-/// a Left subtree accumulator.
-/// b Right subtree accumulator.
-/// Combined accumulator covering both subtrees.
+/// preserves the compensation contract. |a| is the left subtree's accumulator
+/// and |b| the right one's. The implementation folds |b|'s sum into |a| via
+/// `kahanAdd`, then folds |b|'s compensation so the residual carried into the
+/// parent covers both children. Returns the accumulator spanning both
+/// subtrees.
 [[nodiscard]] inline KahanPair kahanCombine(KahanPair a, KahanPair b) noexcept {
   const KahanPair afterSum = kahanAdd(a, b.sum);
   return kahanAdd(afterSum, -b.c);

@@ -27,10 +27,9 @@ namespace detail {
 /// ultimately route through the same engine; the CPO has zero runtime hint
 /// dispatch cost.
 ///
-/// Recursive tasks call back into the customization point from worker context;
-/// each task receives a `ForkJoinScope` reference (defined by the executor) it
-/// uses to spawn children. The scope abstraction keeps the CPO surface
-/// decoupled from the engine's task-descriptor encoding.
+/// A task spawns children by calling the customization point again from
+/// worker context. The nested call joins on its own task pack before it
+/// returns, so recursion ends at the innermost frame.
 struct ForkJoinFn {
   /// Forward to the executor's `tag_invoke` overload, supplying a default
   /// `HintsT{}` value.
@@ -39,13 +38,8 @@ struct ForkJoinFn {
   /// site (mirroring the member-template surface) so the executor's overload
   /// can specialize on it via `if constexpr` or a regular template parameter.
   ///
-  /// HintsT  Hint type whose `static constexpr` members drive compile-time
-  /// policy. Pool    Executor type. TaskFns Variadic pack of task callables,
-  /// each invocable as `void(void)` or
-  ///                 `void(ForkJoinScope&)` per the executor's contract.
-  /// pool    Executor instance.
-  /// tok     Cancellation token observed at task-boundary chunks.
-  /// fns     Variadic pack of root tasks.
+  /// |fns| is the pack of root tasks, each invocable as `void()`. Workers read
+  /// |tok| on entry to each task.
   template <class HintsT, class Pool, class... TaskFns>
   void operator()(Pool &pool, CancellationToken tok, TaskFns &&...fns) const {
     tag_invoke(*this, pool, std::move(tok), HintsT{},

@@ -26,8 +26,7 @@ struct alignas(kCacheLine) PlexDoneSlot {
 };
 
 /// Stack-resident state shared by the producer and background workers across
-/// all phases of a
-///        single `runPlex` call.
+/// all phases of a single `runPlex` call.
 ///
 /// Layout invariants:
 /// - `currentPhase` lives on its own cache line so the producer's release-store
@@ -63,8 +62,7 @@ struct PlexState {
   std::uint32_t participants = 0;
 
   /// Phase epoch published by the producer. Workers acquire-spin until
-  /// `currentPhase >= localPhase` before admitting their slice for
-  /// `localPhase`.
+  /// `currentPhase >= p` before admitting their slice for phase `p`.
   ///
   /// Initial value is `0`; the producer publishes `1, 2, ..., nPhases` in
   /// order. Workers complete phase `p` when they observe `currentPhase >= p`,
@@ -124,8 +122,8 @@ struct PlexState {
   /// / participants`, matching the prim_mst_backend.h convention so the
   /// migration produces bit-identical block boundaries.
   ///
-  /// slot Worker slot index in `[0, participants)`.
-  /// `(lo, hi)` pair denoting the slot's contiguous range over `[0, n)`.
+  /// |slot| is the worker slot index in `[0, participants)`. Returns the
+  /// `(lo, hi)` pair denoting that slot's contiguous range over `[0, n)`.
   [[nodiscard]] std::pair<std::size_t, std::size_t>
   slotRange(std::uint32_t slot) const noexcept {
     const auto lo = static_cast<std::size_t>(mulDiv64(n, slot, participants));

@@ -62,9 +62,9 @@ struct alignas(kCacheLine) LookbackTile {
 /// predecessor is observed in `PrefixAvailable` state. Returns the
 /// computed prefix for `myTile`.
 ///
-/// `prefix` is the user-supplied associative combiner; the walk
-/// composes left-to-right (oldest predecessor first) to preserve
-/// associativity even when the combiner is not commutative.
+/// `prefix` is the user-supplied associative combiner. The walk visits the
+/// nearest predecessor first but always composes its operands left-to-right,
+/// so the combiner only has to be associative, not commutative.
 ///
 /// The walk avoids stalling on a slow predecessor by spinning with
 /// `cpuRelax()`; on workloads where every tile's Pass-1 work is
@@ -84,7 +84,7 @@ lookbackWalk(LookbackTile<T> *tiles, std::uint32_t myTile, T identity,
   // we have folded in but whose `prefix` was not yet published. When
   // we hit a tile in `PrefixAvailable` state, that tile's prefix
   // covers everything to its left, so the result is
-  // `prefix.left = prefix(prefix.left, peer.prefix, peer.aggregate, accum)`.
+  // `prefix(prefix(peer.prefix, peer.aggregate), accum)`.
   // Compose left-to-right (peer is to the left of accum) so the user
   // monoid only needs to be associative, not commutative.
   T accum = identity;

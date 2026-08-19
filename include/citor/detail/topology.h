@@ -654,7 +654,7 @@ inline Topology detectTopology() {
   // Per-CCD L3 size + preferred-CCD selection. V-Cache parts have one CCD with
   // a stacked SRAM die (96 MiB on 9950X3D's CCD0 vs 32 MiB on the regular CCD);
   // for workloads whose working set exceeds the smaller L3 but fits the larger,
-  // landing on the V-Cache CCD is a 5-10x speedup. We pick the largest-L3 CCD
+  // landing on the V-Cache CCD is a large speedup. We pick the largest-L3 CCD
   // as the default placement target; tie-break by lowest index so symmetric
   // Zens (no X3D) still get a deterministic choice across runs.
   topo.l3KibOfCcd.assign(topo.ccdGroups.size(), 0U);

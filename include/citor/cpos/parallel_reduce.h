@@ -37,17 +37,11 @@ struct ParallelReduceFn {
   /// `Determinism::KahanCompensated` reduction shapes from the static-constexpr
   /// members of |HintsT|.
   ///
-  /// HintsT  Hint type whose `static constexpr` members drive compile-time
-  /// policy. Pool    Executor type. T       Reduction value type. Map Per-block
-  /// map callable: `T(std::size_t lo, std::size_t hi)`. Combine Binary combine
-  /// callable: `T(T, T)`. pool    Executor instance. first   Inclusive lower
-  /// bound of the iteration range. last    Exclusive upper bound of the
-  /// iteration range. init    Identity value used when the range is empty AND
-  /// seed for combiner. map     Callable that produces a partial value over a
-  /// chunk range. combine Binary combiner over partial values. tok Cancellation
-  /// token observed at chunk boundaries. The reduction result, identical across
-  /// worker counts when the hint requests a
-  ///         deterministic combine tree.
+  /// |map| produces a partial over a chunk as `T(lo, hi)`. |combine| folds two
+  /// partials as `T(T, T)`. |init| is both the empty-range result and the seed
+  /// for the combiner. Workers read |tok| at chunk boundaries. The result is
+  /// identical across worker counts when the hint requests a deterministic
+  /// combine tree.
   template <class HintsT, class Pool, class T, class Map, class Combine>
   [[nodiscard]] T
   operator()(Pool &pool, std::size_t first, std::size_t last, T init, Map &&map,

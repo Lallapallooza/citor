@@ -45,8 +45,6 @@
 #include "competitor_traits.h"
 #include "cycle_clock.h"
 
-#include "citor/always_assert.h"
-
 #ifdef CITOR_BENCH_HAS_TBB
 #include <oneapi/tbb/blocked_range.h>
 #include <oneapi/tbb/parallel_reduce.h>

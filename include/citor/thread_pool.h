@@ -2437,11 +2437,9 @@ public:
         std::forward<PrefixFn>(prefix), std::move(tok));
   }
 
-  /// Buffer-to-buffer inclusive prefix scan. Engine owns the inner loop
-  /// (no user body), so it can use the most aggressive memory-traffic
-  /// shape -- decoupled-lookback single-pass with `PREFETCHW` ahead of
-  /// the writes, per-cluster lookback chains on multi-CCD parts -- to
-  /// hit the hardware bandwidth floor.
+  /// Buffer-to-buffer inclusive prefix scan. The engine owns the inner
+  /// loop (no user body), so it can pick the memory-traffic shape: a
+  /// single-pass decoupled-lookback scan over cache-sized tiles.
   ///
   /// `in` and `out` are caller-owned spans of equal length; aliasing
   /// (in.data() == out.data()) is safe because the engine reads `in[i]`
@@ -3160,10 +3158,9 @@ private:
         return runWithPartials(partials, nChunks);
       }
 
-      // FixedBlockOrder / OrderTolerant share the same dispatch shape; the only
-      // difference is whether the caller's combine is
-      // bit-reproducible-friendly. We still use the chunk-id pairwise tree so
-      // FixedBlockOrder is bit-identical across worker counts.
+      // The chunk-id pairwise tree runs for every determinism mode, so
+      // FixedBlockOrder is bit-identical across worker counts whatever the
+      // caller's combine does.
       struct alignas(kCacheLine) Slot {
         T value;
         std::uint8_t done = 0;
@@ -4526,21 +4523,14 @@ private:
   /// and per-tile state lines live with the owner; the lookback chain
   /// sweeps backward across tiles, so workers on cluster N reading a
   /// predecessor tile owned by cluster M pay the cross-cluster
-  /// coherence cost. With tiles sized to the runtime-probed L2/2 the
-  /// chain typically terminates within a couple of hops because
-  /// immediate predecessors finish their aggregate before the
-  /// successor's body returns.
+  /// coherence cost. The chain typically terminates within a couple of
+  /// hops because immediate predecessors finish their aggregate before
+  /// the successor's body returns.
   ///
-  /// Output prefetch: each tile issues `PREFETCHW` over its own
-  /// `out[T_lo..T_hi]` slice immediately after publishing its
-  /// aggregate, so the cross-cluster RFO traffic for the writes runs
-  /// concurrently with the lookback walk and the local scan, hiding
-  /// the inter-die fabric round-trip behind per-tile compute.
-  ///
-  /// Tile size: `tileBytes = max(64 KiB, l2KibPerCore * 1024 / 2)` --
-  /// half the runtime-probed L2 leaves room for both the input read
-  /// and the output write of a tile to be L2-resident. Falls back to
-  /// 256 KiB when sysfs is absent.
+  /// Tile size is `clamp(perParticipantBytes, kMinTileBytes, l2Bytes)`,
+  /// where `l2Bytes` is the runtime-probed L2-per-core and
+  /// `perParticipantBytes` is `n * sizeof(T)` split across participants.
+  /// See the sizing note at the computation itself.
   ///
   /// Returns the inclusive total at the right edge.
   template <class HintsT, class T, class PrefixFn>
@@ -4557,22 +4547,8 @@ private:
     }
     const std::size_t participants = m_control.participants;
 
-    // Choose tile bytes from the runtime-probed L2-per-core. The tile
-    // size balances: (a) tile-local working set should fit in L2 so
-    // Pass-1's chunk-local scan stays cache-resident through the
-    // lookback wait, (b) tile count >= participants so every worker
-    // has work and the lookback chain pipelines (more tiles than
-    // workers means a slow tile doesn't stall the whole chain), (c)
-    // tile compute time should be a few microseconds so the lookback
-    // chain hops overlap with adjacent tiles' Pass-1 work.
-    //
-    // Heuristic: tile_bytes = min(l2_per_core / 4, n / participants).
-    // The L2/4 cap leaves headroom for d.in + d.out + a small cushion
-    // of locked stack frames in cache; the n/participants cap ensures
-    // there are at least `participants` tiles. Hardware-agnostic:
-    // works on any CPU that exposes index2/size in sysfs; falls back
-    // to 64 KiB when sysfs is absent.
-    // Tile sizing -- balance two competing constraints:
+    // Tile sizing from the runtime-probed L2-per-core, balancing two
+    // competing constraints:
     //   (a) Chain parallelism: in a single coherence cluster, the
     //       lookback chain serializes the workers (tile T waits on
     //       T-1's prefix). If `numTiles > participants`, some workers
@@ -5882,17 +5858,6 @@ private:
         desc, lease.gateSkipped(), &fn, reuseHint);
   }
 
-  /// Untyped-priority counterpart of `dispatchOneStaticTypedSlot0Hinted`.
-  /// Pulls the priority from `|desc|` rather than a compile-time
-  /// `HintsT::priority`.
-  template <class FOp>
-  void dispatchOneStaticTypedSlot0(detail::JobDescriptor &desc, FOp &fn,
-                                   bool reuseHint = false) {
-    const DispatchLease lease(*this, desc.priority);
-    dispatchOneStaticLockedBody<Balance::StaticUniform>(
-        desc, lease.gateSkipped(), &fn, reuseHint);
-  }
-
   /// Typed entry into the dynamic-balance dispatch path: the producer's
   /// slot-0 inline body call bypasses `desc.body`'s `FunctionRef` indirection
   /// by invoking `fn` directly. Sibling of
@@ -5980,9 +5945,7 @@ private:
     // side: the join-wait fallback below) can use it as the comparator for
     // `WorkerState::claimedAt`. The release-store on each worker's mailbox
     // sequenced-after this relaxed store is the visibility edge: workers
-    // acquire-load mailbox and see the matching `desc.generation` write. The
-    // historical "desc.generation field is dead" comment no longer holds now
-    // that cold-collapse reads it.
+    // acquire-load mailbox and see the matching `desc.generation` write.
     desc.generation = nextGen;
 
     m_control.activeJob.store(static_cast<void *>(&desc),
@@ -6193,8 +6156,8 @@ private:
       // Cache `sched_getcpu()` once per join. The producer is auto-pinned by
       // the pool ctor for Standalone pools and by `bindProducerSlot()` for
       // explicit-pin call sites; in both shapes the CPU is invariant for the
-      // call's lifetime. Pulling the syscall out of the per-64-rounds probe
-      // saves ~10-20ns per gated probe under sustained join contention.
+      // call's lifetime, so the per-64-rounds probe reads the cached value
+      // instead of re-entering the kernel.
 #ifdef __linux__
       const int producerCpu = sched_getcpu();
       const std::uint32_t producerCpuU =

@@ -96,9 +96,9 @@ public:
 
   /// Test whether `request_stop()` has been called on any copy of this token.
   ///
-  /// `true` if any holder has signalled cancellation; `false` for the
-  /// never-stopped
-  ///         sentinel and for any owned token whose flag is still clear.
+  /// Returns `true` if any holder has signalled cancellation, `false` for the
+  /// never-stopped sentinel and for any owned token whose flag is still
+  /// clear.
   [[nodiscard]] bool stop_requested() const noexcept {
     auto *state = m_state.get();
     if (state == nullptr) {
@@ -119,8 +119,8 @@ public:
 
   /// Equality on the underlying control-block pointer. Used by descriptor write
   /// elision: two tokens compare equal when they share the same control block
-  /// (or both are the no-state sentinel). Steady-state bench loops re-bind the
-  /// same default sentinel each call, so producers skip the redundant store.
+  /// (or both are the no-state sentinel). Back-to-back calls that re-bind the
+  /// same default sentinel let the producer skip the redundant store.
   bool operator==(const CancellationToken &other) const noexcept {
     return m_state.get() == other.m_state.get();
   }
@@ -134,10 +134,9 @@ public:
   /// data the caller wrote before invoking `request_stop` is visible to a
   /// worker that observes the stop flag.
   ///
-  /// `true` if this call transitioned the token from non-stopped to stopped;
-  /// `false` if
-  ///         the token was already stopped, or if this is the `neverStopped`
-  ///         sentinel.
+  /// Returns `true` if this call moved the token from non-stopped to stopped.
+  /// Returns `false` if the token was already stopped, and for the
+  /// default-constructed never-stopped sentinel.
   bool request_stop() noexcept {
     auto *state = m_state.get();
     if (state == nullptr) {
@@ -149,8 +148,7 @@ public:
   }
 
 private:
-  /// Shared atomic state; bit 0 is the stop flag. Higher bits reserved for
-  /// future use.
+  /// Shared atomic state. Bit 0 is the stop flag.
   std::shared_ptr<std::atomic<std::uint32_t>> m_state;
 };
 
@@ -158,9 +156,9 @@ private:
 ///
 /// `Deadline` stores an absolute `__rdtsc` reading at which the deadline
 /// expires. `expired()` compares the current TSC against the threshold. The
-/// reading is taken once at construction and never refreshed; the only call
-/// sites are inside hot worker bodies where a syscall-based `clock_gettime`
-/// would dominate the budget.
+/// constructor takes the reading once and never refreshes it. A hot body can
+/// poll the deadline without the `clock_gettime` round trip a wall-clock check
+/// would cost.
 ///
 /// A default-constructed deadline never expires (threshold is `UINT64_MAX`).
 /// `Deadline::expired` is `noexcept` and allocation-free.
@@ -175,12 +173,10 @@ public:
 
   /// Construct a deadline at an absolute TSC threshold.
   ///
-  /// The caller provides a precomputed `__rdtsc()` value; the deadline expires
-  /// when the live TSC reaches or passes the threshold. This is low-level:
-  /// callers can reuse a single
-  /// `__rdtsc` reading taken at job-publish time across many primitives.
-  ///
-  /// tscThreshold Absolute TSC cycle count at which the deadline expires.
+  /// The caller provides a precomputed `__rdtsc()` value in |tscThreshold|.
+  /// The deadline expires when the live TSC reaches or passes it. This is the
+  /// low-level entry: callers can reuse a single `__rdtsc` reading taken at
+  /// job-publish time across many primitives.
   constexpr explicit Deadline(std::uint64_t tscThreshold) noexcept
       : m_tscThreshold(tscThreshold) {}
 
@@ -192,7 +188,7 @@ public:
   /// `__rdtsc()` plus a multiplication. On non-x86 hosts the calibration
   /// returns 0 and this factory returns the never-expires sentinel.
   ///
-  /// ms Wall-clock milliseconds from now until the deadline expires.
+  /// |ms| is the wall-clock milliseconds from now until the deadline expires.
   [[nodiscard]] static Deadline fromMillis(std::uint64_t ms) noexcept {
 #if defined(__x86_64__) || defined(_M_X64)
     const double cyclesPerNs = detail::tscCyclesPerNs();
@@ -211,7 +207,7 @@ public:
   /// Construct a deadline at `now + us`. See `fromMillis` for calibration
   /// details.
   ///
-  /// us Wall-clock microseconds from now until the deadline expires.
+  /// |us| is the wall-clock microseconds from now until the deadline expires.
   [[nodiscard]] static Deadline fromMicros(std::uint64_t us) noexcept {
 #if defined(__x86_64__) || defined(_M_X64)
     const double cyclesPerNs = detail::tscCyclesPerNs();
@@ -229,9 +225,8 @@ public:
 
   /// Check whether the live TSC has reached the deadline's threshold.
   ///
-  /// `true` if the deadline is in the past; `false` otherwise. Returns `false`
-  /// for the
-  ///         default-constructed never-expires sentinel.
+  /// Returns `true` if the deadline is in the past, `false` otherwise and for
+  /// the default-constructed never-expires sentinel.
   [[nodiscard]] bool expired() const noexcept {
 #if defined(__x86_64__) || defined(_M_X64)
     return __rdtsc() >= m_tscThreshold;
@@ -240,8 +235,7 @@ public:
 #endif
   }
 
-  /// Access the absolute TSC threshold this deadline was constructed with.
-  /// The threshold value passed to the constructor.
+  /// Returns the absolute TSC threshold the caller passed to the constructor.
   [[nodiscard]] constexpr std::uint64_t threshold() const noexcept {
     return m_tscThreshold;
   }
@@ -261,8 +255,7 @@ private:
 /// allocation in the constructor.
 class cancelled_exception : public std::exception {
 public:
-  /// Return the diagnostic string identifying the exception kind.
-  /// A non-null, statically-stored C-string.
+  /// Returns a non-null, statically-stored diagnostic string.
   [[nodiscard]] const char *what() const noexcept override {
     return "citor: cancelled";
   }
@@ -271,25 +264,22 @@ public:
 /// Thrown from a value-producing primitive whose join was cancelled mid-flight.
 ///
 /// Carries a `partial_value` field that holds the deterministic combine of all
-/// completed chunks up to the cancellation. For `Determinism::FixedBlockOrder`,
-/// the partial result is well-defined (combine of completed chunks `[0,
-/// completed)` in chunk-id order). For `OrderTolerant`, the partial value is
-/// order-tolerant and reflects whatever workers happened to commit.
+/// completed chunks up to the cancellation. Under
+/// `Determinism::FixedBlockOrder` the partial result is well-defined: the
+/// combine of completed chunks `[0, completed)` in chunk-id order.
 ///
-/// T The value type the cancelled primitive was producing.
+/// |T| is the value type the cancelled primitive was producing.
 template <class T>
 class cancelled_value_exception : public std::exception {
 public:
-  /// Construct with a deterministic-combine partial result.
-  ///
-  /// partial The combine-of-completed-chunks partial value at the moment of
+  /// Construct with a deterministic-combine partial result. |partial| is the
+  /// combine of the chunks that completed before the call observed
   /// cancellation.
   explicit cancelled_value_exception(T partial) noexcept(
       std::is_nothrow_move_constructible_v<T>)
       : partial_value(std::move(partial)) {}
 
-  /// Return the diagnostic string identifying the exception kind.
-  /// A non-null, statically-stored C-string.
+  /// Returns a non-null, statically-stored diagnostic string.
   [[nodiscard]] const char *what() const noexcept override {
     return "citor: cancelled with partial value";
   }

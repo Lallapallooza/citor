@@ -21,42 +21,23 @@ namespace citor::detail {
 /// drains. The producer participates as slot 0 and joins on the `pendingTasks`
 /// countdown reaching zero.
 ///
-/// Layout invariants:
-/// - `pendingTasks` lives on its own line; it is the single contended atomic on
-/// the dispatch
-///   completion path. Workers `fetch_sub(1)` on it after retiring a task so the
-///   producer's spin-then-park loop can detect zero without reading any
-///   per-worker slot.
-/// - `forkJoinCancelled` lives on its own line so cancellation broadcast does
-/// not interfere with
-///   the per-task hot path. Workers acquire-read this flag at task-boundary
-///   chunks; a stopped token causes any victim probe to stop emitting fresh
-///   task descriptors.
-/// - `firstException` is on its own line; the CAS-from-null path is cold.
-///
-/// Padding-suppression note: the layout keeps every contended atomic on its own
-/// `kCacheLine`-sized line, so the analyser's "excessive padding" warning is
-/// the design trade-off we want -- false-sharing avoidance over byte-tight
-/// packing.
-// Lower store-queue stalls under recursive spawn:
-// libfork's per-call frame is 36-40 B on a single cache line, no internal
-// alignas padding. citor's prior layout (4 alignas(kCacheLine=128)-separated
-// blocks) issued 3-4 separate Read-For-Ownership transactions per recursive
-// forkJoin -- one per cold cache line touched. Collapsing the contended atomics
-// onto a single line cuts per-call RFOs from 3-4 to 1. False-sharing on the
-// no-cancel/no-throw common path is moot: peer writes to
-// `cancelled`/`firstException` only fire on the cold cancel or throw paths, so
-// the producer's hot `pendingTasks` poll keeps the line stable.
+/// Layout: every field shares one `kCacheLine`-aligned line. Recursive spawn
+/// touches the state once per call. A line-per-atomic layout would pay one
+/// Read-For-Ownership transaction per cold line, instead of one for the whole
+/// struct. False sharing does not bite on the common path. A call writes
+/// `forkJoinCancelled` and `firstException` only when it cancels or throws,
+/// so the producer's hot `pendingTasks` poll keeps the line stable.
 struct alignas(kCacheLine) ForkJoinState {
   /// Number of participants (producer + background workers) collaborating in
   /// the call.
   std::uint32_t participants = 0;
 
   /// Cancellation flag broadcast by the producer's cancellation observer or by
-  /// any participant that observed an exception. Co-located with `pendingTasks`
-  /// because the steady-state common path never writes it; the no-cancel /
-  /// no-throw call shape leaves the field at 0 throughout, so peer `fetch_sub`
-  /// traffic on `pendingTasks` keeps the line uncontended.
+  /// any participant that observed an exception. A worker acquire-reads it on
+  /// entry to each task and skips the body once it is set, so outstanding
+  /// tasks retire without spawning children. The steady-state common path
+  /// never writes it, so peer `fetch_sub` traffic on `pendingTasks` keeps the
+  /// line uncontended.
   std::atomic<std::uint32_t> forkJoinCancelled{0};
 
   /// CCD index for each participant slot; used by the victim-selection RNG

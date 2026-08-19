@@ -111,9 +111,8 @@ public:
       ++arenaIndex;
     }
     if (m_arenas.empty()) {
-      // Defensive fallback: enumerateCcds always returns at least one CCD,
-      // but if a future platform port returns an empty list, spin up a
-      // single-thread arena so callers never see an empty group.
+      // Defensive fallback: `enumerateCcds` must return at least one CCD,
+      // but an empty list must not produce an empty group.
       const std::vector<std::uint32_t> pins;
       m_arenas.emplace_back(std::unique_ptr<ThreadPool>(
           new ThreadPool(ThreadPool::ArenaTag{}, std::size_t{1}, pins, 0U)));

@@ -36,8 +36,7 @@ struct alignas(kCacheLine) ScanDoneSlot {
 };
 
 /// Stack-resident state shared by the producer and background workers across
-/// both passes of a
-///        single `parallelScan` call.
+/// both passes of a single `parallelScan` call.
 ///
 /// Layout invariants:
 /// - `scanCancelled` lives on its own line so cancellation broadcast does not
@@ -78,7 +77,7 @@ struct alignas(kCacheLine) ScanDoneSlot {
 /// the design trade-off we want -- false-sharing avoidance over byte-tight
 /// packing.
 ///
-/// T Reduction value type the scan operates on.
+/// |T| is the reduction value type the scan operates on.
 template <class T>
 struct ScanState {
   /// Number of participants (= number of chunks) collaborating in the scan.
@@ -106,8 +105,7 @@ struct ScanState {
   alignas(kCacheLine) std::atomic<std::exception_ptr *> firstException{nullptr};
 
   /// Producer-side flag flipped after the sequential reduce computes every
-  /// chunk's exclusive
-  ///        prefix.
+  /// chunk's exclusive prefix.
   ///
   /// Workers acquire-spin on this between passes; the release-store from the
   /// producer publishes the `partials` array (re-purposed to hold exclusive
@@ -230,8 +228,8 @@ struct ScanState {
   /// detected cross-CCD presence; it is opt-in to avoid regressing balanced
   /// compute-bound bodies on single-CCD or homogeneous-CCD topologies.
   ///
-  /// slot Worker slot index in `[0, participants)`.
-  /// `(lo, hi)` pair denoting the slot's contiguous range over `[0, n)`.
+  /// |slot| is the worker slot index in `[0, participants)`. Returns the
+  /// `(lo, hi)` pair denoting that slot's contiguous range over `[0, n)`.
   [[nodiscard]] std::pair<std::size_t, std::size_t>
   slotRange(std::uint32_t slot) const noexcept {
     if (ccdOfSlot == nullptr) {

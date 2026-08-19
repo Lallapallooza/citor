@@ -12,7 +12,7 @@
 namespace citor::detail {
 
 /// Per-worker per-stage completion slot used by every barrier kind of
-///        `citor::ThreadPool::parallelChain`.
+/// `citor::ThreadPool::parallelChain`.
 ///
 /// Each slot lives on its own `citor::kCacheLine` -sized line so a worker's
 /// release-store on `done` for one stage cannot invalidate a neighbouring slot
@@ -47,8 +47,7 @@ struct alignas(kCacheLine) ChainDynamicStageCounter {
 };
 
 /// Stack-resident state shared by the producer and background workers across
-/// all stages of a
-///        single `parallelChain` call.
+/// all stages of a single `parallelChain` call.
 ///
 /// Layout invariants:
 /// - `chainCancelled` lives on its own line so cancellation broadcast does not
@@ -177,8 +176,8 @@ struct ChainState {
   /// stage's chunk `c` is the slice
   /// `[lo, hi)` produced for `slot = c`.
   ///
-  /// slot Worker slot index in `[0, participants)`.
-  /// `(lo, hi)` pair denoting the slot's contiguous range over `[0, n)`.
+  /// |slot| is the worker slot index in `[0, participants)`. Returns the
+  /// `(lo, hi)` pair denoting that slot's contiguous range over `[0, n)`.
   [[nodiscard]] std::pair<std::size_t, std::size_t>
   slotRange(std::uint32_t slot) const noexcept {
     const auto lo = static_cast<std::size_t>(mulDiv64(n, slot, participants));

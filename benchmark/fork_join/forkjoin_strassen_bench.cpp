@@ -45,7 +45,6 @@
 #include <string>
 #include <vector>
 
-#include "citor/always_assert.h"
 #include "citor/hints.h"
 #include "citor/thread_pool.h"
 

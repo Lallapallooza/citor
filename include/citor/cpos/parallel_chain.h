@@ -38,17 +38,10 @@ struct ParallelChainFn {
   /// parameter. The variadic stage pack flows through perfect forwarding so
   /// each stage's compile-time `BarrierKind` is preserved.
   ///
-  /// ChainHintsT Chain hint type whose `static constexpr` members drive
-  /// compile-time
-  ///                     policy.
-  /// Pool        Executor type.
-  /// Stages      Variadic pack of `Stage<F, BarrierKind>` value types.
-  /// pool   Executor instance.
-  /// n      Row-range upper bound; partitioned across slots as
-  ///                `[n*slot/P, n*(slot+1)/P)`.
-  /// stages Stage pack invoked in submission order with the declared barrier
-  /// between
-  ///                consecutive stages.
+  /// |n| is the row-range upper bound, partitioned across slots as
+  /// `[n*slot/P, n*(slot+1)/P)`. |stages| is a pack of `Stage<F, BarrierKind>`
+  /// values, invoked in submission order with the declared barrier between
+  /// consecutive stages.
   template <class ChainHintsT, class Pool, class... Stages>
   void operator()(Pool &pool, std::size_t n, Stages &&...stages) const {
     tag_invoke(*this, pool, n, ChainHintsT{}, CancellationToken{},
@@ -77,9 +70,9 @@ struct ParallelChainFn {
 /// participates as slot 0 across every stage.
 ///
 /// The chain primitive amortises the cost of fanning out a multi-stage
-/// multi-stage compute-fan-out pipeline: one descriptor publish drives the
-/// entire chain, with per-stage rendezvous handled in user-space spin-wait. Use
-/// when the inter-stage transition latency is on the same order as a single
+/// compute pipeline: one descriptor publish drives the entire chain, with
+/// per-stage rendezvous handled in user-space spin-wait. Use when the
+/// inter-stage transition latency is on the same order as a single
 /// `parallelFor` dispatch and the chain has at least two stages.
 inline constexpr detail::ParallelChainFn parallelChain{};
 

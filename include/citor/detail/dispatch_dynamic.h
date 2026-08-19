@@ -5,8 +5,8 @@
 // `typedWorkerEntry` and `runPartition` templates in `dispatch_static.h`. The
 // only per-balance difference is the `BlockClaim<B>::next` policy.
 //
-// This header keeps a few legacy aliases callers historically referenced; new
-// code should use the unified entries directly.
+// This header carries the dynamic-balance spelling of the typed slot-0 entry.
+// Everything else lives in `dispatch_static.h`.
 
 #include "citor/detail/dispatch_static.h"
 

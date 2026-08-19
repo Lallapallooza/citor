@@ -36,14 +36,10 @@ struct BulkForQueriesFn {
   /// site (mirroring the member-template surface) so the executor's overload
   /// can specialize on it via `if constexpr` or a regular template parameter.
   ///
-  /// HintsT  Hint type whose `static constexpr` members drive compile-time
-  /// policy. Pool    Executor type. QueryFn Callable invoked once per chunk as
-  ///                 `QueryFn(std::size_t qFirst, std::size_t qLast)`; the body
-  ///                 must process every query index in `[qFirst, qLast)`.
-  /// pool    Executor instance.
-  /// q       Total query count; the engine fans `[0, q)` across workers.
-  /// fn      Callable invoked over each chunk of the query range.
-  /// tok     Cancellation token observed at chunk boundaries.
+  /// |q| is the total query count. The engine fans `[0, q)` across workers.
+  /// The engine invokes |fn| once per chunk as `fn(qFirst, qLast)`, and the
+  /// body must process every query index in `[qFirst, qLast)`. Workers read
+  /// |tok| at chunk boundaries.
   template <class HintsT, class Pool, class QueryFn>
   void operator()(Pool &pool, std::size_t q, QueryFn &&fn,
                   CancellationToken tok = CancellationToken{}) const {

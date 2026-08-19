@@ -27,11 +27,8 @@ namespace detail {
 ///     side-effecting body) at the cost of leaving micro-architectural
 ///     headroom on the table.
 ///   * `inclusiveScan` takes the input and output buffers directly. The
-///     engine owns the inner loop and is free to use whatever memory
-///     traffic shape minimises wall time on the host: decoupled-lookback
-///     single-pass, `PREFETCHW` write-prefetch ahead of Pass 2, NT stores
-///     on workloads where the output is larger than L3, AVX-512 in-register
-///     scan, per-cluster lookback chains, etc.
+///     engine owns the inner loop, so it picks the traversal itself: a
+///     single-pass decoupled-lookback scan over cache-sized tiles.
 ///
 /// The tradeoff: `inclusiveScan` is restricted to plain memory-to-memory
 /// scans of trivially-relocatable types under a user-supplied associative
@@ -46,12 +43,11 @@ struct InclusiveScanFn {
   /// writing `out[i]` for every `i` so `in == out` is well-formed). The
   /// returned value is the inclusive total at the right edge --
   /// `prefix(prefix(... prefix(identity, in[0]) ...), in[n-1])` -- and
-  /// matches the value Blelloch's two-pass scan produces.
+  /// matches the value a two-pass reduce-then-scan produces.
   ///
-  /// The hint type carries compile-time policy (per-tile size cap,
-  /// affinity, priority); the engine consults `HintsT::stealPolicy` only
-  /// for any nested fork/join the implementation may use internally
-  /// (currently none).
+  /// The hint type carries compile-time policy (affinity, priority). The
+  /// engine derives its tile size from the host's L2 size rather than from
+  /// `HintsT::chunk`.
   template <class HintsT, class Pool, class T, class PrefixFn>
   [[nodiscard]] T
   operator()(Pool &pool, std::span<const T> in, std::span<T> out, T identity,

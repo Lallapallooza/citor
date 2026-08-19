@@ -17,8 +17,7 @@ namespace citor {
 /// the smallest false-sharing-safe stride is 128.
 ///
 /// Every contended atomic in the pool is aligned to this value via
-/// `alignas(kCacheLine)`. AArch64 ports may want a different value; that path
-/// is gated behind a future `#if defined(__x86_64__)` block.
+/// `alignas(kCacheLine)`.
 inline constexpr std::size_t kCacheLine = 128;
 
 /// Load-balancing strategy a primitive uses across its participants.
@@ -156,12 +155,11 @@ struct Hints {
 /// User hint presets inherit from this and override only the fields that
 /// differ:
 ///
-///
-/// struct MyKahanReduceHints : citor::HintsDefaults {
-///   static constexpr Determinism determinism = Determinism::KahanCompensated;
-///   static constexpr double minTaskUs = 25.0;
-/// };
-///
+///     struct MyKahanReduceHints : citor::HintsDefaults {
+///       static constexpr Determinism determinism =
+///           Determinism::KahanCompensated;
+///       static constexpr double minTaskUs = 25.0;
+///     };
 ///
 /// Fields mirror `Hints` one-for-one. The defaults are conservative:
 /// `DynamicChunked` balance, `FixedBlockOrder` reductions, `PerCluster`
@@ -172,10 +170,9 @@ struct Hints {
 struct HintsDefaults {
   // DynamicChunked is the default: workers race for blocks via a shared atomic
   // counter, so a slow or descheduled worker does not gate the join on its
-  // pre-assigned share. StaticUniform's deterministic block-id-to-rank
-  // mapping is required by the chunk-id pairwise-tree reduction in
-  // `parallelReduce`; reduce-side hint presets (`KahanReduceHints`,
-  // `FixedBlockReduceHints`) override `balance` to StaticUniform explicitly.
+  // pre-assigned share. `parallelReduce` ignores this field and always
+  // dispatches StaticUniform, because the chunk-id pairwise-tree combine needs
+  // the deterministic block-id-to-rank mapping.
   // Cold-dispatch latency is preserved: the dispatcher engages the same
   // `workerStateBase`-driven cold-collapse short-circuit under DynamicChunked
   // as under StaticUniform.
@@ -195,62 +192,60 @@ struct HintsDefaults {
 /// Use when the caller wants the deterministic rank-strided block assignment
 /// without inheriting the `DynamicChunked` default. Useful for callers whose
 /// body has zero cost variance (every block does identical work) and that
-/// benefit from cold-collapse's typed monomorphized fast path. Reduce-side
-/// presets that need deterministic chunk-id-to-rank mapping
-/// (`KahanReduceHints`, `FixedBlockReduceHints`) inherit through this preset
-/// rather than overriding the field individually.
+/// benefit from cold-collapse's typed monomorphized fast path. The reduce
+/// presets do not need it: `parallelReduce` forces StaticUniform regardless of
+/// the hint.
 struct StaticHints : HintsDefaults {
   static constexpr Balance balance = Balance::StaticUniform;
 };
 
 /// Explicit `Balance::DynamicChunked` preset on top of `HintsDefaults`.
 ///
-/// Sibling of `StaticHints`. Equivalent to `HintsDefaults` today (the default
-/// balance is already DynamicChunked) but provides a stable name for callers
-/// that want the straggler-tolerant atomic-counter scheduling regardless of how
-/// `HintsDefaults` may be retuned in the future.
+/// Sibling of `StaticHints`. Pins the straggler-tolerant atomic-counter
+/// scheduling by name, so a call site keeps it even if the `HintsDefaults`
+/// value changes.
 struct DynamicHints : HintsDefaults {
   static constexpr Balance balance = Balance::DynamicChunked;
 };
 
 /// Latency-biased preset: dynamic-chunked balance with `Priority::Latency`.
-/// Good first
-///        cut for short jobs that want fast first response over peak
-///        throughput.
+/// Good first cut for short jobs that want fast first response over peak
+/// throughput.
 struct LatencyHints : HintsDefaults {
   static constexpr Balance balance = Balance::DynamicChunked;
   static constexpr Priority priority = Priority::Latency;
 };
 
-/// Bulk preset: cancellation polls disabled and a 25us minimum task size, tuned
-/// for hot
-///        cost-uniform parallel-for loops where the body is known not to be
-///        cancelled mid-flight.
+/// Bulk preset: cancellation polls disabled. Tuned for hot cost-uniform
+/// parallel-for loops whose body is never cancelled mid-flight. Carries a
+/// `minTaskUs` floor that takes effect once the call site also supplies a
+/// non-zero `estimatedItemNs`.
 struct BulkHints : HintsDefaults {
   static constexpr double minTaskUs = 25.0;
   static constexpr bool cancellationChecks = false;
 };
 
 /// Reduction preset that selects Kahan-compensated determinism on top of the
-/// fixed-block
-///        tree. Inherits the rest of `HintsDefaults`.
+/// fixed-block tree. Inherits the rest of `HintsDefaults`, including the
+/// `minTaskUs` floor that stays inert until the call site supplies a non-zero
+/// `estimatedItemNs`.
 struct KahanReduceHints : HintsDefaults {
   static constexpr Determinism determinism = Determinism::KahanCompensated;
   static constexpr double minTaskUs = 25.0;
 };
 
 /// Reduction preset for plain fixed-block-order reductions without Kahan, for
-/// integer or
-///        order-insensitive partials. Inherits `HintsDefaults`.
+/// integer or order-insensitive partials. Inherits the rest of
+/// `HintsDefaults`. Its `minTaskUs` floor stays inert until the call site
+/// supplies a non-zero `estimatedItemNs`.
 struct FixedBlockReduceHints : HintsDefaults {
   static constexpr double minTaskUs = 25.0;
 };
 
-/// Fork-join preset with same-cluster victim biasing for cross-cluster
-/// locality. Inherits from `HintsDefaults` and only sets the
-/// steal-direction hint explicitly. forkJoin uses its own Chase-Lev
-/// deques; the `Balance` field is not consulted on the fork-join hot
-/// path.
+/// Fork-join preset that pins same-cluster victim biasing by name. It restates
+/// the `HintsDefaults` steal policy, so a call site keeps `ClusterLocal` even
+/// if that default changes. forkJoin uses its own Chase-Lev deques. The
+/// fork-join hot path does not read the `Balance` field.
 struct CcdLocalForkJoinHints : HintsDefaults {
   static constexpr StealPolicy stealPolicy = StealPolicy::ClusterLocal;
 };
@@ -263,9 +258,8 @@ namespace detail {
 /// Used only after a primitive observes that the supplied `CancellationToken`
 /// is the never-stopped sentinel. The public hint's scheduling, determinism,
 /// affinity, priority, cost model, and chunking semantics are preserved
-/// exactly; only the worker-side token poll is compiled out.
-///
-/// HintsT Source hint preset.
+/// exactly. The adapter compiles out only the worker-side token poll.
+/// |HintsT| is the source hint preset.
 template <class HintsT>
 struct NoCancellationHints {
   static constexpr Balance balance = HintsT::balance;
@@ -288,8 +282,8 @@ struct NoCancellationHints {
 /// post-stage synchronization. The variadic `parallelChain<ChainHintsT,
 /// Stages...>` accepts a parameter pack of these.
 ///
-/// F     Callable type invoked with the chunk descriptor for that stage.
-/// After Compile-time barrier inserted after this stage.
+/// |F| is the callable the chain invokes with the chunk descriptor for that
+/// stage. |After| is the compile-time barrier that follows it.
 template <class F, BarrierKind After>
 struct Stage {
   /// Callable invoked once per chunk during this stage of the chain.
@@ -305,9 +299,8 @@ struct Stage {
 /// BarrierKind::Global>` without the caller spelling out the callable type. The
 /// post-stage barrier is the only template argument the user must supply.
 ///
-/// After Barrier inserted after this stage.
-/// F     Deduced callable type.
-/// fn     The callable to wrap.
+/// |After| is the barrier that follows this stage. |fn| is the callable to
+/// wrap.
 template <BarrierKind After, class F>
 constexpr auto makeStage(F &&fn) noexcept(
     noexcept(Stage<std::decay_t<F>, After>{std::forward<F>(fn)})) {

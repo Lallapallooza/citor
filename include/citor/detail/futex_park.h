@@ -48,15 +48,14 @@ namespace citor::detail {
 /// returns. The 32-bit `futexWord` is a parking token only; correctness is
 /// anchored on the 64-bit `generation`.
 ///
-/// addr     Atomic word the kernel monitors for changes; must outlive the
-/// caller's wait. expected Expected value at the time of suspension; the kernel
-/// returns immediately with
-///                 `EAGAIN` if `*addr != expected` to avoid the classic
-///                 lost-wakeup race.
-/// timeout  Optional relative timeout; when `nullptr` the call blocks
-/// indefinitely. The raw `syscall` return value. Negative on error (errno set),
-/// zero on a successful wake,
-///         positive otherwise.
+/// |addr| is the atomic word the kernel monitors. It must outlive the caller's
+/// wait. |expected| is the value at the time of suspension: the kernel returns
+/// immediately with `EAGAIN` if `*addr != expected`, which is what closes the
+/// classic lost-wakeup race. |timeout| is an optional relative timeout. When
+/// it is `nullptr`, the call blocks indefinitely.
+///
+/// Returns the raw `syscall` result: negative on error with `errno` set, zero
+/// on a successful wake.
 inline long futexWaitPrivate(std::atomic<std::uint32_t> *addr,
                              std::uint32_t expected,
                              const struct timespec *timeout) noexcept {
@@ -71,9 +70,9 @@ inline long futexWaitPrivate(std::atomic<std::uint32_t> *addr,
 /// source-of-truth state the parked thread is about to re-check; `futexWord`
 /// itself remains relaxed.
 ///
-/// addr Atomic word the kernel uses to identify the wait queue.
-/// n    Maximum number of waiters to wake.
-/// The number of waiters actually woken, or a negative value on error.
+/// |addr| identifies the wait queue. |n| caps how many waiters to wake.
+/// Returns the number of waiters actually woken, or a negative value on
+/// error.
 inline long futexWakePrivate(std::atomic<std::uint32_t> *addr, int n) noexcept {
   return syscall(SYS_futex, reinterpret_cast<std::uint32_t *>(addr),
                  FUTEX_WAKE_PRIVATE, n, nullptr, nullptr, 0);
@@ -155,10 +154,11 @@ inline FutexFallbackState &futexFallbackState() noexcept {
 
 /// Generic fallback that mirrors the Linux `FUTEX_WAIT_PRIVATE` contract.
 ///
-/// addr     Atomic word checked against |expected| before parking.
-/// expected Expected value; the function returns immediately when the load
-/// disagrees. timeout  Ignored on the fallback; the wait is effectively
-/// unbounded. Always zero; callers re-check the source-of-truth atomic after
+/// The function checks |addr| against |expected| before parking. It returns
+/// immediately when the load disagrees. It ignores |timeout|. The fallback
+/// wait is unbounded.
+///
+/// Always returns zero. Callers re-check the source-of-truth atomic after
 /// wake.
 inline long futexWaitPrivate(std::atomic<std::uint32_t> *addr,
                              std::uint32_t expected,
@@ -175,9 +175,10 @@ inline long futexWaitPrivate(std::atomic<std::uint32_t> *addr,
 
 /// Generic fallback that mirrors the Linux `FUTEX_WAKE_PRIVATE` contract.
 ///
-/// addr Atomic word identifying the wait queue (unused on the fallback).
-/// n    Hint for how many waiters to wake; the fallback always broadcasts.
-/// Always zero; the fallback does not report exact wake counts.
+/// |addr| identifies the wait queue and |n| hints at how many waiters to wake.
+/// The fallback ignores both and always broadcasts.
+///
+/// Always returns zero. The fallback does not report exact wake counts.
 inline long futexWakePrivate(std::atomic<std::uint32_t> *addr, int n) noexcept {
   (void)addr;
   (void)n;

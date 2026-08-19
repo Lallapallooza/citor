@@ -176,13 +176,14 @@ nextTypedBlock(JobDescriptor &desc, std::size_t blockCount,
   }
 }
 
-/// Static-balance untyped runner: kept as a name alias for legacy callers.
+/// Static-balance untyped runner. The worker loop enters here for descriptors
+/// published without a monomorphized `workerEntry`.
 inline void runStaticPartition(JobDescriptor &desc,
                                std::uint32_t rank) noexcept {
   runPartition<Balance::StaticUniform>(desc, rank);
 }
 
-/// Dynamic-balance untyped runner: kept as a name alias for legacy callers.
+/// Dynamic-balance untyped runner. Sibling of `runStaticPartition`.
 inline void runDynamicCounter(JobDescriptor &desc,
                               std::uint32_t rank) noexcept {
   // Cold-collapse CAS-claim: producer's join-wait may race the worker for this
@@ -199,8 +200,7 @@ inline void runDynamicCounter(JobDescriptor &desc,
 }
 
 /// Typed slot-0 partition runner: same as `runPartition` but calls `fn(lo, hi)`
-/// directly
-///        instead of going through `desc.body`'s `FunctionRef` indirection.
+/// directly instead of going through `desc.body`'s `FunctionRef` indirection.
 ///
 /// Used by the producer's slot-0 path inside `dispatchOneStaticLockedBody` when
 /// the caller has the body's static type available (parallelFor /

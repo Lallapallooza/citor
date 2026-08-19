@@ -23,13 +23,11 @@ namespace citor::detail {
 /// interior node has fixed left/right operands, so the output is bit-identical
 /// regardless of which worker computed which leaf.
 ///
-/// T       Partial value type (e.g. `double`, `KahanPair`).
-/// Combine Binary combiner; called as `combine(left, right)` and must return a
-/// `T`. partials In-place workspace; mutated as the tree collapses upward.
-/// combine  Combiner function.
-/// The fully combined partial covering every chunk; matches `partials.front()`
-/// after the
-///         call. Returns a default-constructed `T` when |partials| is empty.
+/// |partials| is the in-place workspace. The tree mutates it as it collapses
+/// upward. |combine| is the binary combiner, called as `combine(left, right)`,
+/// and it returns a `T`. Returns the fully combined partial covering every
+/// chunk, which matches `partials.front()` after the call. Returns a
+/// default-constructed `T` when |partials| is empty.
 template <class T, class Combine>
 [[nodiscard]] T pairwiseTreeCombine(std::vector<T> &partials, Combine combine) {
   if (partials.empty()) {

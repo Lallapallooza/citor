@@ -39,7 +39,6 @@
 #include <string>
 #include <vector>
 
-#include "citor/always_assert.h"
 #include "citor/cancellation.h"
 
 #include "bench_format.h"

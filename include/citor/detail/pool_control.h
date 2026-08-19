@@ -9,28 +9,32 @@ namespace citor::detail {
 
 /// Process-internal control word shared between producer and workers.
 ///
-/// Four contended atomics (`generation`, `futexWord`, `activeJob`,
-/// `hotSpinDepth`) plus a const `participants` count form the source of truth
-/// for pool state. Each contended atomic is on its own `kCacheLine`-sized line
-/// so MESI traffic on one never invalidates another. The layout places
-/// `generation` (release publish), `futexWord` (parking token), `activeJob`
-/// (descriptor pointer), a low-latency spin-depth gate, and `participants` on
-/// dedicated 128-byte lines.
+/// These fields are the source of truth for pool state:
+///
+///   - `generation`, the release publish
+///   - `futexWord`, the parking token
+///   - `hotSpinDepth` and `hotSpinEpoch`, the low-latency scope gate
+///   - `participants`
+///
+/// Each sits on its own `kCacheLine`-sized line, so MESI traffic on one never
+/// invalidates another. `activeJob` is the deliberate exception. It shares
+/// `generation`'s line so a worker's first acquire-load picks up both.
 ///
 /// The 64-bit `generation` carries both flags and a monotonic phase counter.
-/// Bits 0 (shutdown) and 1 (cancel) are reserved; the producer increments by 4
-/// per published job so the high 62 bits act as the ABA-free phase counter. A
-/// 32-bit phase would be at risk of wrapping under sustained dispatch; 64 bits
-/// is overkill but free given the cache-line padding.
+/// The low `kPhaseShift` bits are flags. The producer increments by
+/// `kPhaseStep` per published job, so the remaining high bits act as the
+/// ABA-free phase counter. A 32-bit phase would risk wrapping under sustained
+/// dispatch. 64 bits is more than needed, but the cache-line padding makes it
+/// free.
 ///
 /// The `futexWord` is parking-only: workers re-check `generation` after every
 /// wait return, so spurious or duplicated wakes are correctness-neutral.
 /// Updates use `relaxed` atomics; the happens-before chain runs through
 /// `generation` (release) instead.
 ///
-/// `activeJob` is published with `release`; observed with `acquire`. The slot
-/// is `nullptr` until a primitive publishes a `JobDescriptor`; the engine
-/// itself never writes here.
+/// The producer publishes `activeJob` with `release`, and workers observe it
+/// with `acquire`. The slot is `nullptr` until a primitive publishes a
+/// `JobDescriptor`.
 struct PoolControl {
   /// Bit flag in `generation` indicating the pool has been told to shut down.
   ///
@@ -38,25 +42,17 @@ struct PoolControl {
   /// this exit the loop.
   static constexpr std::uint64_t kShutdownBit = 1ULL << 0;
 
-  /// Bit flag in `generation` reserved for global cancellation broadcasts.
-  ///
-  /// Reserved for pool-wide cancellation; the bit lives here so the
-  /// `generation` layout is stable once the cancellation path lands without
-  /// needing to shuffle the flag-bit assignments.
-  static constexpr std::uint64_t kCancelBit = 1ULL << 1;
-
   /// Bit set by a worker on its `mailbox` line to acknowledge dispatch
   /// completion.
   ///
   /// Same-line ack protocol: the producer publishes the new phase with this bit
   /// clear; the worker stamps `mailbox = phase | kDoneBit` after running its
   /// share. The producer's join reads the worker's mailbox (the same line it
-  /// published to) and waits for the DONE bit to appear. Removes the separate
-  /// `doneEpoch` cache-line transit on the hot path.
+  /// published to) and waits for the DONE bit to appear, so done state costs no
+  /// cache-line transit beyond the one the publish already paid for.
   ///
-  /// Lives in the bit-1 slot that was reserved for cancel broadcasts. The
-  /// cancel path is carried by `CancellationToken`, not by a generation/mailbox
-  /// flag, so the bit was free.
+  /// Cancellation rides on `CancellationToken`, which is why the flag bits
+  /// here are all dispatch-protocol state.
   static constexpr std::uint64_t kDoneBit = 1ULL << 1;
 
   /// Bit set by the producer on the worker's `mailbox` when this dispatch
@@ -96,12 +92,10 @@ struct PoolControl {
   /// Increment applied per published phase so flags survive the bump.
   static constexpr std::uint64_t kPhaseStep = 1ULL << kPhaseShift;
 
-  /// Mask of all flag bits below the phase counter.
-  static constexpr std::uint64_t kFlagMask = kPhaseStep - 1;
-
   /// Source-of-truth phase counter.
   ///
-  /// Bit 0 = shutdown, bit 1 = cancel-broadcast, bits 2..63 = monotonic phase.
+  /// Low `kPhaseShift` bits are the flags listed above. The remaining high
+  /// bits are the monotonic phase.
   /// Producer publishes a new phase via `release`; workers read with `acquire`.
   /// Together with `activeJob` this is the acquire/release pair that orders
   /// descriptor visibility. `activeJob` is co-located on the same cache line so
@@ -148,8 +142,7 @@ struct PoolControl {
   alignas(kCacheLine) std::uint32_t participants = 0;
 
   /// Pre-computed bitmask of background-worker slots `[1, participants)` for
-  /// the join's
-  ///        pending set; producer slot 0 already cleared.
+  /// the join's pending set. The mask already clears producer slot 0.
   ///
   /// Constant for the pool's lifetime (set once at construction). Co-located on
   /// the `participants` cache line so the producer's dispatch picks both fields

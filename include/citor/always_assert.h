@@ -8,9 +8,9 @@ namespace citor {
 /// Emits a diagnostic to `stderr` and terminates via `std::abort`.
 ///
 /// The format is fixed ("citor: always-assert failed: <cond> at
-/// <file>:<line>\n") so death tests can match the output with a stable regex.
-/// `std::abort` is chosen over `std::terminate` so GoogleTest's `EXPECT_DEATH`
-/// catches the signal without routing through the terminate handler.
+/// <file>:<line>\n") so a caller can match the output with a stable regex.
+/// The function calls `std::abort` rather than `std::terminate`, so a death
+/// test catches the signal without the terminate handler.
 [[noreturn]] inline void alwaysAssertFail(const char *cond, const char *file,
                                           int line) noexcept {
   std::fprintf(stderr, "citor: always-assert failed: %s at %s:%d\n", cond, file,

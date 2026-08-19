@@ -19,7 +19,7 @@ class ThreadPool;
 std::vector<std::byte> exportCoherenceProbe(const ThreadPool &pool);
 
 /// Seed the process-wide probe cache from a blob produced by
-/// @ref citor::exportCoherenceProbe. The next `ThreadPool` whose worker cpuset
+/// `citor::exportCoherenceProbe`. The next `ThreadPool` whose worker cpuset
 /// matches the blob's embedded key returns the seeded probe instead of running
 /// the live calibration; a cpuset that does not match is a harmless miss that
 /// re-probes. Returns false, with no effect and without throwing, on a magic

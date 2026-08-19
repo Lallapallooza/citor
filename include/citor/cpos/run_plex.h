@@ -35,16 +35,11 @@ struct RunPlexFn {
   /// site (mirroring the member-template surface) so the executor's overload
   /// can specialize on it via `if constexpr` or a regular template parameter.
   ///
-  /// HintsT  Hint type whose `static constexpr` members drive compile-time
-  /// policy. Pool    Executor type. Phase   Phase callable: `void(std::size_t
-  /// phaseIdx, std::uint32_t slot,
-  ///                                       std::size_t lo, std::size_t hi)`.
-  /// pool     Executor instance.
-  /// nPhases  Number of phases to run; `0` is a no-op.
-  /// n        Row-range upper bound; partitioned across slots as
-  ///                  `[n*slot/P, n*(slot+1)/P)`.
-  /// phaseFn  Callable invoked once per `(phase, slot)` pair.
-  /// tok      Cancellation token observed at phase boundaries.
+  /// |nPhases| is the number of phases to run, and `0` is a no-op. |n| is the
+  /// row-range upper bound, partitioned across slots as
+  /// `[n*slot/P, n*(slot+1)/P)`. The engine invokes |phaseFn| once per
+  /// `(phase, slot)` pair as `void(phaseIdx, slot, lo, hi)`. Workers read
+  /// |tok| at phase boundaries.
   template <class HintsT, class Pool, class Phase>
   void operator()(Pool &pool, std::size_t nPhases, std::size_t n,
                   Phase &&phaseFn,

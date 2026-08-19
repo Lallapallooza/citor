@@ -53,9 +53,9 @@ namespace citor {
 /// Emits a diagnostic to `stderr` and terminates via `std::abort`.
 ///
 /// The format is fixed ("citor: always-assert failed: <cond> at
-/// <file>:<line>\n") so death tests can match the output with a stable regex.
-/// `std::abort` is chosen over `std::terminate` so GoogleTest's `EXPECT_DEATH`
-/// catches the signal without routing through the terminate handler.
+/// <file>:<line>\n") so a caller can match the output with a stable regex.
+/// The function calls `std::abort` rather than `std::terminate`, so a death
+/// test catches the signal without the terminate handler.
 [[noreturn]] inline void alwaysAssertFail(const char *cond, const char *file,
                                           int line) noexcept {
   std::fprintf(stderr, "citor: always-assert failed: %s at %s:%d\n", cond, file,
@@ -170,9 +170,9 @@ public:
 
   /// Test whether `request_stop()` has been called on any copy of this token.
   ///
-  /// `true` if any holder has signalled cancellation; `false` for the
-  /// never-stopped
-  ///         sentinel and for any owned token whose flag is still clear.
+  /// Returns `true` if any holder has signalled cancellation, `false` for the
+  /// never-stopped sentinel and for any owned token whose flag is still
+  /// clear.
   [[nodiscard]] bool stop_requested() const noexcept {
     auto *state = m_state.get();
     if (state == nullptr) {
@@ -193,8 +193,8 @@ public:
 
   /// Equality on the underlying control-block pointer. Used by descriptor write
   /// elision: two tokens compare equal when they share the same control block
-  /// (or both are the no-state sentinel). Steady-state bench loops re-bind the
-  /// same default sentinel each call, so producers skip the redundant store.
+  /// (or both are the no-state sentinel). Back-to-back calls that re-bind the
+  /// same default sentinel let the producer skip the redundant store.
   bool operator==(const CancellationToken &other) const noexcept {
     return m_state.get() == other.m_state.get();
   }
@@ -208,10 +208,9 @@ public:
   /// data the caller wrote before invoking `request_stop` is visible to a
   /// worker that observes the stop flag.
   ///
-  /// `true` if this call transitioned the token from non-stopped to stopped;
-  /// `false` if
-  ///         the token was already stopped, or if this is the `neverStopped`
-  ///         sentinel.
+  /// Returns `true` if this call moved the token from non-stopped to stopped.
+  /// Returns `false` if the token was already stopped, and for the
+  /// default-constructed never-stopped sentinel.
   bool request_stop() noexcept {
     auto *state = m_state.get();
     if (state == nullptr) {
@@ -223,8 +222,7 @@ public:
   }
 
 private:
-  /// Shared atomic state; bit 0 is the stop flag. Higher bits reserved for
-  /// future use.
+  /// Shared atomic state. Bit 0 is the stop flag.
   std::shared_ptr<std::atomic<std::uint32_t>> m_state;
 };
 
@@ -232,9 +230,9 @@ private:
 ///
 /// `Deadline` stores an absolute `__rdtsc` reading at which the deadline
 /// expires. `expired()` compares the current TSC against the threshold. The
-/// reading is taken once at construction and never refreshed; the only call
-/// sites are inside hot worker bodies where a syscall-based `clock_gettime`
-/// would dominate the budget.
+/// constructor takes the reading once and never refreshes it. A hot body can
+/// poll the deadline without the `clock_gettime` round trip a wall-clock check
+/// would cost.
 ///
 /// A default-constructed deadline never expires (threshold is `UINT64_MAX`).
 /// `Deadline::expired` is `noexcept` and allocation-free.
@@ -249,12 +247,10 @@ public:
 
   /// Construct a deadline at an absolute TSC threshold.
   ///
-  /// The caller provides a precomputed `__rdtsc()` value; the deadline expires
-  /// when the live TSC reaches or passes the threshold. This is low-level:
-  /// callers can reuse a single
-  /// `__rdtsc` reading taken at job-publish time across many primitives.
-  ///
-  /// tscThreshold Absolute TSC cycle count at which the deadline expires.
+  /// The caller provides a precomputed `__rdtsc()` value in |tscThreshold|.
+  /// The deadline expires when the live TSC reaches or passes it. This is the
+  /// low-level entry: callers can reuse a single `__rdtsc` reading taken at
+  /// job-publish time across many primitives.
   constexpr explicit Deadline(std::uint64_t tscThreshold) noexcept
       : m_tscThreshold(tscThreshold) {}
 
@@ -266,7 +262,7 @@ public:
   /// `__rdtsc()` plus a multiplication. On non-x86 hosts the calibration
   /// returns 0 and this factory returns the never-expires sentinel.
   ///
-  /// ms Wall-clock milliseconds from now until the deadline expires.
+  /// |ms| is the wall-clock milliseconds from now until the deadline expires.
   [[nodiscard]] static Deadline fromMillis(std::uint64_t ms) noexcept {
 #if defined(__x86_64__) || defined(_M_X64)
     const double cyclesPerNs = detail::tscCyclesPerNs();
@@ -285,7 +281,7 @@ public:
   /// Construct a deadline at `now + us`. See `fromMillis` for calibration
   /// details.
   ///
-  /// us Wall-clock microseconds from now until the deadline expires.
+  /// |us| is the wall-clock microseconds from now until the deadline expires.
   [[nodiscard]] static Deadline fromMicros(std::uint64_t us) noexcept {
 #if defined(__x86_64__) || defined(_M_X64)
     const double cyclesPerNs = detail::tscCyclesPerNs();
@@ -303,9 +299,8 @@ public:
 
   /// Check whether the live TSC has reached the deadline's threshold.
   ///
-  /// `true` if the deadline is in the past; `false` otherwise. Returns `false`
-  /// for the
-  ///         default-constructed never-expires sentinel.
+  /// Returns `true` if the deadline is in the past, `false` otherwise and for
+  /// the default-constructed never-expires sentinel.
   [[nodiscard]] bool expired() const noexcept {
 #if defined(__x86_64__) || defined(_M_X64)
     return __rdtsc() >= m_tscThreshold;
@@ -314,8 +309,7 @@ public:
 #endif
   }
 
-  /// Access the absolute TSC threshold this deadline was constructed with.
-  /// The threshold value passed to the constructor.
+  /// Returns the absolute TSC threshold the caller passed to the constructor.
   [[nodiscard]] constexpr std::uint64_t threshold() const noexcept {
     return m_tscThreshold;
   }
@@ -335,8 +329,7 @@ private:
 /// allocation in the constructor.
 class cancelled_exception : public std::exception {
 public:
-  /// Return the diagnostic string identifying the exception kind.
-  /// A non-null, statically-stored C-string.
+  /// Returns a non-null, statically-stored diagnostic string.
   [[nodiscard]] const char *what() const noexcept override {
     return "citor: cancelled";
   }
@@ -345,25 +338,22 @@ public:
 /// Thrown from a value-producing primitive whose join was cancelled mid-flight.
 ///
 /// Carries a `partial_value` field that holds the deterministic combine of all
-/// completed chunks up to the cancellation. For `Determinism::FixedBlockOrder`,
-/// the partial result is well-defined (combine of completed chunks `[0,
-/// completed)` in chunk-id order). For `OrderTolerant`, the partial value is
-/// order-tolerant and reflects whatever workers happened to commit.
+/// completed chunks up to the cancellation. Under
+/// `Determinism::FixedBlockOrder` the partial result is well-defined: the
+/// combine of completed chunks `[0, completed)` in chunk-id order.
 ///
-/// T The value type the cancelled primitive was producing.
+/// |T| is the value type the cancelled primitive was producing.
 template <class T>
 class cancelled_value_exception : public std::exception {
 public:
-  /// Construct with a deterministic-combine partial result.
-  ///
-  /// partial The combine-of-completed-chunks partial value at the moment of
+  /// Construct with a deterministic-combine partial result. |partial| is the
+  /// combine of the chunks that completed before the call observed
   /// cancellation.
   explicit cancelled_value_exception(T partial) noexcept(
       std::is_nothrow_move_constructible_v<T>)
       : partial_value(std::move(partial)) {}
 
-  /// Return the diagnostic string identifying the exception kind.
-  /// A non-null, statically-stored C-string.
+  /// Returns a non-null, statically-stored diagnostic string.
   [[nodiscard]] const char *what() const noexcept override {
     return "citor: cancelled with partial value";
   }
@@ -391,8 +381,7 @@ namespace citor {
 /// the smallest false-sharing-safe stride is 128.
 ///
 /// Every contended atomic in the pool is aligned to this value via
-/// `alignas(kCacheLine)`. AArch64 ports may want a different value; that path
-/// is gated behind a future `#if defined(__x86_64__)` block.
+/// `alignas(kCacheLine)`.
 inline constexpr std::size_t kCacheLine = 128;
 
 /// Load-balancing strategy a primitive uses across its participants.
@@ -530,12 +519,11 @@ struct Hints {
 /// User hint presets inherit from this and override only the fields that
 /// differ:
 ///
-///
-/// struct MyKahanReduceHints : citor::HintsDefaults {
-///   static constexpr Determinism determinism = Determinism::KahanCompensated;
-///   static constexpr double minTaskUs = 25.0;
-/// };
-///
+///     struct MyKahanReduceHints : citor::HintsDefaults {
+///       static constexpr Determinism determinism =
+///           Determinism::KahanCompensated;
+///       static constexpr double minTaskUs = 25.0;
+///     };
 ///
 /// Fields mirror `Hints` one-for-one. The defaults are conservative:
 /// `DynamicChunked` balance, `FixedBlockOrder` reductions, `PerCluster`
@@ -546,10 +534,9 @@ struct Hints {
 struct HintsDefaults {
   // DynamicChunked is the default: workers race for blocks via a shared atomic
   // counter, so a slow or descheduled worker does not gate the join on its
-  // pre-assigned share. StaticUniform's deterministic block-id-to-rank
-  // mapping is required by the chunk-id pairwise-tree reduction in
-  // `parallelReduce`; reduce-side hint presets (`KahanReduceHints`,
-  // `FixedBlockReduceHints`) override `balance` to StaticUniform explicitly.
+  // pre-assigned share. `parallelReduce` ignores this field and always
+  // dispatches StaticUniform, because the chunk-id pairwise-tree combine needs
+  // the deterministic block-id-to-rank mapping.
   // Cold-dispatch latency is preserved: the dispatcher engages the same
   // `workerStateBase`-driven cold-collapse short-circuit under DynamicChunked
   // as under StaticUniform.
@@ -569,62 +556,60 @@ struct HintsDefaults {
 /// Use when the caller wants the deterministic rank-strided block assignment
 /// without inheriting the `DynamicChunked` default. Useful for callers whose
 /// body has zero cost variance (every block does identical work) and that
-/// benefit from cold-collapse's typed monomorphized fast path. Reduce-side
-/// presets that need deterministic chunk-id-to-rank mapping
-/// (`KahanReduceHints`, `FixedBlockReduceHints`) inherit through this preset
-/// rather than overriding the field individually.
+/// benefit from cold-collapse's typed monomorphized fast path. The reduce
+/// presets do not need it: `parallelReduce` forces StaticUniform regardless of
+/// the hint.
 struct StaticHints : HintsDefaults {
   static constexpr Balance balance = Balance::StaticUniform;
 };
 
 /// Explicit `Balance::DynamicChunked` preset on top of `HintsDefaults`.
 ///
-/// Sibling of `StaticHints`. Equivalent to `HintsDefaults` today (the default
-/// balance is already DynamicChunked) but provides a stable name for callers
-/// that want the straggler-tolerant atomic-counter scheduling regardless of how
-/// `HintsDefaults` may be retuned in the future.
+/// Sibling of `StaticHints`. Pins the straggler-tolerant atomic-counter
+/// scheduling by name, so a call site keeps it even if the `HintsDefaults`
+/// value changes.
 struct DynamicHints : HintsDefaults {
   static constexpr Balance balance = Balance::DynamicChunked;
 };
 
 /// Latency-biased preset: dynamic-chunked balance with `Priority::Latency`.
-/// Good first
-///        cut for short jobs that want fast first response over peak
-///        throughput.
+/// Good first cut for short jobs that want fast first response over peak
+/// throughput.
 struct LatencyHints : HintsDefaults {
   static constexpr Balance balance = Balance::DynamicChunked;
   static constexpr Priority priority = Priority::Latency;
 };
 
-/// Bulk preset: cancellation polls disabled and a 25us minimum task size, tuned
-/// for hot
-///        cost-uniform parallel-for loops where the body is known not to be
-///        cancelled mid-flight.
+/// Bulk preset: cancellation polls disabled. Tuned for hot cost-uniform
+/// parallel-for loops whose body is never cancelled mid-flight. Carries a
+/// `minTaskUs` floor that takes effect once the call site also supplies a
+/// non-zero `estimatedItemNs`.
 struct BulkHints : HintsDefaults {
   static constexpr double minTaskUs = 25.0;
   static constexpr bool cancellationChecks = false;
 };
 
 /// Reduction preset that selects Kahan-compensated determinism on top of the
-/// fixed-block
-///        tree. Inherits the rest of `HintsDefaults`.
+/// fixed-block tree. Inherits the rest of `HintsDefaults`, including the
+/// `minTaskUs` floor that stays inert until the call site supplies a non-zero
+/// `estimatedItemNs`.
 struct KahanReduceHints : HintsDefaults {
   static constexpr Determinism determinism = Determinism::KahanCompensated;
   static constexpr double minTaskUs = 25.0;
 };
 
 /// Reduction preset for plain fixed-block-order reductions without Kahan, for
-/// integer or
-///        order-insensitive partials. Inherits `HintsDefaults`.
+/// integer or order-insensitive partials. Inherits the rest of
+/// `HintsDefaults`. Its `minTaskUs` floor stays inert until the call site
+/// supplies a non-zero `estimatedItemNs`.
 struct FixedBlockReduceHints : HintsDefaults {
   static constexpr double minTaskUs = 25.0;
 };
 
-/// Fork-join preset with same-cluster victim biasing for cross-cluster
-/// locality. Inherits from `HintsDefaults` and only sets the
-/// steal-direction hint explicitly. forkJoin uses its own Chase-Lev
-/// deques; the `Balance` field is not consulted on the fork-join hot
-/// path.
+/// Fork-join preset that pins same-cluster victim biasing by name. It restates
+/// the `HintsDefaults` steal policy, so a call site keeps `ClusterLocal` even
+/// if that default changes. forkJoin uses its own Chase-Lev deques. The
+/// fork-join hot path does not read the `Balance` field.
 struct CcdLocalForkJoinHints : HintsDefaults {
   static constexpr StealPolicy stealPolicy = StealPolicy::ClusterLocal;
 };
@@ -637,9 +622,8 @@ namespace detail {
 /// Used only after a primitive observes that the supplied `CancellationToken`
 /// is the never-stopped sentinel. The public hint's scheduling, determinism,
 /// affinity, priority, cost model, and chunking semantics are preserved
-/// exactly; only the worker-side token poll is compiled out.
-///
-/// HintsT Source hint preset.
+/// exactly. The adapter compiles out only the worker-side token poll.
+/// |HintsT| is the source hint preset.
 template <class HintsT>
 struct NoCancellationHints {
   static constexpr Balance balance = HintsT::balance;
@@ -662,8 +646,8 @@ struct NoCancellationHints {
 /// post-stage synchronization. The variadic `parallelChain<ChainHintsT,
 /// Stages...>` accepts a parameter pack of these.
 ///
-/// F     Callable type invoked with the chunk descriptor for that stage.
-/// After Compile-time barrier inserted after this stage.
+/// |F| is the callable the chain invokes with the chunk descriptor for that
+/// stage. |After| is the compile-time barrier that follows it.
 template <class F, BarrierKind After>
 struct Stage {
   /// Callable invoked once per chunk during this stage of the chain.
@@ -679,9 +663,8 @@ struct Stage {
 /// BarrierKind::Global>` without the caller spelling out the callable type. The
 /// post-stage barrier is the only template argument the user must supply.
 ///
-/// After Barrier inserted after this stage.
-/// F     Deduced callable type.
-/// fn     The callable to wrap.
+/// |After| is the barrier that follows this stage. |fn| is the callable to
+/// wrap.
 template <BarrierKind After, class F>
 constexpr auto makeStage(F &&fn) noexcept(
     noexcept(Stage<std::decay_t<F>, After>{std::forward<F>(fn)})) {
@@ -751,12 +734,10 @@ namespace citor {
 /// local stage epoch and runs the next body. Use for stages whose downstream
 /// consumer reads strictly per-worker state (no cross-worker reads).
 ///
-/// F Deduced callable type.
-/// name Diagnostic identifier surfaced through trace tooling; kept on the stage
-/// value for
-///              future plumbing (the pool does not currently consume it).
-/// fn   Stage body invoked as `fn(stageIdx, slot, lo, hi)`.
-/// A `Stage<decay_t<F>, BarrierKind::None>` carrying the callable.
+/// |name| labels the stage at the call site. The factory does not store it on
+/// the returned value. |fn| is the stage body, invoked as
+/// `fn(stageIdx, slot, lo, hi)`. Returns a
+/// `Stage<decay_t<F>, BarrierKind::None>` carrying the callable.
 template <class F>
 [[nodiscard]] constexpr auto
 staticStage([[maybe_unused]] const char *name,
@@ -771,10 +752,10 @@ staticStage([[maybe_unused]] const char *name,
 /// worker may begin the next stage. Use when the next stage reads state that
 /// any upstream worker may have written.
 ///
-/// F Deduced callable type.
-/// name Diagnostic identifier surfaced through trace tooling.
-/// fn   Stage body invoked as `fn(stageIdx, slot, lo, hi)`.
-/// A `Stage<decay_t<F>, BarrierKind::Global>` carrying the callable.
+/// |name| labels the stage at the call site. The factory does not store it on
+/// the returned value. |fn| is the stage body, invoked as
+/// `fn(stageIdx, slot, lo, hi)`. Returns a
+/// `Stage<decay_t<F>, BarrierKind::Global>` carrying the callable.
 template <class F>
 [[nodiscard]] constexpr auto
 globalStage([[maybe_unused]] const char *name, F &&fn) noexcept(
@@ -784,18 +765,17 @@ globalStage([[maybe_unused]] const char *name, F &&fn) noexcept(
 }
 
 /// Construct a `Stage` with the `BarrierKind::DeterministicReduce` post-stage
-///        barrier.
+/// barrier.
 ///
-/// Behaves as a global rendezvous in v1; the deterministic chunk-id pairwise
-/// tree reduction is the user's own concern inside the stage body (callers run
-/// a `parallelReduce` with the same fixed-block shape from inside the stage).
-/// The chain primitive guarantees the global sync; the reduction is the call
-/// site's responsibility.
+/// Behaves as a global rendezvous. The chain primitive guarantees the sync.
+/// The deterministic chunk-id pairwise tree reduction is the call site's job:
+/// callers run a `parallelReduce` with the same fixed-block shape inside the
+/// stage body.
 ///
-/// F Deduced callable type.
-/// name Diagnostic identifier surfaced through trace tooling.
-/// fn   Stage body invoked as `fn(stageIdx, slot, lo, hi)`.
-/// A `Stage<decay_t<F>, BarrierKind::DeterministicReduce>` carrying the
+/// |name| labels the stage at the call site. The factory does not store it on
+/// the returned value. |fn| is the stage body, invoked as
+/// `fn(stageIdx, slot, lo, hi)`. Returns a
+/// `Stage<decay_t<F>, BarrierKind::DeterministicReduce>` carrying the
 /// callable.
 template <class F>
 [[nodiscard]] constexpr auto
@@ -815,10 +795,10 @@ reduceStage([[maybe_unused]] const char *name, F &&fn) noexcept(
 /// (centroid update divide, summary stats publish) that should not be
 /// replicated across slots.
 ///
-/// F Deduced callable type.
-/// name Diagnostic identifier surfaced through trace tooling.
-/// fn   Stage body invoked as `fn(stageIdx, slot, lo, hi)`.
-/// A `Stage<decay_t<F>, BarrierKind::ProducerSerial>` carrying the callable.
+/// |name| labels the stage at the call site. The factory does not store it on
+/// the returned value. |fn| is the stage body, invoked as
+/// `fn(stageIdx, slot, lo, hi)`. Returns a
+/// `Stage<decay_t<F>, BarrierKind::ProducerSerial>` carrying the callable.
 template <class F>
 [[nodiscard]] constexpr auto
 serialStage([[maybe_unused]] const char *name, F &&fn) noexcept(noexcept(
@@ -832,11 +812,12 @@ serialStage([[maybe_unused]] const char *name, F &&fn) noexcept(noexcept(
 
 // ===== citor/detail/cpu_relax.h =====
 
-// Spin-loop CPU hint used by every busy-wait in the engine.
+// Spin-loop CPU hint used by every busy-wait in the engine, plus the small
+// bit and 128-bit arithmetic helpers the spin paths need.
 //
-// Factored out of `worker_loop.h` so headers that only need the hint
-// (`lookback_scan.h`, `coherence_probe.h`, ...) avoid pulling in the
-// full worker dispatch state.
+// Kept separate from `worker_loop.h` so headers that only need the hint
+// (`lookback_scan.h`, `coherence_probe.h`) do not pull in the full worker
+// dispatch state.
 
 
 #if defined(__x86_64__) || defined(_M_X64)
@@ -851,9 +832,9 @@ namespace citor::detail {
 
 /// Insert a single PAUSE / YIELD hint to back off without de-scheduling.
 ///
-/// `_mm_pause` on x86-64 is the spin-loop hint of choice (P0514R4); it
-/// lets the CPU drop hyper-thread issue slots without yielding the
-/// scheduler quantum. Non-x86 builds fall through to a compiler barrier.
+/// `_mm_pause` on x86-64 lets the CPU drop hyper-thread issue slots without
+/// yielding the scheduler quantum. Non-x86 builds fall through to a compiler
+/// barrier.
 inline void cpuRelax() noexcept {
 #if defined(__x86_64__) || defined(_M_X64)
   _mm_pause();
@@ -1842,7 +1823,7 @@ class ThreadPool;
 std::vector<std::byte> exportCoherenceProbe(const ThreadPool &pool);
 
 /// Seed the process-wide probe cache from a blob produced by
-/// @ref citor::exportCoherenceProbe. The next `ThreadPool` whose worker cpuset
+/// `citor::exportCoherenceProbe`. The next `ThreadPool` whose worker cpuset
 /// matches the blob's embedded key returns the seeded probe instead of running
 /// the live calibration; a cpuset that does not match is a harmless miss that
 /// re-probes. Returns false, with no effect and without throwing, on a magic
@@ -1893,14 +1874,10 @@ struct BulkForQueriesFn {
   /// site (mirroring the member-template surface) so the executor's overload
   /// can specialize on it via `if constexpr` or a regular template parameter.
   ///
-  /// HintsT  Hint type whose `static constexpr` members drive compile-time
-  /// policy. Pool    Executor type. QueryFn Callable invoked once per chunk as
-  ///                 `QueryFn(std::size_t qFirst, std::size_t qLast)`; the body
-  ///                 must process every query index in `[qFirst, qLast)`.
-  /// pool    Executor instance.
-  /// q       Total query count; the engine fans `[0, q)` across workers.
-  /// fn      Callable invoked over each chunk of the query range.
-  /// tok     Cancellation token observed at chunk boundaries.
+  /// |q| is the total query count. The engine fans `[0, q)` across workers.
+  /// The engine invokes |fn| once per chunk as `fn(qFirst, qLast)`, and the
+  /// body must process every query index in `[qFirst, qLast)`. Workers read
+  /// |tok| at chunk boundaries.
   template <class HintsT, class Pool, class QueryFn>
   void operator()(Pool &pool, std::size_t q, QueryFn &&fn,
                   CancellationToken tok = CancellationToken{}) const {
@@ -1957,10 +1934,9 @@ namespace detail {
 /// ultimately route through the same engine; the CPO has zero runtime hint
 /// dispatch cost.
 ///
-/// Recursive tasks call back into the customization point from worker context;
-/// each task receives a `ForkJoinScope` reference (defined by the executor) it
-/// uses to spawn children. The scope abstraction keeps the CPO surface
-/// decoupled from the engine's task-descriptor encoding.
+/// A task spawns children by calling the customization point again from
+/// worker context. The nested call joins on its own task pack before it
+/// returns, so recursion ends at the innermost frame.
 struct ForkJoinFn {
   /// Forward to the executor's `tag_invoke` overload, supplying a default
   /// `HintsT{}` value.
@@ -1969,13 +1945,8 @@ struct ForkJoinFn {
   /// site (mirroring the member-template surface) so the executor's overload
   /// can specialize on it via `if constexpr` or a regular template parameter.
   ///
-  /// HintsT  Hint type whose `static constexpr` members drive compile-time
-  /// policy. Pool    Executor type. TaskFns Variadic pack of task callables,
-  /// each invocable as `void(void)` or
-  ///                 `void(ForkJoinScope&)` per the executor's contract.
-  /// pool    Executor instance.
-  /// tok     Cancellation token observed at task-boundary chunks.
-  /// fns     Variadic pack of root tasks.
+  /// |fns| is the pack of root tasks, each invocable as `void()`. Workers read
+  /// |tok| on entry to each task.
   template <class HintsT, class Pool, class... TaskFns>
   void operator()(Pool &pool, CancellationToken tok, TaskFns &&...fns) const {
     tag_invoke(*this, pool, std::move(tok), HintsT{},
@@ -2039,11 +2010,8 @@ namespace detail {
 ///     side-effecting body) at the cost of leaving micro-architectural
 ///     headroom on the table.
 ///   * `inclusiveScan` takes the input and output buffers directly. The
-///     engine owns the inner loop and is free to use whatever memory
-///     traffic shape minimises wall time on the host: decoupled-lookback
-///     single-pass, `PREFETCHW` write-prefetch ahead of Pass 2, NT stores
-///     on workloads where the output is larger than L3, AVX-512 in-register
-///     scan, per-cluster lookback chains, etc.
+///     engine owns the inner loop, so it picks the traversal itself: a
+///     single-pass decoupled-lookback scan over cache-sized tiles.
 ///
 /// The tradeoff: `inclusiveScan` is restricted to plain memory-to-memory
 /// scans of trivially-relocatable types under a user-supplied associative
@@ -2058,12 +2026,11 @@ struct InclusiveScanFn {
   /// writing `out[i]` for every `i` so `in == out` is well-formed). The
   /// returned value is the inclusive total at the right edge --
   /// `prefix(prefix(... prefix(identity, in[0]) ...), in[n-1])` -- and
-  /// matches the value Blelloch's two-pass scan produces.
+  /// matches the value a two-pass reduce-then-scan produces.
   ///
-  /// The hint type carries compile-time policy (per-tile size cap,
-  /// affinity, priority); the engine consults `HintsT::stealPolicy` only
-  /// for any nested fork/join the implementation may use internally
-  /// (currently none).
+  /// The hint type carries compile-time policy (affinity, priority). The
+  /// engine derives its tile size from the host's L2 size rather than from
+  /// `HintsT::chunk`.
   template <class HintsT, class Pool, class T, class PrefixFn>
   [[nodiscard]] T
   operator()(Pool &pool, std::span<const T> in, std::span<T> out, T identity,
@@ -2119,17 +2086,10 @@ struct ParallelChainFn {
   /// parameter. The variadic stage pack flows through perfect forwarding so
   /// each stage's compile-time `BarrierKind` is preserved.
   ///
-  /// ChainHintsT Chain hint type whose `static constexpr` members drive
-  /// compile-time
-  ///                     policy.
-  /// Pool        Executor type.
-  /// Stages      Variadic pack of `Stage<F, BarrierKind>` value types.
-  /// pool   Executor instance.
-  /// n      Row-range upper bound; partitioned across slots as
-  ///                `[n*slot/P, n*(slot+1)/P)`.
-  /// stages Stage pack invoked in submission order with the declared barrier
-  /// between
-  ///                consecutive stages.
+  /// |n| is the row-range upper bound, partitioned across slots as
+  /// `[n*slot/P, n*(slot+1)/P)`. |stages| is a pack of `Stage<F, BarrierKind>`
+  /// values, invoked in submission order with the declared barrier between
+  /// consecutive stages.
   template <class ChainHintsT, class Pool, class... Stages>
   void operator()(Pool &pool, std::size_t n, Stages &&...stages) const {
     tag_invoke(*this, pool, n, ChainHintsT{}, CancellationToken{},
@@ -2158,9 +2118,9 @@ struct ParallelChainFn {
 /// participates as slot 0 across every stage.
 ///
 /// The chain primitive amortises the cost of fanning out a multi-stage
-/// multi-stage compute-fan-out pipeline: one descriptor publish drives the
-/// entire chain, with per-stage rendezvous handled in user-space spin-wait. Use
-/// when the inter-stage transition latency is on the same order as a single
+/// compute pipeline: one descriptor publish drives the entire chain, with
+/// per-stage rendezvous handled in user-space spin-wait. Use when the
+/// inter-stage transition latency is on the same order as a single
 /// `parallelFor` dispatch and the chain has at least two stages.
 inline constexpr detail::ParallelChainFn parallelChain{};
 
@@ -2200,12 +2160,9 @@ struct ParallelForFn {
   /// site (mirroring the member-template surface) so the executor's overload
   /// can specialize on it via `if constexpr` or a regular template parameter.
   ///
-  /// HintsT Hint type whose `static constexpr` members drive compile-time
-  /// policy. Pool   Executor type. F      Callable type invoked once per block
-  /// as `F(std::size_t lo, std::size_t hi)`. pool   Executor instance. first
-  /// Inclusive lower bound of the iteration range. last   Exclusive upper bound
-  /// of the iteration range. fn     Callable invoked over each block. tok
-  /// Cancellation token observed at chunk boundaries.
+  /// |HintsT| carries the compile-time policy. The engine invokes |fn| once
+  /// per block as `fn(lo, hi)` over the half-open range `[first, last)`.
+  /// Workers read |tok| at chunk boundaries.
   template <class HintsT, class Pool, class F>
   void operator()(Pool &pool, std::size_t first, std::size_t last, F &&fn,
                   CancellationToken tok = CancellationToken{}) const {
@@ -2265,17 +2222,11 @@ struct ParallelReduceFn {
   /// `Determinism::KahanCompensated` reduction shapes from the static-constexpr
   /// members of |HintsT|.
   ///
-  /// HintsT  Hint type whose `static constexpr` members drive compile-time
-  /// policy. Pool    Executor type. T       Reduction value type. Map Per-block
-  /// map callable: `T(std::size_t lo, std::size_t hi)`. Combine Binary combine
-  /// callable: `T(T, T)`. pool    Executor instance. first   Inclusive lower
-  /// bound of the iteration range. last    Exclusive upper bound of the
-  /// iteration range. init    Identity value used when the range is empty AND
-  /// seed for combiner. map     Callable that produces a partial value over a
-  /// chunk range. combine Binary combiner over partial values. tok Cancellation
-  /// token observed at chunk boundaries. The reduction result, identical across
-  /// worker counts when the hint requests a
-  ///         deterministic combine tree.
+  /// |map| produces a partial over a chunk as `T(lo, hi)`. |combine| folds two
+  /// partials as `T(T, T)`. |init| is both the empty-range result and the seed
+  /// for the combiner. Workers read |tok| at chunk boundaries. The result is
+  /// identical across worker counts when the hint requests a deterministic
+  /// combine tree.
   template <class HintsT, class Pool, class T, class Map, class Combine>
   [[nodiscard]] T
   operator()(Pool &pool, std::size_t first, std::size_t last, T init, Map &&map,
@@ -2341,20 +2292,13 @@ struct ParallelScanFn {
   /// two-pass scan produces at the right edge, and gives callers a single value
   /// to consume without a follow-up reduction.
   ///
-  /// HintsT   Hint type whose `static constexpr` members drive compile-time
-  /// policy. Pool     Executor type. T        Reduction value type. BodyFn
-  /// Per-chunk body callable: `T(std::size_t chunkId, std::size_t lo,
-  ///                  std::size_t hi, T initial, T* out)`.
-  /// PrefixFn Binary cross-chunk reduction operator: `T(T a, T b)`.
-  /// pool     Executor instance.
-  /// n        Range length; partitioned across slots as `[n*slot/P,
-  /// n*(slot+1)/P)`. identity Identity value seeded into the first chunk's
-  /// `initial` and returned for `n==0`. body     Per-chunk body callable
-  /// invoked twice per slot (Pass 1 with `initial=identity`, Pass 2 with
-  /// `initial=exclusivePrefix[slot]`). prefix   Binary combiner producing the
-  /// cross-chunk exclusive-prefix sequence. tok      Cancellation token
-  /// observed at pass boundaries. The inclusive prefix accumulator at the right
-  /// edge of the scan.
+  /// |n| is the range length, partitioned across slots as
+  /// `[n*slot/P, n*(slot+1)/P)`. |identity| seeds the first chunk's `initial`
+  /// and is the result for `n == 0`. The engine invokes |body| as
+  /// `T(chunkId, lo, hi, initial, out)`, twice per slot: Pass 1 with
+  /// `initial = identity`, Pass 2 with `initial = exclusivePrefix[slot]`.
+  /// |prefix| is the binary combiner that produces the cross-chunk
+  /// exclusive-prefix sequence. Workers read |tok| at pass boundaries.
   template <class HintsT, class Pool, class T, class BodyFn, class PrefixFn>
   [[nodiscard]] T
   operator()(Pool &pool, std::size_t n, T identity, BodyFn &&body,
@@ -2368,7 +2312,7 @@ struct ParallelScanFn {
 
 } // namespace detail
 
-/// Customization-point object for the Blelloch two-pass parallel prefix scan.
+/// Customization-point object for the two-pass parallel prefix scan.
 ///
 /// Calling `parallelScan<HintsT>(pool, n, identity, body, prefix)` dispatches
 /// through unqualified `tag_invoke`; the executor's overload runs the scan
@@ -2377,11 +2321,14 @@ struct ParallelScanFn {
 /// inline-fallback parameters) so every overload can specialize without runtime
 /// branching.
 ///
-/// The two-pass shape avoids the `n^2/p` sequential bottleneck of a naive
-/// split-recombine: Pass 1 computes per-chunk partial sums in parallel, the
-/// producer computes the chunk-level exclusive prefixes serially in
-/// `O(participants)`, and Pass 2 re-runs the body with each chunk's exclusive
-/// prefix as `initial` to write the final scan output.
+/// The reduce-then-scan shape avoids the `n^2/p` sequential bottleneck of a
+/// naive split-recombine:
+///
+///   1. Pass 1 computes per-chunk partial sums in parallel.
+///   2. The producer computes the chunk-level exclusive prefixes serially in
+///      `O(participants)`.
+///   3. Pass 2 re-runs the body with each chunk's exclusive prefix as
+///      `initial` to write the final scan output.
 inline constexpr detail::ParallelScanFn parallelScan{};
 
 } // namespace citor
@@ -2420,16 +2367,11 @@ struct RunPlexFn {
   /// site (mirroring the member-template surface) so the executor's overload
   /// can specialize on it via `if constexpr` or a regular template parameter.
   ///
-  /// HintsT  Hint type whose `static constexpr` members drive compile-time
-  /// policy. Pool    Executor type. Phase   Phase callable: `void(std::size_t
-  /// phaseIdx, std::uint32_t slot,
-  ///                                       std::size_t lo, std::size_t hi)`.
-  /// pool     Executor instance.
-  /// nPhases  Number of phases to run; `0` is a no-op.
-  /// n        Row-range upper bound; partitioned across slots as
-  ///                  `[n*slot/P, n*(slot+1)/P)`.
-  /// phaseFn  Callable invoked once per `(phase, slot)` pair.
-  /// tok      Cancellation token observed at phase boundaries.
+  /// |nPhases| is the number of phases to run, and `0` is a no-op. |n| is the
+  /// row-range upper bound, partitioned across slots as
+  /// `[n*slot/P, n*(slot+1)/P)`. The engine invokes |phaseFn| once per
+  /// `(phase, slot)` pair as `void(phaseIdx, slot, lo, hi)`. Workers read
+  /// |tok| at phase boundaries.
   template <class HintsT, class Pool, class Phase>
   void operator()(Pool &pool, std::size_t nPhases, std::size_t n,
                   Phase &&phaseFn,
@@ -2481,10 +2423,8 @@ namespace detail {
 ///
 /// The `HintsT` template parameter is a *type*, not a value: that lets the
 /// friend overload on `ThreadPool` template on the same `HintsT` and
-/// monomorphize identically to the member-template call. The hint type is
-/// reserved for future routing decisions (priority class, affinity), but is
-/// unused on the current shape since detached submission has no partition /
-/// chunk schedule.
+/// monomorphize identically to the member-template call. Detached submission
+/// has no partition or chunk schedule, so the engine reads no field off it.
 struct SubmitDetachedFn {
   /// Forward to the executor's `tag_invoke` overload, supplying a default
   /// `HintsT{}` value.
@@ -2493,11 +2433,8 @@ struct SubmitDetachedFn {
   /// site (mirroring the member-template surface) so the executor's overload
   /// can specialize on it via `if constexpr` or a regular template parameter.
   ///
-  /// HintsT Hint type whose `static constexpr` members drive compile-time
-  /// policy. Pool   Executor type. TaskFn Task callable, invocable as
-  /// `void(void)`. pool   Executor instance. fn     Task body the executor runs
-  /// without joining. tok    Cancellation token observed cooperatively by the
-  /// body.
+  /// |fn| is the task body, invocable as `void()`, which the executor runs
+  /// without joining. |tok| is observed cooperatively by the body.
   template <class HintsT, class Pool, class TaskFn>
   void operator()(Pool &pool, TaskFn &&fn,
                   CancellationToken tok = CancellationToken{}) const {
@@ -2535,7 +2472,7 @@ inline constexpr detail::SubmitDetachedFn submitDetached{};
 namespace citor::detail {
 
 /// Per-worker per-stage completion slot used by every barrier kind of
-///        `citor::ThreadPool::parallelChain`.
+/// `citor::ThreadPool::parallelChain`.
 ///
 /// Each slot lives on its own `citor::kCacheLine` -sized line so a worker's
 /// release-store on `done` for one stage cannot invalidate a neighbouring slot
@@ -2570,8 +2507,7 @@ struct alignas(kCacheLine) ChainDynamicStageCounter {
 };
 
 /// Stack-resident state shared by the producer and background workers across
-/// all stages of a
-///        single `parallelChain` call.
+/// all stages of a single `parallelChain` call.
 ///
 /// Layout invariants:
 /// - `chainCancelled` lives on its own line so cancellation broadcast does not
@@ -2700,8 +2636,8 @@ struct ChainState {
   /// stage's chunk `c` is the slice
   /// `[lo, hi)` produced for `slot = c`.
   ///
-  /// slot Worker slot index in `[0, participants)`.
-  /// `(lo, hi)` pair denoting the slot's contiguous range over `[0, n)`.
+  /// |slot| is the worker slot index in `[0, participants)`. Returns the
+  /// `(lo, hi)` pair denoting that slot's contiguous range over `[0, n)`.
   [[nodiscard]] std::pair<std::size_t, std::size_t>
   slotRange(std::uint32_t slot) const noexcept {
     const auto lo = static_cast<std::size_t>(mulDiv64(n, slot, participants));
@@ -2761,10 +2697,9 @@ namespace citor::detail {
 // array remains valid for the rest of its current steal attempt because the
 // freelist never frees mid-flight (Le 2013 section 3 footnote 2).
 //
-// Termination: at deque destruction, every owned `Array` (including any
-// superseded ones pinned by an outstanding stealer) is freed via
-// `reapAllArrays`. The owner is responsible for draining all in-flight steals
-// before destroying the deque; the synchronous primitive that owns the deque
+// Termination: the destructor frees the active `Array` and every superseded
+// one still pinned on the freelist. The owner must drain all in-flight steals
+// before it destroys the deque. The synchronous primitive that owns the deque
 // joins on every worker before the deque goes out of scope.
 template <class T>
 class ChaseLevDeque {
@@ -3175,42 +3110,23 @@ namespace citor::detail {
 /// drains. The producer participates as slot 0 and joins on the `pendingTasks`
 /// countdown reaching zero.
 ///
-/// Layout invariants:
-/// - `pendingTasks` lives on its own line; it is the single contended atomic on
-/// the dispatch
-///   completion path. Workers `fetch_sub(1)` on it after retiring a task so the
-///   producer's spin-then-park loop can detect zero without reading any
-///   per-worker slot.
-/// - `forkJoinCancelled` lives on its own line so cancellation broadcast does
-/// not interfere with
-///   the per-task hot path. Workers acquire-read this flag at task-boundary
-///   chunks; a stopped token causes any victim probe to stop emitting fresh
-///   task descriptors.
-/// - `firstException` is on its own line; the CAS-from-null path is cold.
-///
-/// Padding-suppression note: the layout keeps every contended atomic on its own
-/// `kCacheLine`-sized line, so the analyser's "excessive padding" warning is
-/// the design trade-off we want -- false-sharing avoidance over byte-tight
-/// packing.
-// Lower store-queue stalls under recursive spawn:
-// libfork's per-call frame is 36-40 B on a single cache line, no internal
-// alignas padding. citor's prior layout (4 alignas(kCacheLine=128)-separated
-// blocks) issued 3-4 separate Read-For-Ownership transactions per recursive
-// forkJoin -- one per cold cache line touched. Collapsing the contended atomics
-// onto a single line cuts per-call RFOs from 3-4 to 1. False-sharing on the
-// no-cancel/no-throw common path is moot: peer writes to
-// `cancelled`/`firstException` only fire on the cold cancel or throw paths, so
-// the producer's hot `pendingTasks` poll keeps the line stable.
+/// Layout: every field shares one `kCacheLine`-aligned line. Recursive spawn
+/// touches the state once per call. A line-per-atomic layout would pay one
+/// Read-For-Ownership transaction per cold line, instead of one for the whole
+/// struct. False sharing does not bite on the common path. A call writes
+/// `forkJoinCancelled` and `firstException` only when it cancels or throws,
+/// so the producer's hot `pendingTasks` poll keeps the line stable.
 struct alignas(kCacheLine) ForkJoinState {
   /// Number of participants (producer + background workers) collaborating in
   /// the call.
   std::uint32_t participants = 0;
 
   /// Cancellation flag broadcast by the producer's cancellation observer or by
-  /// any participant that observed an exception. Co-located with `pendingTasks`
-  /// because the steady-state common path never writes it; the no-cancel /
-  /// no-throw call shape leaves the field at 0 throughout, so peer `fetch_sub`
-  /// traffic on `pendingTasks` keeps the line uncontended.
+  /// any participant that observed an exception. A worker acquire-reads it on
+  /// entry to each task and skips the body once it is set, so outstanding
+  /// tasks retire without spawning children. The steady-state common path
+  /// never writes it, so peer `fetch_sub` traffic on `pendingTasks` keeps the
+  /// line uncontended.
   std::atomic<std::uint32_t> forkJoinCancelled{0};
 
   /// CCD index for each participant slot; used by the victim-selection RNG
@@ -3316,15 +3232,14 @@ namespace citor::detail {
 /// returns. The 32-bit `futexWord` is a parking token only; correctness is
 /// anchored on the 64-bit `generation`.
 ///
-/// addr     Atomic word the kernel monitors for changes; must outlive the
-/// caller's wait. expected Expected value at the time of suspension; the kernel
-/// returns immediately with
-///                 `EAGAIN` if `*addr != expected` to avoid the classic
-///                 lost-wakeup race.
-/// timeout  Optional relative timeout; when `nullptr` the call blocks
-/// indefinitely. The raw `syscall` return value. Negative on error (errno set),
-/// zero on a successful wake,
-///         positive otherwise.
+/// |addr| is the atomic word the kernel monitors. It must outlive the caller's
+/// wait. |expected| is the value at the time of suspension: the kernel returns
+/// immediately with `EAGAIN` if `*addr != expected`, which is what closes the
+/// classic lost-wakeup race. |timeout| is an optional relative timeout. When
+/// it is `nullptr`, the call blocks indefinitely.
+///
+/// Returns the raw `syscall` result: negative on error with `errno` set, zero
+/// on a successful wake.
 inline long futexWaitPrivate(std::atomic<std::uint32_t> *addr,
                              std::uint32_t expected,
                              const struct timespec *timeout) noexcept {
@@ -3339,9 +3254,9 @@ inline long futexWaitPrivate(std::atomic<std::uint32_t> *addr,
 /// source-of-truth state the parked thread is about to re-check; `futexWord`
 /// itself remains relaxed.
 ///
-/// addr Atomic word the kernel uses to identify the wait queue.
-/// n    Maximum number of waiters to wake.
-/// The number of waiters actually woken, or a negative value on error.
+/// |addr| identifies the wait queue. |n| caps how many waiters to wake.
+/// Returns the number of waiters actually woken, or a negative value on
+/// error.
 inline long futexWakePrivate(std::atomic<std::uint32_t> *addr, int n) noexcept {
   return syscall(SYS_futex, reinterpret_cast<std::uint32_t *>(addr),
                  FUTEX_WAKE_PRIVATE, n, nullptr, nullptr, 0);
@@ -3423,10 +3338,11 @@ inline FutexFallbackState &futexFallbackState() noexcept {
 
 /// Generic fallback that mirrors the Linux `FUTEX_WAIT_PRIVATE` contract.
 ///
-/// addr     Atomic word checked against |expected| before parking.
-/// expected Expected value; the function returns immediately when the load
-/// disagrees. timeout  Ignored on the fallback; the wait is effectively
-/// unbounded. Always zero; callers re-check the source-of-truth atomic after
+/// The function checks |addr| against |expected| before parking. It returns
+/// immediately when the load disagrees. It ignores |timeout|. The fallback
+/// wait is unbounded.
+///
+/// Always returns zero. Callers re-check the source-of-truth atomic after
 /// wake.
 inline long futexWaitPrivate(std::atomic<std::uint32_t> *addr,
                              std::uint32_t expected,
@@ -3443,9 +3359,10 @@ inline long futexWaitPrivate(std::atomic<std::uint32_t> *addr,
 
 /// Generic fallback that mirrors the Linux `FUTEX_WAKE_PRIVATE` contract.
 ///
-/// addr Atomic word identifying the wait queue (unused on the fallback).
-/// n    Hint for how many waiters to wake; the fallback always broadcasts.
-/// Always zero; the fallback does not report exact wake counts.
+/// |addr| identifies the wait queue and |n| hints at how many waiters to wake.
+/// The fallback ignores both and always broadcasts.
+///
+/// Always returns zero. The fallback does not report exact wake counts.
 inline long futexWakePrivate(std::atomic<std::uint32_t> *addr, int n) noexcept {
   (void)addr;
   (void)n;
@@ -3550,19 +3467,21 @@ namespace citor::detail {
 /// (producer fills, then publishes), many-reader (workers consume).
 ///
 /// Layout:
-/// - The first cache line holds the immutable descriptor body (range bounds,
-/// chunk shape,
-///   participants, balance / priority, body / token). Workers acquire-load
-///   these once after observing the matching generation.
-/// - The contended atomics (`nextBlock`, `firstException`, `exceptionWorkerId`)
-/// sit on dedicated
-///   `kCacheLine`-sized lines so concurrent dynamic-counter increments and
-///   exception CAS attempts do not invalidate the immutable body.
+/// - The immutable descriptor body (range bounds, chunk shape, participants,
+///   balance / priority, body / token) leads the struct. Workers acquire-load
+///   it once after observing the matching generation.
+/// - `firstException` and `exceptionWorkerId` sit on the same secondary
+///   publication line as `token`. That way a worker's per-block exception
+///   probe and cancellation poll share one fetch. Both fields are cold: only a
+///   throwing body writes them.
+/// - `nextBlock` gets its own `kCacheLine`-sized line, because concurrent
+///   dynamic-counter increments would otherwise invalidate the body on every
+///   block claim.
 ///
 /// The descriptor's `body` is a `FunctionRef` pointing into a closure that
-/// lives on the producer's stack. Because every primitive in v1 is synchronous
-/// (the producer joins before returning), the closure outlives the descriptor
-/// by construction.
+/// lives on the producer's stack. Because every fan-out primitive is
+/// synchronous (the producer joins before returning), the closure outlives the
+/// descriptor by construction.
 ///
 /// The padding overhead trades several hundred bytes of stack against
 /// MESI cache-coherency traffic on the contended atomics, which is the dominant
@@ -3606,14 +3525,11 @@ struct alignas(kCacheLine) JobDescriptor {
   /// if every background worker has already stamped the DONE bit (i.e.
   /// spinning workers picked up the dispatch and finished an empty / trivial
   /// body before the probe ran), the producer skips the futex-word bump and the
-  /// `FUTEX_WAKE_PRIVATE(INT_MAX)` syscall entirely. Independent one-shot
-  /// primitives
-  /// (`parallelFor`, `parallelReduce`, `bulkForQueries`) opt in;
-  /// protocol-driving primitives
-  /// (`parallelChain`, `parallelScan`, `runPlex`, `forkJoin`) leave the flag
-  /// default-`false` because their wrapper bodies must run to completion
-  /// regardless of when the producer observes done. Sits inside the existing
-  /// 16-bit padding before `body`, so it adds no descriptor size.
+  /// `FUTEX_WAKE_PRIVATE(INT_MAX)` syscall entirely. The independent one-shot
+  /// primitives (`parallelFor`, `parallelReduce`, `bulkForQueries`) opt in.
+  /// The protocol-driving ones (`parallelChain`, `parallelScan`, `runPlex`,
+  /// `forkJoin`) leave the flag default-`false`. Their wrapper bodies must run
+  /// to completion no matter when the producer observes done.
   bool preWakeCompletionProbe = false;
 
   /// Non-owning reference to the user's closure. Lives on the producer's stack
@@ -3626,7 +3542,8 @@ struct alignas(kCacheLine) JobDescriptor {
 
   /// Direct pointer to the user's callable. Set by `parallelFor<HintsT,F>` so
   /// the typed `workerEntry` runner can recover `F*` and call it without going
-  /// through `desc.body`'s FunctionRef indirection. Null for legacy primitives.
+  /// through `desc.body`'s FunctionRef indirection. Null for primitives that
+  /// dispatch through the untyped runner.
   void *fnPtr = nullptr;
 
   /// Optional monomorphized worker entry. When non-null, workers call this
@@ -3641,10 +3558,10 @@ struct alignas(kCacheLine) JobDescriptor {
   /// non-null, the worker entry CAS-races the producer's join path on
   /// `WorkerState[rank].claimedAt`; whoever wins runs rank R's blocks, the
   /// loser stamps mailbox=doneSentinel without re-running the work. When null,
-  /// the legacy "every worker runs its own blocks" protocol holds (used by
-  /// parallelReduce / parallelScan / runPlex / forkJoin which need rank-keyed
-  /// partial outputs). The pointer is a `void*` so this header does not have to
-  /// pull in `worker_state.h`.
+  /// the plain "every worker runs its own blocks" protocol holds.
+  /// `parallelReduce`, `parallelScan`, `runPlex`, and `forkJoin` need that
+  /// protocol for their rank-keyed partial outputs. The pointer is a `void*`
+  /// so this header does not have to include `worker_state.h`.
   void *workerStateBase = nullptr;
 
   /// First-exception capture slot. Workers `compare_exchange` this from null to
@@ -3697,14 +3614,11 @@ struct KahanPair {
 /// Add a scalar |x| to a running `KahanPair` accumulator using Kahan
 /// compensation.
 ///
-/// Implements one step of the textbook compensated summation. The compensation
-/// term |a|.c is subtracted from |x| to recover the previously lost low bits
-/// before the running sum is bumped; the new compensation captures the rounding
-/// error introduced by this step.
-///
-/// a Current accumulator.
-/// x Scalar to add.
-/// New accumulator with |x| folded in.
+/// Implements one step of the textbook compensated summation. |a| is the
+/// current accumulator and |x| the scalar to add. The step subtracts the
+/// accumulator's compensation term from |x| to recover the lost low bits,
+/// then bumps the running sum. The new compensation captures the rounding
+/// error this step introduces. Returns the accumulator with |x| folded in.
 [[nodiscard]] inline KahanPair kahanAdd(KahanPair a, double x) noexcept {
   const double y = x - a.c;
   const double t = a.sum + y;
@@ -3718,13 +3632,11 @@ struct KahanPair {
 ///
 /// Used at every interior node of the chunk-id pairwise reduction tree: each
 /// subtree's partial sum is itself a `KahanPair`, and combining two siblings
-/// preserves the compensation contract. The implementation folds |b|.sum into
-/// |a| via `kahanAdd`, then folds |b|.c (the right child's compensation) so the
-/// residual carried into the parent is the sum of both children's residuals.
-///
-/// a Left subtree accumulator.
-/// b Right subtree accumulator.
-/// Combined accumulator covering both subtrees.
+/// preserves the compensation contract. |a| is the left subtree's accumulator
+/// and |b| the right one's. The implementation folds |b|'s sum into |a| via
+/// `kahanAdd`, then folds |b|'s compensation so the residual carried into the
+/// parent covers both children. Returns the accumulator spanning both
+/// subtrees.
 [[nodiscard]] inline KahanPair kahanCombine(KahanPair a, KahanPair b) noexcept {
   const KahanPair afterSum = kahanAdd(a, b.sum);
   return kahanAdd(afterSum, -b.c);
@@ -3791,9 +3703,9 @@ struct alignas(kCacheLine) LookbackTile {
 /// predecessor is observed in `PrefixAvailable` state. Returns the
 /// computed prefix for `myTile`.
 ///
-/// `prefix` is the user-supplied associative combiner; the walk
-/// composes left-to-right (oldest predecessor first) to preserve
-/// associativity even when the combiner is not commutative.
+/// `prefix` is the user-supplied associative combiner. The walk visits the
+/// nearest predecessor first but always composes its operands left-to-right,
+/// so the combiner only has to be associative, not commutative.
 ///
 /// The walk avoids stalling on a slow predecessor by spinning with
 /// `cpuRelax()`; on workloads where every tile's Pass-1 work is
@@ -3813,7 +3725,7 @@ lookbackWalk(LookbackTile<T> *tiles, std::uint32_t myTile, T identity,
   // we have folded in but whose `prefix` was not yet published. When
   // we hit a tile in `PrefixAvailable` state, that tile's prefix
   // covers everything to its left, so the result is
-  // `prefix.left = prefix(prefix.left, peer.prefix, peer.aggregate, accum)`.
+  // `prefix(prefix(peer.prefix, peer.aggregate), accum)`.
   // Compose left-to-right (peer is to the left of accum) so the user
   // monoid only needs to be associative, not commutative.
   T accum = identity;
@@ -3868,8 +3780,7 @@ struct alignas(kCacheLine) PlexDoneSlot {
 };
 
 /// Stack-resident state shared by the producer and background workers across
-/// all phases of a
-///        single `runPlex` call.
+/// all phases of a single `runPlex` call.
 ///
 /// Layout invariants:
 /// - `currentPhase` lives on its own cache line so the producer's release-store
@@ -3905,8 +3816,7 @@ struct PlexState {
   std::uint32_t participants = 0;
 
   /// Phase epoch published by the producer. Workers acquire-spin until
-  /// `currentPhase >= localPhase` before admitting their slice for
-  /// `localPhase`.
+  /// `currentPhase >= p` before admitting their slice for phase `p`.
   ///
   /// Initial value is `0`; the producer publishes `1, 2, ..., nPhases` in
   /// order. Workers complete phase `p` when they observe `currentPhase >= p`,
@@ -3966,8 +3876,8 @@ struct PlexState {
   /// / participants`, matching the prim_mst_backend.h convention so the
   /// migration produces bit-identical block boundaries.
   ///
-  /// slot Worker slot index in `[0, participants)`.
-  /// `(lo, hi)` pair denoting the slot's contiguous range over `[0, n)`.
+  /// |slot| is the worker slot index in `[0, participants)`. Returns the
+  /// `(lo, hi)` pair denoting that slot's contiguous range over `[0, n)`.
   [[nodiscard]] std::pair<std::size_t, std::size_t>
   slotRange(std::uint32_t slot) const noexcept {
     const auto lo = static_cast<std::size_t>(mulDiv64(n, slot, participants));
@@ -3987,28 +3897,32 @@ namespace citor::detail {
 
 /// Process-internal control word shared between producer and workers.
 ///
-/// Four contended atomics (`generation`, `futexWord`, `activeJob`,
-/// `hotSpinDepth`) plus a const `participants` count form the source of truth
-/// for pool state. Each contended atomic is on its own `kCacheLine`-sized line
-/// so MESI traffic on one never invalidates another. The layout places
-/// `generation` (release publish), `futexWord` (parking token), `activeJob`
-/// (descriptor pointer), a low-latency spin-depth gate, and `participants` on
-/// dedicated 128-byte lines.
+/// These fields are the source of truth for pool state:
+///
+///   - `generation`, the release publish
+///   - `futexWord`, the parking token
+///   - `hotSpinDepth` and `hotSpinEpoch`, the low-latency scope gate
+///   - `participants`
+///
+/// Each sits on its own `kCacheLine`-sized line, so MESI traffic on one never
+/// invalidates another. `activeJob` is the deliberate exception. It shares
+/// `generation`'s line so a worker's first acquire-load picks up both.
 ///
 /// The 64-bit `generation` carries both flags and a monotonic phase counter.
-/// Bits 0 (shutdown) and 1 (cancel) are reserved; the producer increments by 4
-/// per published job so the high 62 bits act as the ABA-free phase counter. A
-/// 32-bit phase would be at risk of wrapping under sustained dispatch; 64 bits
-/// is overkill but free given the cache-line padding.
+/// The low `kPhaseShift` bits are flags. The producer increments by
+/// `kPhaseStep` per published job, so the remaining high bits act as the
+/// ABA-free phase counter. A 32-bit phase would risk wrapping under sustained
+/// dispatch. 64 bits is more than needed, but the cache-line padding makes it
+/// free.
 ///
 /// The `futexWord` is parking-only: workers re-check `generation` after every
 /// wait return, so spurious or duplicated wakes are correctness-neutral.
 /// Updates use `relaxed` atomics; the happens-before chain runs through
 /// `generation` (release) instead.
 ///
-/// `activeJob` is published with `release`; observed with `acquire`. The slot
-/// is `nullptr` until a primitive publishes a `JobDescriptor`; the engine
-/// itself never writes here.
+/// The producer publishes `activeJob` with `release`, and workers observe it
+/// with `acquire`. The slot is `nullptr` until a primitive publishes a
+/// `JobDescriptor`.
 struct PoolControl {
   /// Bit flag in `generation` indicating the pool has been told to shut down.
   ///
@@ -4016,25 +3930,17 @@ struct PoolControl {
   /// this exit the loop.
   static constexpr std::uint64_t kShutdownBit = 1ULL << 0;
 
-  /// Bit flag in `generation` reserved for global cancellation broadcasts.
-  ///
-  /// Reserved for pool-wide cancellation; the bit lives here so the
-  /// `generation` layout is stable once the cancellation path lands without
-  /// needing to shuffle the flag-bit assignments.
-  static constexpr std::uint64_t kCancelBit = 1ULL << 1;
-
   /// Bit set by a worker on its `mailbox` line to acknowledge dispatch
   /// completion.
   ///
   /// Same-line ack protocol: the producer publishes the new phase with this bit
   /// clear; the worker stamps `mailbox = phase | kDoneBit` after running its
   /// share. The producer's join reads the worker's mailbox (the same line it
-  /// published to) and waits for the DONE bit to appear. Removes the separate
-  /// `doneEpoch` cache-line transit on the hot path.
+  /// published to) and waits for the DONE bit to appear, so done state costs no
+  /// cache-line transit beyond the one the publish already paid for.
   ///
-  /// Lives in the bit-1 slot that was reserved for cancel broadcasts. The
-  /// cancel path is carried by `CancellationToken`, not by a generation/mailbox
-  /// flag, so the bit was free.
+  /// Cancellation rides on `CancellationToken`, which is why the flag bits
+  /// here are all dispatch-protocol state.
   static constexpr std::uint64_t kDoneBit = 1ULL << 1;
 
   /// Bit set by the producer on the worker's `mailbox` when this dispatch
@@ -4074,12 +3980,10 @@ struct PoolControl {
   /// Increment applied per published phase so flags survive the bump.
   static constexpr std::uint64_t kPhaseStep = 1ULL << kPhaseShift;
 
-  /// Mask of all flag bits below the phase counter.
-  static constexpr std::uint64_t kFlagMask = kPhaseStep - 1;
-
   /// Source-of-truth phase counter.
   ///
-  /// Bit 0 = shutdown, bit 1 = cancel-broadcast, bits 2..63 = monotonic phase.
+  /// Low `kPhaseShift` bits are the flags listed above. The remaining high
+  /// bits are the monotonic phase.
   /// Producer publishes a new phase via `release`; workers read with `acquire`.
   /// Together with `activeJob` this is the acquire/release pair that orders
   /// descriptor visibility. `activeJob` is co-located on the same cache line so
@@ -4126,8 +4030,7 @@ struct PoolControl {
   alignas(kCacheLine) std::uint32_t participants = 0;
 
   /// Pre-computed bitmask of background-worker slots `[1, participants)` for
-  /// the join's
-  ///        pending set; producer slot 0 already cleared.
+  /// the join's pending set. The mask already clears producer slot 0.
   ///
   /// Constant for the pool's lifetime (set once at construction). Co-located on
   /// the `participants` cache line so the producer's dispatch picks both fields
@@ -4228,13 +4131,11 @@ namespace citor::detail {
 /// interior node has fixed left/right operands, so the output is bit-identical
 /// regardless of which worker computed which leaf.
 ///
-/// T       Partial value type (e.g. `double`, `KahanPair`).
-/// Combine Binary combiner; called as `combine(left, right)` and must return a
-/// `T`. partials In-place workspace; mutated as the tree collapses upward.
-/// combine  Combiner function.
-/// The fully combined partial covering every chunk; matches `partials.front()`
-/// after the
-///         call. Returns a default-constructed `T` when |partials| is empty.
+/// |partials| is the in-place workspace. The tree mutates it as it collapses
+/// upward. |combine| is the binary combiner, called as `combine(left, right)`,
+/// and it returns a `T`. Returns the fully combined partial covering every
+/// chunk, which matches `partials.front()` after the call. Returns a
+/// default-constructed `T` when |partials| is empty.
 template <class T, class Combine>
 [[nodiscard]] T pairwiseTreeCombine(std::vector<T> &partials, Combine combine) {
   if (partials.empty()) {
@@ -4284,8 +4185,7 @@ struct alignas(kCacheLine) ScanDoneSlot {
 };
 
 /// Stack-resident state shared by the producer and background workers across
-/// both passes of a
-///        single `parallelScan` call.
+/// both passes of a single `parallelScan` call.
 ///
 /// Layout invariants:
 /// - `scanCancelled` lives on its own line so cancellation broadcast does not
@@ -4326,7 +4226,7 @@ struct alignas(kCacheLine) ScanDoneSlot {
 /// the design trade-off we want -- false-sharing avoidance over byte-tight
 /// packing.
 ///
-/// T Reduction value type the scan operates on.
+/// |T| is the reduction value type the scan operates on.
 template <class T>
 struct ScanState {
   /// Number of participants (= number of chunks) collaborating in the scan.
@@ -4354,8 +4254,7 @@ struct ScanState {
   alignas(kCacheLine) std::atomic<std::exception_ptr *> firstException{nullptr};
 
   /// Producer-side flag flipped after the sequential reduce computes every
-  /// chunk's exclusive
-  ///        prefix.
+  /// chunk's exclusive prefix.
   ///
   /// Workers acquire-spin on this between passes; the release-store from the
   /// producer publishes the `partials` array (re-purposed to hold exclusive
@@ -4478,8 +4377,8 @@ struct ScanState {
   /// detected cross-CCD presence; it is opt-in to avoid regressing balanced
   /// compute-bound bodies on single-CCD or homogeneous-CCD topologies.
   ///
-  /// slot Worker slot index in `[0, participants)`.
-  /// `(lo, hi)` pair denoting the slot's contiguous range over `[0, n)`.
+  /// |slot| is the worker slot index in `[0, participants)`. Returns the
+  /// `(lo, hi)` pair denoting that slot's contiguous range over `[0, n)`.
   [[nodiscard]] std::pair<std::size_t, std::size_t>
   slotRange(std::uint32_t slot) const noexcept {
     if (ccdOfSlot == nullptr) {
@@ -5173,7 +5072,7 @@ inline Topology detectTopology() {
   // Per-CCD L3 size + preferred-CCD selection. V-Cache parts have one CCD with
   // a stacked SRAM die (96 MiB on 9950X3D's CCD0 vs 32 MiB on the regular CCD);
   // for workloads whose working set exceeds the smaller L3 but fits the larger,
-  // landing on the V-Cache CCD is a 5-10x speedup. We pick the largest-L3 CCD
+  // landing on the V-Cache CCD is a large speedup. We pick the largest-L3 CCD
   // as the default placement target; tie-break by lowest index so symmetric
   // Zens (no X3D) still get a deterministic choice across runs.
   topo.l3KibOfCcd.assign(topo.ccdGroups.size(), 0U);
@@ -5447,23 +5346,13 @@ inline DWORD_PTR pinCurrentThreadAndSave(std::uint32_t cpuId) noexcept {
 
 namespace citor::detail {
 
-/// Reserved slot for the per-worker Chase-Lev work-stealing deque. Holds a
-/// `void *` placeholder so the `WorkerState` layout, sizing, and alignment
-/// remain stable. The deque type owns the heap-allocated payload pointed to
-/// by `storage`; the `void *` width keeps `WorkerState` trivially-zeroed
-/// without coupling the engine to the deque header.
-struct ChaseLevDequeSlot {
-  /// Pointer to the heap-allocated deque payload, owned by the
-  /// work-stealing deque type.
-  void *storage = nullptr;
-};
-
 /// Per-worker state owned by the pool, one instance per participant.
 ///
-/// `WorkerState` carries the worker's identity, mailbox publish/ack slot,
-/// observability counters, and a pointer to the deque. Every contended
-/// atomic sits on its own `kCacheLine`-sized line so a write on the
-/// mailbox does not invalidate the worker's identity or counters.
+/// `WorkerState` carries the worker's identity, mailbox publish/ack slot, and
+/// observability counters. Every contended atomic sits on its own
+/// `kCacheLine`-sized line so a write on the mailbox does not invalidate the
+/// worker's identity or counters. The pool owns the fork-join work-stealing
+/// deques separately. This struct does not hold them.
 ///
 /// Counters are relaxed-atomic so workers can update them on the hot path
 /// without synchronizing other state; readers (telemetry, tests) accept
@@ -5473,8 +5362,8 @@ struct WorkerState {
   /// as the worker's same-line DONE ack via `PoolControl::kDoneBit`.
   ///
   /// Producer publishes a new dispatch by writing this slot's mailbox to
-  /// the dispatch's phase counter (bit 0 = shutdown, bits 2..63 = monotonic
-  /// phase, matching `PoolControl::generation`'s layout). The worker spins
+  /// the dispatch's phase counter, matching `PoolControl::generation`'s flag
+  /// and phase layout. The worker spins
   /// on its own mailbox instead of the shared `generation`, eliminating the
   /// N-readers-on-one-line coherence storm under fan-out.
   ///
@@ -5487,8 +5376,7 @@ struct WorkerState {
   ///
   /// After running its share the worker stamps `mailbox |= kDoneBit` (release)
   /// so the producer's join reads done state on the same cache line it just
-  /// published the dispatch on. One line per worker on the join path replaces
-  /// the old two-line publish + done-epoch protocol.
+  /// published the dispatch on: one line per worker on the join path.
   ///
   /// Lives alone on a 128-byte line because the producer writes it on
   /// every dispatch and the worker reads it every spin iteration.
@@ -5550,9 +5438,6 @@ struct WorkerState {
   /// Default value `0` is below any real generation (workers' first
   /// dispatch sees gen >= `kPhaseStep` > 0).
   alignas(kCacheLine) std::atomic<std::uint64_t> claimedAt{0};
-
-  /// Reserved deque slot.
-  alignas(kCacheLine) ChaseLevDequeSlot deque{};
 };
 
 // Hot-path offsets must stay pinned: the dispatch loop indexes `mailbox`
@@ -5567,10 +5452,9 @@ static_assert(offsetof(WorkerState, hotSpinEpoch) == kCacheLine * 5);
 static_assert(offsetof(WorkerState, stealAttempts) == kCacheLine * 6);
 static_assert(offsetof(WorkerState, stealSuccesses) == kCacheLine * 7);
 static_assert(offsetof(WorkerState, claimedAt) == kCacheLine * 8);
-static_assert(offsetof(WorkerState, deque) == kCacheLine * 9);
 
-// The full struct must fit comfortably in L2 across the worker fleet
-// (16 workers x 4 KiB = 64 KiB).
+// The full struct must stay small enough that the whole worker fleet's state
+// fits in L2 alongside the working set.
 static_assert(sizeof(WorkerState) <= 4096);
 
 } // namespace citor::detail
@@ -5741,13 +5625,14 @@ nextTypedBlock(JobDescriptor &desc, std::size_t blockCount,
   }
 }
 
-/// Static-balance untyped runner: kept as a name alias for legacy callers.
+/// Static-balance untyped runner. The worker loop enters here for descriptors
+/// published without a monomorphized `workerEntry`.
 inline void runStaticPartition(JobDescriptor &desc,
                                std::uint32_t rank) noexcept {
   runPartition<Balance::StaticUniform>(desc, rank);
 }
 
-/// Dynamic-balance untyped runner: kept as a name alias for legacy callers.
+/// Dynamic-balance untyped runner. Sibling of `runStaticPartition`.
 inline void runDynamicCounter(JobDescriptor &desc,
                               std::uint32_t rank) noexcept {
   // Cold-collapse CAS-claim: producer's join-wait may race the worker for this
@@ -5764,8 +5649,7 @@ inline void runDynamicCounter(JobDescriptor &desc,
 }
 
 /// Typed slot-0 partition runner: same as `runPartition` but calls `fn(lo, hi)`
-/// directly
-///        instead of going through `desc.body`'s `FunctionRef` indirection.
+/// directly instead of going through `desc.body`'s `FunctionRef` indirection.
 ///
 /// Used by the producer's slot-0 path inside `dispatchOneStaticLockedBody` when
 /// the caller has the body's static type available (parallelFor /
@@ -6253,8 +6137,8 @@ inline void typedDynamicChunkedWorkerEntry(JobDescriptor *desc,
 // `typedWorkerEntry` and `runPartition` templates in `dispatch_static.h`. The
 // only per-balance difference is the `BlockClaim<B>::next` policy.
 //
-// This header keeps a few legacy aliases callers historically referenced; new
-// code should use the unified entries directly.
+// This header carries the dynamic-balance spelling of the typed slot-0 entry.
+// Everything else lives in `dispatch_static.h`.
 
 
 namespace citor::detail {
@@ -9035,11 +8919,9 @@ public:
         std::forward<PrefixFn>(prefix), std::move(tok));
   }
 
-  /// Buffer-to-buffer inclusive prefix scan. Engine owns the inner loop
-  /// (no user body), so it can use the most aggressive memory-traffic
-  /// shape -- decoupled-lookback single-pass with `PREFETCHW` ahead of
-  /// the writes, per-cluster lookback chains on multi-CCD parts -- to
-  /// hit the hardware bandwidth floor.
+  /// Buffer-to-buffer inclusive prefix scan. The engine owns the inner
+  /// loop (no user body), so it can pick the memory-traffic shape: a
+  /// single-pass decoupled-lookback scan over cache-sized tiles.
   ///
   /// `in` and `out` are caller-owned spans of equal length; aliasing
   /// (in.data() == out.data()) is safe because the engine reads `in[i]`
@@ -9758,10 +9640,9 @@ private:
         return runWithPartials(partials, nChunks);
       }
 
-      // FixedBlockOrder / OrderTolerant share the same dispatch shape; the only
-      // difference is whether the caller's combine is
-      // bit-reproducible-friendly. We still use the chunk-id pairwise tree so
-      // FixedBlockOrder is bit-identical across worker counts.
+      // The chunk-id pairwise tree runs for every determinism mode, so
+      // FixedBlockOrder is bit-identical across worker counts whatever the
+      // caller's combine does.
       struct alignas(kCacheLine) Slot {
         T value;
         std::uint8_t done = 0;
@@ -11124,21 +11005,14 @@ private:
   /// and per-tile state lines live with the owner; the lookback chain
   /// sweeps backward across tiles, so workers on cluster N reading a
   /// predecessor tile owned by cluster M pay the cross-cluster
-  /// coherence cost. With tiles sized to the runtime-probed L2/2 the
-  /// chain typically terminates within a couple of hops because
-  /// immediate predecessors finish their aggregate before the
-  /// successor's body returns.
+  /// coherence cost. The chain typically terminates within a couple of
+  /// hops because immediate predecessors finish their aggregate before
+  /// the successor's body returns.
   ///
-  /// Output prefetch: each tile issues `PREFETCHW` over its own
-  /// `out[T_lo..T_hi]` slice immediately after publishing its
-  /// aggregate, so the cross-cluster RFO traffic for the writes runs
-  /// concurrently with the lookback walk and the local scan, hiding
-  /// the inter-die fabric round-trip behind per-tile compute.
-  ///
-  /// Tile size: `tileBytes = max(64 KiB, l2KibPerCore * 1024 / 2)` --
-  /// half the runtime-probed L2 leaves room for both the input read
-  /// and the output write of a tile to be L2-resident. Falls back to
-  /// 256 KiB when sysfs is absent.
+  /// Tile size is `clamp(perParticipantBytes, kMinTileBytes, l2Bytes)`,
+  /// where `l2Bytes` is the runtime-probed L2-per-core and
+  /// `perParticipantBytes` is `n * sizeof(T)` split across participants.
+  /// See the sizing note at the computation itself.
   ///
   /// Returns the inclusive total at the right edge.
   template <class HintsT, class T, class PrefixFn>
@@ -11155,22 +11029,8 @@ private:
     }
     const std::size_t participants = m_control.participants;
 
-    // Choose tile bytes from the runtime-probed L2-per-core. The tile
-    // size balances: (a) tile-local working set should fit in L2 so
-    // Pass-1's chunk-local scan stays cache-resident through the
-    // lookback wait, (b) tile count >= participants so every worker
-    // has work and the lookback chain pipelines (more tiles than
-    // workers means a slow tile doesn't stall the whole chain), (c)
-    // tile compute time should be a few microseconds so the lookback
-    // chain hops overlap with adjacent tiles' Pass-1 work.
-    //
-    // Heuristic: tile_bytes = min(l2_per_core / 4, n / participants).
-    // The L2/4 cap leaves headroom for d.in + d.out + a small cushion
-    // of locked stack frames in cache; the n/participants cap ensures
-    // there are at least `participants` tiles. Hardware-agnostic:
-    // works on any CPU that exposes index2/size in sysfs; falls back
-    // to 64 KiB when sysfs is absent.
-    // Tile sizing -- balance two competing constraints:
+    // Tile sizing from the runtime-probed L2-per-core, balancing two
+    // competing constraints:
     //   (a) Chain parallelism: in a single coherence cluster, the
     //       lookback chain serializes the workers (tile T waits on
     //       T-1's prefix). If `numTiles > participants`, some workers
@@ -12480,17 +12340,6 @@ private:
         desc, lease.gateSkipped(), &fn, reuseHint);
   }
 
-  /// Untyped-priority counterpart of `dispatchOneStaticTypedSlot0Hinted`.
-  /// Pulls the priority from `|desc|` rather than a compile-time
-  /// `HintsT::priority`.
-  template <class FOp>
-  void dispatchOneStaticTypedSlot0(detail::JobDescriptor &desc, FOp &fn,
-                                   bool reuseHint = false) {
-    const DispatchLease lease(*this, desc.priority);
-    dispatchOneStaticLockedBody<Balance::StaticUniform>(
-        desc, lease.gateSkipped(), &fn, reuseHint);
-  }
-
   /// Typed entry into the dynamic-balance dispatch path: the producer's
   /// slot-0 inline body call bypasses `desc.body`'s `FunctionRef` indirection
   /// by invoking `fn` directly. Sibling of
@@ -12578,9 +12427,7 @@ private:
     // side: the join-wait fallback below) can use it as the comparator for
     // `WorkerState::claimedAt`. The release-store on each worker's mailbox
     // sequenced-after this relaxed store is the visibility edge: workers
-    // acquire-load mailbox and see the matching `desc.generation` write. The
-    // historical "desc.generation field is dead" comment no longer holds now
-    // that cold-collapse reads it.
+    // acquire-load mailbox and see the matching `desc.generation` write.
     desc.generation = nextGen;
 
     m_control.activeJob.store(static_cast<void *>(&desc),
@@ -12791,8 +12638,8 @@ private:
       // Cache `sched_getcpu()` once per join. The producer is auto-pinned by
       // the pool ctor for Standalone pools and by `bindProducerSlot()` for
       // explicit-pin call sites; in both shapes the CPU is invariant for the
-      // call's lifetime. Pulling the syscall out of the per-64-rounds probe
-      // saves ~10-20ns per gated probe under sustained join contention.
+      // call's lifetime, so the per-64-rounds probe reads the cached value
+      // instead of re-entering the kernel.
 #ifdef __linux__
       const int producerCpu = sched_getcpu();
       const std::uint32_t producerCpuU =
@@ -14048,9 +13895,8 @@ public:
       ++arenaIndex;
     }
     if (m_arenas.empty()) {
-      // Defensive fallback: enumerateCcds always returns at least one CCD,
-      // but if a future platform port returns an empty list, spin up a
-      // single-thread arena so callers never see an empty group.
+      // Defensive fallback: `enumerateCcds` must return at least one CCD,
+      // but an empty list must not produce an empty group.
       const std::vector<std::uint32_t> pins;
       m_arenas.emplace_back(std::unique_ptr<ThreadPool>(
           new ThreadPool(ThreadPool::ArenaTag{}, std::size_t{1}, pins, 0U)));
