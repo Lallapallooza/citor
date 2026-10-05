@@ -14,7 +14,7 @@
 
 | | |
 |---|---|
-| Version | `0.6.1` |
+| Version | `0.6.2` |
 | Distribution | header-only |
 | CMake target | `citor::citor` (INTERFACE) |
 | Validated target | Linux x86_64; Windows x86_64 |
@@ -226,7 +226,7 @@ Pick whichever path matches your project's existing dependency story.
 
 ```bash
 curl -L -o third_party/citor.hpp \
-  https://raw.githubusercontent.com/Lallapallooza/citor/v0.6.1/single_include/citor.hpp
+  https://raw.githubusercontent.com/Lallapallooza/citor/v0.6.2/single_include/citor.hpp
 ```
 
 ```cpp
@@ -244,7 +244,7 @@ Compile with any C++20 toolchain:
 include(FetchContent)
 FetchContent_Declare(citor
   GIT_REPOSITORY https://github.com/Lallapallooza/citor.git
-  GIT_TAG        v0.6.1)
+  GIT_TAG        v0.6.2)
 FetchContent_MakeAvailable(citor)
 
 target_link_libraries(my_app PRIVATE citor::citor)
@@ -253,7 +253,7 @@ target_link_libraries(my_app PRIVATE citor::citor)
 ### 3. CPM
 
 ```cmake
-CPMAddPackage("gh:Lallapallooza/citor#v0.6.1")
+CPMAddPackage("gh:Lallapallooza/citor#v0.6.2")
 target_link_libraries(my_app PRIVATE citor::citor)
 ```
 
@@ -269,8 +269,8 @@ Point vcpkg at this repo's `packaging/vcpkg/ports/` directory.
 ### 5. Conan (Conan 2.x)
 
 ```bash
-conan create packaging/conan --version 0.6.1
-conan install --requires=citor/0.6.1 --build=missing
+conan create packaging/conan --version 0.6.2
+conan install --requires=citor/0.6.2 --build=missing
 ```
 
 The recipe is `package_type = "header-library"`, `no_copy_source = True`, `package_id().clear()`.
@@ -284,7 +284,7 @@ sudo cmake --install build
 ```
 
 ```cmake
-find_package(citor 0.6.1 REQUIRED)
+find_package(citor 0.6.2 REQUIRED)
 target_link_libraries(my_app PRIVATE citor::citor)
 ```
 
