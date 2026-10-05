@@ -5,10 +5,10 @@
 #include "citor/hints.h"
 #include "citor/thread_pool.h"
 
-// `snapshotCounters()` returns zero pool-level fields unless
+// `snapshotCounters()` returns all-zero fields unless
 // `CITOR_ENABLE_POOL_COUNTERS` was defined at build time. When defined,
 // dispatches advance per fan-out and inlineFallbacks advances per `runInline`
-// short-circuit. Worker-aggregated fields are always available.
+// short-circuit.
 TEST(ThreadPoolLifecycleCounters,
      DispatchAndInlineFallbackCountersAdvanceMonotonicallyPerCall) {
 #ifdef CITOR_ENABLE_POOL_COUNTERS

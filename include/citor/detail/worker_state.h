@@ -66,7 +66,11 @@ struct WorkerState {
 
   /// Relaxed-atomic counters used for observability and tests. Each counter
   /// sits on its own line so observability traffic does not pollute another
-  /// worker's hot path.
+  /// worker's hot path. All counters below (`parks`, `wakes`, `dispatches`,
+  /// `stealAttempts`, `stealSuccesses`) are written only when
+  /// `CITOR_ENABLE_POOL_COUNTERS` is defined; otherwise they stay zero.
+  ///
+  /// Number of `FUTEX_WAIT_PRIVATE` calls made by this worker.
   alignas(kCacheLine) std::atomic<std::uint64_t> parks{0};
 
   /// Number of `FUTEX_WAKE_PRIVATE` calls observed by this worker.

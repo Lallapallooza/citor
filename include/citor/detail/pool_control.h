@@ -155,8 +155,10 @@ struct PoolControl {
 ///
 /// Three monotonic pool-scoped counters incremented at the dispatch publish,
 /// inline-fallback, and cancellation-observed sites. Worker-scoped counters
-/// (futex parks/wakes, steal attempts) live on `WorkerState` and are aggregated
-/// into `PoolCountersSnapshot` by `snapshotCounters()`.
+/// (futex parks/wakes, dispatches, forkJoin steals) live on `WorkerState`;
+/// `snapshotCounters()` sums parks, wakes and steals into
+/// `PoolCountersSnapshot`. Every counter, pool or worker, is written only
+/// with the macro below.
 ///
 /// Compile-time gated by `CITOR_ENABLE_POOL_COUNTERS`. When the macro is
 /// undefined (the default), the struct has no atomic members and the increment
@@ -184,6 +186,11 @@ struct alignas(kCacheLine) PoolCounters {
   do {                                                                         \
     m_counters.member.fetch_add(1, std::memory_order_relaxed);                 \
   } while (0)
+/// Bump a counter on a `WorkerState`. Same gate as `CITOR_COUNTERS_INC`.
+#define CITOR_WORKER_COUNTERS_INC(ws, member)                                  \
+  do {                                                                         \
+    (ws).member.fetch_add(1, std::memory_order_relaxed);                       \
+  } while (0)
 #else
 /// Empty stub used when `CITOR_ENABLE_POOL_COUNTERS` is undefined; the
 /// member is zero-sized and every increment site compiles to a no-op.
@@ -191,12 +198,16 @@ struct PoolCounters {};
 #define CITOR_COUNTERS_INC(member)                                             \
   do {                                                                         \
   } while (0)
+#define CITOR_WORKER_COUNTERS_INC(ws, member)                                  \
+  do {                                                                         \
+  } while (0)
 #endif
 
 /// Snapshot POD returned by `ThreadPool::snapshotCounters()`. Pool-scoped
 /// fields come from `PoolCounters`; worker-scoped fields are aggregated by
 /// summing the matching field across every `WorkerState`. Each load is
-/// `relaxed` so values may not reflect a single point in time.
+/// `relaxed` so values may not reflect a single point in time. Every field
+/// is zero unless `CITOR_ENABLE_POOL_COUNTERS` is defined.
 struct PoolCountersSnapshot {
   /// Producer dispatches that reached fan-out (matches
   /// `PoolCounters::dispatches`).

@@ -4043,8 +4043,10 @@ struct PoolControl {
 ///
 /// Three monotonic pool-scoped counters incremented at the dispatch publish,
 /// inline-fallback, and cancellation-observed sites. Worker-scoped counters
-/// (futex parks/wakes, steal attempts) live on `WorkerState` and are aggregated
-/// into `PoolCountersSnapshot` by `snapshotCounters()`.
+/// (futex parks/wakes, dispatches, forkJoin steals) live on `WorkerState`;
+/// `snapshotCounters()` sums parks, wakes and steals into
+/// `PoolCountersSnapshot`. Every counter, pool or worker, is written only
+/// with the macro below.
 ///
 /// Compile-time gated by `CITOR_ENABLE_POOL_COUNTERS`. When the macro is
 /// undefined (the default), the struct has no atomic members and the increment
@@ -4072,6 +4074,11 @@ struct alignas(kCacheLine) PoolCounters {
   do {                                                                         \
     m_counters.member.fetch_add(1, std::memory_order_relaxed);                 \
   } while (0)
+/// Bump a counter on a `WorkerState`. Same gate as `CITOR_COUNTERS_INC`.
+#define CITOR_WORKER_COUNTERS_INC(ws, member)                                  \
+  do {                                                                         \
+    (ws).member.fetch_add(1, std::memory_order_relaxed);                       \
+  } while (0)
 #else
 /// Empty stub used when `CITOR_ENABLE_POOL_COUNTERS` is undefined; the
 /// member is zero-sized and every increment site compiles to a no-op.
@@ -4079,12 +4086,16 @@ struct PoolCounters {};
 #define CITOR_COUNTERS_INC(member)                                             \
   do {                                                                         \
   } while (0)
+#define CITOR_WORKER_COUNTERS_INC(ws, member)                                  \
+  do {                                                                         \
+  } while (0)
 #endif
 
 /// Snapshot POD returned by `ThreadPool::snapshotCounters()`. Pool-scoped
 /// fields come from `PoolCounters`; worker-scoped fields are aggregated by
 /// summing the matching field across every `WorkerState`. Each load is
-/// `relaxed` so values may not reflect a single point in time.
+/// `relaxed` so values may not reflect a single point in time. Every field
+/// is zero unless `CITOR_ENABLE_POOL_COUNTERS` is defined.
 struct PoolCountersSnapshot {
   /// Producer dispatches that reached fan-out (matches
   /// `PoolCounters::dispatches`).
@@ -5404,7 +5415,11 @@ struct WorkerState {
 
   /// Relaxed-atomic counters used for observability and tests. Each counter
   /// sits on its own line so observability traffic does not pollute another
-  /// worker's hot path.
+  /// worker's hot path. All counters below (`parks`, `wakes`, `dispatches`,
+  /// `stealAttempts`, `stealSuccesses`) are written only when
+  /// `CITOR_ENABLE_POOL_COUNTERS` is defined; otherwise they stay zero.
+  ///
+  /// Number of `FUTEX_WAIT_PRIVATE` calls made by this worker.
   alignas(kCacheLine) std::atomic<std::uint64_t> parks{0};
 
   /// Number of `FUTEX_WAKE_PRIVATE` calls observed by this worker.
@@ -6315,6 +6330,7 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
           reuse && cachedDesc != nullptr ? cachedDesc : self.mailboxDesc;
       bool coldCollapseDispatch = false;
       if (raw != nullptr) {
+        CITOR_WORKER_COUNTERS_INC(self, dispatches);
         auto *desc = static_cast<JobDescriptor *>(raw);
         auto *workerEntry = cachedWorkerEntry;
         bool coldCollapseCapable = cachedColdCollapse;
@@ -6494,16 +6510,14 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
         control.activeJob.load(std::memory_order_acquire) == nullptr) {
       return;
     }
-    self.parks.store(self.parks.load(std::memory_order_relaxed) + 1U,
-                     std::memory_order_relaxed);
+    CITOR_WORKER_COUNTERS_INC(self, parks);
 #ifdef __linux__
     (void)futexWaitPrivate(&control.futexWord, parkToken, nullptr);
 #else
     (void)futexWaitPrivate(&control.futexWord, parkToken,
                            static_cast<const void *>(nullptr));
 #endif
-    self.wakes.store(self.wakes.load(std::memory_order_relaxed) + 1U,
-                     std::memory_order_relaxed);
+    CITOR_WORKER_COUNTERS_INC(self, wakes);
     mailbox = self.mailbox.load(std::memory_order_acquire);
     // Chain-wake propagation (oneTBB private_server.cpp wake_some /
     // propagate_chain_reaction pattern). When this worker's futex_wait
@@ -7683,11 +7697,9 @@ public:
   /// approximate and not consistent across fields beyond per-counter
   /// monotonicity. Counters are cumulative for the pool's lifetime.
   ///
-  /// Pool-level fields (`dispatches`, `inlineFallbacks`, `cancellationStops`)
-  /// are zero unless `CITOR_ENABLE_POOL_COUNTERS` is defined; when off, the
-  /// dispatch hot path pays no extra atomics. Worker-aggregated fields
-  /// (`futexParks`, `futexWakes`, `stealAttempts`, `stealSuccesses`) are always
-  /// populated.
+  /// Every field is zero unless `CITOR_ENABLE_POOL_COUNTERS` is defined; when
+  /// off, no counter is written anywhere and the hot paths pay no extra
+  /// atomics.
   [[nodiscard]] detail::PoolCountersSnapshot snapshotCounters() const noexcept {
     detail::PoolCountersSnapshot s;
 #ifdef CITOR_ENABLE_POOL_COUNTERS
@@ -7696,10 +7708,6 @@ public:
         m_counters.inlineFallbacks.load(std::memory_order_relaxed);
     s.cancellationStops =
         m_counters.cancellationStops.load(std::memory_order_relaxed);
-#endif
-    // Worker-aggregated counters are always available because `WorkerState`
-    // carries them unconditionally (they fire only on park/wake/steal events,
-    // not on every dispatch).
     const std::size_t n = m_control.participants;
     for (std::size_t i = 0; i < n; ++i) {
       const auto *w = m_workers.get() + i;
@@ -7708,6 +7716,7 @@ public:
       s.stealAttempts += w->stealAttempts.load(std::memory_order_relaxed);
       s.stealSuccesses += w->stealSuccesses.load(std::memory_order_relaxed);
     }
+#endif
     return s;
   }
 
@@ -11604,7 +11613,9 @@ private:
       // random. Cheap when it
       //    fits the recursion pattern; one extra atomic load when stale.
       if (lastVictim < participants && lastVictim != slot) {
+        CITOR_WORKER_COUNTERS_INC(*(m_workers.get() + slot), stealAttempts);
         if (auto stolen = m_workerDeques[lastVictim]->steal()) {
+          CITOR_WORKER_COUNTERS_INC(*(m_workers.get() + slot), stealSuccesses);
           runOneTaskImpl<HasToken>(**stolen, slot);
           spinCount = 0;
           continue;
@@ -11619,8 +11630,10 @@ private:
       // requested.
       auto victimOut =
           static_cast<std::uint32_t>(participants); // unused if nullptr
+      CITOR_WORKER_COUNTERS_INC(*(m_workers.get() + slot), stealAttempts);
       detail::Task *stolen = trySteal(slot, state, rng, victimOut);
       if (stolen != nullptr) {
+        CITOR_WORKER_COUNTERS_INC(*(m_workers.get() + slot), stealSuccesses);
         lastVictim = victimOut;
         runOneTaskImpl<HasToken>(*stolen, slot);
         spinCount = 0;
@@ -13012,10 +13025,11 @@ private:
   /// Shared control block; cache-line aligned for false-sharing avoidance.
   detail::PoolControl m_control{};
 
-  /// Diagnostic counters incremented at the dispatch / inline-fallback /
-  /// park / wake / dynamic counter / cancellation sites. Read via
-  /// `snapshotCounters()`. Lives on its own cache line so the relaxed RMWs
-  /// never bounce with `m_control`'s contended atomics.
+  /// Pool-level diagnostic counters incremented at the dispatch /
+  /// inline-fallback / cancellation sites (per-worker counters live on
+  /// `WorkerState`). Empty unless `CITOR_ENABLE_POOL_COUNTERS` is defined.
+  /// Read via `snapshotCounters()`. Lives on its own cache line so the
+  /// relaxed RMWs never bounce with `m_control`'s contended atomics.
   detail::PoolCounters m_counters{};
 
   /// Owning pointer to the aligned worker-state block; the deleter destroys

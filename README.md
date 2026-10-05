@@ -386,7 +386,7 @@ Lifecycle points worth knowing:
 - `pool.kind()` distinguishes a user-constructed `Standalone` pool from a `PoolGroup::global()` `Arena` pool.
 - `pool.bindProducerSlot()` returns an RAII guard pinning the caller to slot 0's CPU for a hot dispatch region.
 - `pool.lowLatencyScope()` returns an RAII guard that keeps workers from parking between short bursts of dispatches.
-- `pool.snapshotCounters()` reports worker counters always; pool-level counters require `CITOR_ENABLE_POOL_COUNTERS=ON` at build time.
+- `pool.snapshotCounters()` reports counters only when built with `CITOR_ENABLE_POOL_COUNTERS=ON`; otherwise every field is zero.
 - `pool.lastDetachedException()` returns the first exception captured from a detached body. The destructor blocks on the in-flight counter; callers observe captured exceptions by calling this proactively.
 - `pool.producerCpu()`, `pool.ccdCount()`, `pool.arenaIndex()`, and the static `ThreadPool::workerIndex()` / `ThreadPool::insidePoolWorker()` / `ThreadPool::currentArenaIndexHint()` expose topology and TLS state for libraries layering on top.
 
@@ -1093,7 +1093,7 @@ void localArenaPath() {
 
 ## Diagnostics and counters
 
-`CITOR_ENABLE_POOL_COUNTERS=ON` compiles in pool-level counters (dispatches, inline fallbacks, cancellation stops). With it OFF the hot-path increments compile out. Worker-level park/wake counters are always available through `snapshotCounters()`.
+`CITOR_ENABLE_POOL_COUNTERS=ON` compiles in all counters: pool-level (dispatches, inline fallbacks, cancellation stops) and per-worker (futex parks and wakes, dispatches, forkJoin steal attempts and successes). With it OFF every increment compiles out and `snapshotCounters()` returns zeros.
 
 ```cpp
 const auto before = pool.snapshotCounters();

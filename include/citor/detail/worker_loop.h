@@ -168,6 +168,7 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
           reuse && cachedDesc != nullptr ? cachedDesc : self.mailboxDesc;
       bool coldCollapseDispatch = false;
       if (raw != nullptr) {
+        CITOR_WORKER_COUNTERS_INC(self, dispatches);
         auto *desc = static_cast<JobDescriptor *>(raw);
         auto *workerEntry = cachedWorkerEntry;
         bool coldCollapseCapable = cachedColdCollapse;
@@ -347,16 +348,14 @@ inline void workerMainLoop(WorkerState &self, PoolControl &control) noexcept {
         control.activeJob.load(std::memory_order_acquire) == nullptr) {
       return;
     }
-    self.parks.store(self.parks.load(std::memory_order_relaxed) + 1U,
-                     std::memory_order_relaxed);
+    CITOR_WORKER_COUNTERS_INC(self, parks);
 #ifdef __linux__
     (void)futexWaitPrivate(&control.futexWord, parkToken, nullptr);
 #else
     (void)futexWaitPrivate(&control.futexWord, parkToken,
                            static_cast<const void *>(nullptr));
 #endif
-    self.wakes.store(self.wakes.load(std::memory_order_relaxed) + 1U,
-                     std::memory_order_relaxed);
+    CITOR_WORKER_COUNTERS_INC(self, wakes);
     mailbox = self.mailbox.load(std::memory_order_acquire);
     // Chain-wake propagation (oneTBB private_server.cpp wake_some /
     // propagate_chain_reaction pattern). When this worker's futex_wait
