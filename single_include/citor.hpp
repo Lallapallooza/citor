@@ -7700,6 +7700,8 @@ public:
   /// Every field is zero unless `CITOR_ENABLE_POOL_COUNTERS` is defined; when
   /// off, no counter is written anywhere and the hot paths pay no extra
   /// atomics.
+  // Reads instance state when pool counters are enabled.
+  // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
   [[nodiscard]] detail::PoolCountersSnapshot snapshotCounters() const noexcept {
     detail::PoolCountersSnapshot s;
 #ifdef CITOR_ENABLE_POOL_COUNTERS
