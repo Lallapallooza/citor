@@ -2887,7 +2887,7 @@ private:
     /// element count is `capacity` and is allocated by `allocateArray` via a
     /// single oversized `operator new` call.
     /// NOLINTNEXTLINE(modernize-avoid-c-arrays)
-    std::atomic<T> slots[1];
+    std::atomic<T> cells[1];
 
     /// Store |v| at logical index |i| (mod capacity).
     ///
@@ -2900,7 +2900,7 @@ private:
     /// ThreadSanitizer model the cross-thread happens-before edge directly
     /// without relying on the fence-relaxed-store equivalence.
     void store(std::int64_t i, T v) noexcept {
-      slots[static_cast<std::size_t>(i) & mask].store(
+      cells[static_cast<std::size_t>(i) & mask].store(
           v, std::memory_order_release);
     }
 
@@ -2911,7 +2911,7 @@ private:
     /// descriptor the slot points to. On x86-64 the acquire load is free; on
     /// weaker memory models it is the canonical pairing for the slot.
     [[nodiscard]] T load(std::int64_t i) const noexcept {
-      return slots[static_cast<std::size_t>(i) & mask].load(
+      return cells[static_cast<std::size_t>(i) & mask].load(
           std::memory_order_acquire);
     }
   };
@@ -2919,7 +2919,7 @@ private:
   /// Allocate a fresh `Array` with the requested power-of-two |cap|. Payload
   /// slots are default-initialized to `T{}`.
   static Array *allocateArray(std::size_t cap) {
-    const std::size_t headerBytes = offsetof(Array, slots);
+    const std::size_t headerBytes = offsetof(Array, cells);
     const std::size_t totalBytes = headerBytes + (sizeof(std::atomic<T>) * cap);
     void *raw = ::operator new(totalBytes, std::align_val_t{kCacheLine});
     auto *arr = static_cast<Array *>(raw);
@@ -2927,7 +2927,7 @@ private:
     arr->mask = cap - 1;
     arr->next = nullptr;
     for (std::size_t i = 0; i < cap; ++i) {
-      ::new (static_cast<void *>(arr->slots + i)) std::atomic<T>(T{});
+      ::new (static_cast<void *>(arr->cells + i)) std::atomic<T>(T{});
     }
     return arr;
   }
@@ -2938,7 +2938,7 @@ private:
       return;
     }
     for (std::size_t i = 0; i < arr->capacity; ++i) {
-      arr->slots[i].~atomic();
+      arr->cells[i].~atomic();
     }
     ::operator delete(static_cast<void *>(arr), std::align_val_t{kCacheLine});
   }

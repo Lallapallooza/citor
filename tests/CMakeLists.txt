@@ -78,6 +78,7 @@ set(_citor_tests
     pool_group_reentrancy_test
     pool_group_topology_test
     priority_queue_test
+    qt_keyword_macros_test
     regression_auto_pin_test
     regression_back_to_back_dispatch_test
     regression_cold_collapse_desc_lifetime_test
