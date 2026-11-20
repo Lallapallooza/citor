@@ -7,6 +7,9 @@
 #define Q_SLOTS
 #define Q_SIGNALS public
 #define Q_EMIT
+// Qt's definition: `variable` is a declaration such as `auto x`, which cannot
+// be parenthesized.
+// NOLINTNEXTLINE(bugprone-macro-parentheses)
 #define Q_FOREACH(variable, container) for (variable : container)
 #define slots Q_SLOTS
 #define signals Q_SIGNALS
