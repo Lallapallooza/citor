@@ -6746,6 +6746,80 @@ private:
   mutable std::uintptr_t m_autoPinSaved = 0U;
 #endif
 
+  /// Lifetime handle on a pool, shared with every producer thread that left
+  /// cold-stamped workers on it. The pool clears `pool` under `mutex` when its
+  /// destructor starts, so a holder that reads a non-null `pool` under the
+  /// lock can call into the pool until it releases the lock.
+  struct ColdStampOwner {
+    /// Held by the pool's destructor while it clears `pool`, and by a
+    /// producer thread for the whole drain.
+    std::mutex mutex;
+    /// Pool whose cold-stamped workers may still read a producer's
+    /// descriptor; null once the pool is being destroyed.
+    ThreadPool *pool = nullptr;
+  };
+  /// Names the pool whose cold-stamped workers may still read the calling
+  /// thread's `parallelFor` descriptor. The destructor drains that pool at
+  /// thread exit, before the descriptor's storage is released.
+  struct ColdStampExitGuard {
+    /// Null when no worker can still read the descriptor.
+    std::shared_ptr<ColdStampOwner> owner;
+
+    ColdStampExitGuard() = default;
+    ColdStampExitGuard(const ColdStampExitGuard &) = delete;
+    ColdStampExitGuard &operator=(const ColdStampExitGuard &) = delete;
+    ColdStampExitGuard(ColdStampExitGuard &&) = delete;
+    ColdStampExitGuard &operator=(ColdStampExitGuard &&) = delete;
+    ~ColdStampExitGuard() { drainPendingColdStamps(*this); }
+  };
+  /// Returns the calling thread's cold-stamp record. Touched only on cold
+  /// paths; the per-dispatch check reads `coldStampPendingTls` instead.
+  static ColdStampExitGuard &coldStampGuardTls() noexcept {
+    static thread_local ColdStampExitGuard s_guard;
+    return s_guard;
+  }
+  /// True while the calling thread's `ColdStampExitGuard` names a pool. A
+  /// plain `bool` so the per-dispatch read pays no lazy-initialization check.
+  static bool &coldStampPendingTls() noexcept {
+    static thread_local bool s_pending = false;
+    return s_pending;
+  }
+
+  /// Waits until every worker recorded in |guard| has acknowledged, after
+  /// which the calling thread may rewrite or release its descriptor.
+  [[gnu::cold, gnu::noinline]] static void
+  drainPendingColdStamps(ColdStampExitGuard &guard) noexcept {
+    // Move the record out first: if the pool is gone this is the last
+    // reference, and the mutex must outlive the lock below.
+    const std::shared_ptr<ColdStampOwner> owner = std::move(guard.owner);
+    coldStampPendingTls() = false;
+    if (owner) {
+      const std::scoped_lock<std::mutex> lock(owner->mutex);
+      if (owner->pool != nullptr) {
+        owner->pool->drainColdStampedAcks();
+      }
+    }
+  }
+
+  /// Records that a worker of this pool, cold-stamped by the calling thread,
+  /// may read that thread's descriptor until it acknowledges. A record for a
+  /// different pool is drained first so it is never dropped.
+  [[gnu::cold, gnu::noinline]] void noteColdStampForThread() const noexcept {
+    auto &guard = coldStampGuardTls();
+    if (guard.owner != m_coldStampOwner) {
+      drainPendingColdStamps(guard);
+      guard.owner = m_coldStampOwner;
+    }
+    coldStampPendingTls() = true;
+  }
+
+  /// Returns a lifetime handle naming |pool|. Throws `std::bad_alloc`.
+  static std::shared_ptr<ColdStampOwner> makeColdStampOwner(ThreadPool *pool) {
+    auto owner = std::make_shared<ColdStampOwner>();
+    owner->pool = pool;
+    return owner;
+  }
+
   /// First-call binder: detect whether the producer is already pinned
   /// (single-CPU mask) and leave it alone if so; otherwise save the current
   /// mask and pin to slot 0's reserved CPU. Idempotent per (thread, pool) via
@@ -7700,6 +7774,13 @@ public:
   // synchronous-worker shutdown path runs only after the detached counter
   // reaches zero.
   ~ThreadPool() {
+    {
+      // Producer threads that still hold this pool for a cold-stamp drain
+      // skip it from here on; joining the workers below ends every read of
+      // their descriptors.
+      const std::scoped_lock<std::mutex> lock(m_coldStampOwner->mutex);
+      m_coldStampOwner->pool = nullptr;
+    }
     waitForDetachedDrain();
     shutdownAndJoin();
     autoPinRestoreIfOurs();
@@ -7961,10 +8042,14 @@ public:
     auto *fnAddr =
         const_cast<void *>(static_cast<const void *>(std::addressof(fn)));
 
-    // Acquire-load the per-worker mailboxes for any cold-stamped slot from a
-    // prior dispatch; the worker's ack fetch_or happens-before the desc
-    // writes below.
-    drainColdStampedAcks();
+    // A worker this thread cold-stamped on a prior dispatch, on any pool, may
+    // still read `desc`. Drain its ack first: the worker's ack fetch_or
+    // happens-before the desc writes below. Stamps other threads left on this
+    // pool reference their own descriptors; the publish path drains those
+    // before overwriting a mailbox.
+    if (coldStampPendingTls()) [[unlikely]] {
+      drainPendingColdStamps(coldStampGuardTls());
+    }
 
     // Piggyback same-command reuse detection on the existing write-elision
     // guards: each guard already compares; if every guard takes the "no-write"
@@ -12844,6 +12929,7 @@ private:
             if (stamped && !reuseSafe) {
               m_coldStampedMask.fetch_or(1ULL << bit,
                                          std::memory_order_relaxed);
+              noteColdStampForThread();
             }
             tightDone = true;
           }
@@ -13276,11 +13362,15 @@ private:
   std::atomic<const detail::JobDescriptor *> m_lastPublishedDesc{nullptr};
 
   /// Bitmask of worker slots the producer self-stamped on a prior
-  /// !reuseSafe cold-collapse. Drained at next-dispatch entry via
-  /// `drainColdStampedAcks` before the producer writes desc fields. Atomic
-  /// so the drain can run outside `m_dispatchMutex`; `fetch_or` on set,
-  /// `fetch_and` on clear so a concurrent stamp cannot be lost.
+  /// !reuseSafe cold-collapse. Drained by `drainColdStampedAcks` before the
+  /// stamping thread next writes its descriptor or exits, and before the next
+  /// publish overwrites a mailbox. Atomic so the drain can run outside
+  /// `m_dispatchMutex`; `fetch_or` on set, `fetch_and` on clear so a
+  /// concurrent stamp cannot be lost.
   std::atomic<std::uint64_t> m_coldStampedMask{0};
+
+  /// Shared with producer threads that cold-stamped this pool's workers.
+  std::shared_ptr<ColdStampOwner> m_coldStampOwner = makeColdStampOwner(this);
 
   /// Number of `Priority::Latency` callers currently waiting on the
   /// dispatch gate. Throughput and Background callers spin on this until
