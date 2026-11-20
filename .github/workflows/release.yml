@@ -32,6 +32,22 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Release only the commit this CI run tested. `checkout` takes the tip
+      # of main, which is newer than the tested commit when pushes land close
+      # together; that newer commit's own CI run releases it instead.
+      - name: Check the tested commit is the tip of main
+        id: tip
+        env:
+          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          tip=$(git rev-parse HEAD)
+          if [ "$TESTED_SHA" = "$tip" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "main moved past the tested commit ($TESTED_SHA -> $tip); skipping release"
+            echo "current=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -45,6 +61,7 @@ jobs:
 
       - name: Bump version
         id: bump
+        if: steps.tip.outputs.current == 'true'
         run: |
           set -o pipefail
           # commitizen exit codes worth distinguishing:
