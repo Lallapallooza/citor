@@ -6679,32 +6679,71 @@ private:
     return s_state;
   }
 
+  /// Liveness record for one producer thread, shared by that thread and every
+  /// pool that pinned it. The thread clears `alive` under `mutex` as it exits,
+  /// so a pool that reads `alive == true` under the same lock knows the thread
+  /// handle stays valid until it releases the lock.
+  struct ProducerLiveness {
+    /// Held by the exiting thread while it clears `alive`, and by a pool for
+    /// the whole cross-thread restore.
+    std::mutex mutex;
+    /// False once the producer thread has started exiting.
+    bool alive = true;
+#ifdef __linux__
+    /// Producer's handle; valid only while `alive` is true.
+    pthread_t thread = pthread_self();
+#elif defined(_WIN32)
+    /// Producer's thread id; names the producer only while `alive` is true.
+    std::uint32_t threadId = static_cast<std::uint32_t>(::GetCurrentThreadId());
+#endif
+  };
+  /// Marks the calling thread's `ProducerLiveness` dead at thread exit. Kept
+  /// apart from `AutoPinState` so that slot stays trivially destructible and
+  /// the hot-path TLS read pays no lazy-initialization check.
+  struct ProducerExitGuard {
+    /// Created on the thread's first pin; null until then.
+    std::shared_ptr<ProducerLiveness> liveness;
+
+    ProducerExitGuard() = default;
+    ProducerExitGuard(const ProducerExitGuard &) = delete;
+    ProducerExitGuard &operator=(const ProducerExitGuard &) = delete;
+    ProducerExitGuard(ProducerExitGuard &&) = delete;
+    ProducerExitGuard &operator=(ProducerExitGuard &&) = delete;
+    ~ProducerExitGuard() {
+      if (liveness) {
+        const std::scoped_lock<std::mutex> lock(liveness->mutex);
+        liveness->alive = false;
+      }
+    }
+  };
+  /// Returns the calling thread's liveness record, creating it on first use.
+  /// Throws `std::bad_alloc` if the record cannot be allocated.
+  static std::shared_ptr<ProducerLiveness> producerLiveness() {
+    static thread_local ProducerExitGuard s_guard;
+    if (!s_guard.liveness) {
+      s_guard.liveness = std::make_shared<ProducerLiveness>();
+    }
+    return s_guard.liveness;
+  }
+
   // Pool-side mirror of the auto-pin record. The destructor uses this to
   // restore the producer's affinity when the destroyer thread is not the
   // producer (in which case the TLS path's `state.pool == this` check would
-  // fail and the producer would stay pinned past pool lifetime).
+  // fail and the producer would stay pinned past pool lifetime). Mutable
+  // because the auto-pin runs through `const` primitives.
+  //
+  /// Guards the mirror: producers on different threads can reach
+  /// `autoPinProducerOnce` on the same pool before the dispatch lock
+  /// serializes them.
+  mutable std::mutex m_autoPinMutex;
+  /// Producer this pool pinned; null while the pool owns no pin.
+  mutable std::shared_ptr<ProducerLiveness> m_autoPinProducer;
 #ifdef __linux__
-  /// True while this pool owns an active producer pin. The destructor
-  /// reads this with acquire semantics to decide whether to restore.
-  std::atomic<bool> m_autoPinActive{false};
-  /// `pthread_self()` of the producer that was auto-pinned by this pool.
-  pthread_t m_autoPinProducer{};
-  /// Producer's pre-pin affinity mask, mirrored from
-  /// `AutoPinState::saved` so the destructor can restore it from any
-  /// thread.
-  cpu_set_t m_autoPinSaved{};
+  /// Producer's pre-pin affinity mask, mirrored from `AutoPinState::saved`.
+  mutable cpu_set_t m_autoPinSaved{};
 #elif defined(_WIN32)
-  /// True while this pool owns an active producer pin. Same role as the
-  /// Linux flag; destructor reads to decide whether to restore.
-  std::atomic<bool> m_autoPinActive{false};
-  /// Producer's Windows thread id at auto-pin time. Used by the
-  /// destructor to `OpenThread(THREAD_SET_LIMITED_INFORMATION, ...)`
-  /// when restore must run from a thread other than the producer.
-  /// Zero means "no producer captured."
-  std::uint32_t m_autoPinProducerTid = 0U;
-  /// Producer's pre-pin affinity mask mirrored from `AutoPinState::saved`
-  /// so the destructor can restore from any thread.
-  std::uintptr_t m_autoPinSaved = 0U;
+  /// Producer's pre-pin affinity mask, mirrored from `AutoPinState::saved`.
+  mutable std::uintptr_t m_autoPinSaved = 0U;
 #endif
 
   /// First-call binder: detect whether the producer is already pinned
@@ -6736,6 +6775,14 @@ private:
       state.pool = static_cast<const void *>(this);
       return;
     }
+    // Fetch the liveness record before pinning: without it the pool could not
+    // undo the pin, so an allocation failure leaves the thread unpinned.
+    std::shared_ptr<ProducerLiveness> liveness;
+    try {
+      liveness = producerLiveness();
+    } catch (const std::bad_alloc &) {
+      return;
+    }
     cpu_set_t set;
     CPU_ZERO(&set);
     CPU_SET(static_cast<std::size_t>(cpuId), &set);
@@ -6750,14 +6797,10 @@ private:
       }
       state.pool = static_cast<const void *>(this);
       // Mirror the pin record on the pool so the destructor can restore
-      // even when running on a thread other than the producer. Mutable
-      // because the auto-pin runs through a `const` accessor; the
-      // destructor reads these fields under the synchronous lifetime
-      // contract (no in-flight dispatch races destruction).
-      auto *self = const_cast<ThreadPool *>(this);
-      self->m_autoPinSaved = state.saved;
-      self->m_autoPinProducer = pthread_self();
-      self->m_autoPinActive.store(true, std::memory_order_release);
+      // even when running on a thread other than the producer.
+      const std::scoped_lock<std::mutex> lock(m_autoPinMutex);
+      m_autoPinSaved = state.saved;
+      m_autoPinProducer = std::move(liveness);
     }
 #elif defined(_WIN32)
     // Windows peer of the Linux path above; same contract, different syscalls.
@@ -6785,6 +6828,13 @@ private:
       state.pool = static_cast<const void *>(this);
       return;
     }
+    std::shared_ptr<ProducerLiveness> liveness;
+    try {
+      liveness = producerLiveness();
+    } catch (const std::bad_alloc &) {
+      (void)::SetThreadAffinityMask(thisThread, prevMask);
+      return;
+    }
     // Apply our pin to slot 0's CPU.
     const DWORD_PTR newMask = static_cast<DWORD_PTR>(1) << (cpuId & 63U);
     if (::SetThreadAffinityMask(thisThread, newMask) == 0U) {
@@ -6798,11 +6848,9 @@ private:
     state.pool = static_cast<const void *>(this);
     // Mirror to pool-side so the destructor can restore even from a
     // thread other than the producer.
-    auto *self = const_cast<ThreadPool *>(this);
-    self->m_autoPinSaved = state.saved;
-    self->m_autoPinProducerTid =
-        static_cast<std::uint32_t>(::GetCurrentThreadId());
-    self->m_autoPinActive.store(true, std::memory_order_release);
+    const std::scoped_lock<std::mutex> lock(m_autoPinMutex);
+    m_autoPinSaved = state.saved;
+    m_autoPinProducer = std::move(liveness);
 #endif
   }
 
@@ -6844,45 +6892,40 @@ private:
   /// Pool-destruction restore: undoes the auto-pin recorded by
   /// `autoPinProducerOnce`. Uses the pool-side mirror (`m_autoPinProducer`,
   /// `m_autoPinSaved`) so the restore lands on the producer thread regardless
-  /// of which thread invokes the destructor. The TLS record is cleared as
-  /// well when the destroyer happens to be the producer, so a subsequent
-  /// pool ctor on the same thread sees a clean state.
+  /// of which thread invokes the destructor. A producer that has already
+  /// exited is skipped: its thread handle is no longer valid. The TLS record
+  /// is cleared as well when the destroyer happens to be the producer, so a
+  /// subsequent pool ctor on the same thread sees a clean state.
   [[gnu::cold, gnu::noinline]] void autoPinRestoreIfOurs() const noexcept {
-    // Restoration goes through the pool-side `m_autoPinProducer` /
-    // `m_autoPinSaved` mirror so it lands on the producer regardless
-    // of which thread runs the destructor. The TLS cleanup below is
-    // the only step that must check ownership: under multi-pool LIFO
-    // a later pool may have stolen the TLS tag and owns it now.
-    auto &state = autoPinTls();
-    const bool weOwnTlsTag = state.pool == static_cast<const void *>(this);
+    {
+      const std::scoped_lock<std::mutex> poolLock(m_autoPinMutex);
+      if (m_autoPinProducer) {
+        // Holding the liveness lock keeps the producer from finishing its
+        // exit, so the handle stays valid for the restore call.
+        const std::scoped_lock<std::mutex> lock(m_autoPinProducer->mutex);
+        if (m_autoPinProducer->alive) {
 #ifdef __linux__
-    if (m_autoPinActive.load(std::memory_order_acquire)) {
-      (void)pthread_setaffinity_np(m_autoPinProducer, sizeof(m_autoPinSaved),
-                                   &m_autoPinSaved);
-    }
-    if (weOwnTlsTag) {
-      state.restorePending = false;
-      state.pool = nullptr;
-    }
+          (void)pthread_setaffinity_np(m_autoPinProducer->thread,
+                                       sizeof(m_autoPinSaved), &m_autoPinSaved);
 #elif defined(_WIN32)
-    if (m_autoPinActive.load(std::memory_order_acquire) &&
-        m_autoPinProducerTid != 0U && m_autoPinSaved != 0U) {
-      // Best-effort restore via `OpenThread(THREAD_SET_LIMITED_INFORMATION)`.
-      // Windows recycles TIDs, so a missing producer skips restore
-      // rather than risk clobbering an unrelated thread.
-      HANDLE handle = ::OpenThread(THREAD_SET_LIMITED_INFORMATION, FALSE,
-                                   m_autoPinProducerTid);
-      if (handle != nullptr) {
-        (void)::SetThreadAffinityMask(handle,
-                                      static_cast<DWORD_PTR>(m_autoPinSaved));
-        ::CloseHandle(handle);
+          HANDLE handle = ::OpenThread(THREAD_SET_LIMITED_INFORMATION, FALSE,
+                                       m_autoPinProducer->threadId);
+          if (handle != nullptr) {
+            (void)::SetThreadAffinityMask(
+                handle, static_cast<DWORD_PTR>(m_autoPinSaved));
+            ::CloseHandle(handle);
+          }
+#endif
+        }
       }
     }
-    if (weOwnTlsTag) {
+    // The TLS cleanup is the only step that must check ownership: under
+    // multi-pool LIFO a later pool may have stolen the TLS tag and owns it.
+    auto &state = autoPinTls();
+    if (state.pool == static_cast<const void *>(this)) {
       state.restorePending = false;
       state.pool = nullptr;
     }
-#endif
   }
 
   /// Producer-CCD-first reorder without SMT exceptions. Standalone
